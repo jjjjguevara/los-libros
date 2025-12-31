@@ -1276,7 +1276,6 @@ export class EpubRenderer {
    * Call this when highlights are loaded or updated
    */
   setStoredHighlights(highlights: Highlight[]): void {
-    console.warn('[setStoredHighlights] Called with', highlights.length, 'highlights');
     this.storedHighlights = highlights;
     this.reanchorHighlights();
   }
@@ -1325,7 +1324,6 @@ export class EpubRenderer {
    */
   reanchorHighlights(): void {
     if (!this.overlay || !this.iframe?.contentDocument) {
-      console.warn('[reanchorHighlights] No overlay or iframe');
       return;
     }
 
@@ -1342,28 +1340,11 @@ export class EpubRenderer {
     // Get current transform offset to convert viewport coords to content-space coords
     const transformOffset = this.getCurrentTransformOffset();
 
-    const scrollContainer = doc.scrollingElement || doc.documentElement;
-    const scrollTop = scrollContainer.scrollTop;
-
-    console.warn('[reanchorHighlights] Starting:', JSON.stringify({
-      mode: this.config.mode,
-      storedHighlights: this.storedHighlights.length,
-      scrollTop,
-      scrollHeight: doc.documentElement.scrollHeight,
-      transformOffset,
-      containerHeight: containerRect.height,
-    }));
-
     const anchoredHighlights: AnchoredHighlight[] = [];
 
     for (const highlight of this.storedHighlights) {
       // Skip highlights not in currently loaded chapters
       if (!this.loadedChapters.has(highlight.spineIndex)) {
-        console.warn('[reanchorHighlights] Skipping highlight - chapter not loaded:', {
-          id: highlight.id,
-          spineIndex: highlight.spineIndex,
-          text: highlight.text?.slice(0, 30),
-        });
         continue;
       }
 
@@ -1403,18 +1384,9 @@ export class EpubRenderer {
             rects: mergedRects,
             status: result.status === 'exact' ? 'anchored' : 'fuzzy',
           });
-
-          console.warn('[reanchorHighlights] Anchored:', JSON.stringify({
-            id: highlight.id.slice(0, 8),
-            text: highlight.text?.slice(0, 20),
-            vpRects: viewportRects.map(r => ({ x: Math.round(r.x), y: Math.round(r.y), h: Math.round(r.height) })),
-            csRects: mergedRects.map(r => ({ x: Math.round(r.x), y: Math.round(r.y), h: Math.round(r.height) })),
-          }));
         }
       }
     }
-
-    console.warn('[reanchorHighlights] Total anchored:', anchoredHighlights.length);
 
     // Update overlay with re-anchored highlights
     this.overlay.setHighlights(anchoredHighlights);
@@ -1425,7 +1397,6 @@ export class EpubRenderer {
       const doc = this.iframe?.contentDocument;
       if (doc) {
         const scrollContainer = doc.scrollingElement || doc.documentElement;
-        console.warn('[reanchorHighlights] Scroll sync:', { scrollTop: scrollContainer.scrollTop });
         this.overlay.updateScrollPosition(scrollContainer.scrollTop);
       }
     }

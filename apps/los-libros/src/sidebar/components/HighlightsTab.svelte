@@ -107,10 +107,7 @@
                 style={getHighlightColorStyle(highlight.color)}
                 role="button"
                 tabindex="0"
-                on:click={() => {
-                  console.log('[HighlightsTab] Click on highlight, dispatching navigate:', highlight.cfi, highlight.text?.slice(0, 30));
-                  dispatch('navigate', { cfi: highlight.cfi, text: highlight.text });
-                }}
+                on:click={() => dispatch('navigate', { cfi: highlight.cfi, text: highlight.text })}
                 on:keydown={(e) => e.key === 'Enter' && dispatch('navigate', { cfi: highlight.cfi, text: highlight.text })}
               >
                 <div class="item-text">"{truncateText(highlight.text, 120)}"</div>

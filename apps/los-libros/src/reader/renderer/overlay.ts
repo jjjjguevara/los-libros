@@ -184,7 +184,6 @@ export class HighlightOverlay {
     // Stop animation sync if active - scroll mode uses direct updates
     this.stopAnimationSync();
     this.contentContainer = null; // Prevent syncTransform from running
-    console.warn('[HighlightOverlay] updateScrollPosition:', scrollTop);
     this.highlightGroup.style.transform = `translateY(-${scrollTop}px)`;
   }
 
@@ -211,7 +210,6 @@ export class HighlightOverlay {
    * When AnchoredHighlight is provided, rects are already in viewport coordinates
    */
   setHighlights(highlights: OverlayHighlight[]): void {
-    console.warn('[HighlightOverlay] setHighlights:', highlights.length, 'highlights');
     // Clear existing highlights
     this.clearHighlights();
 

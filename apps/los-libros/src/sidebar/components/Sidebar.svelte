@@ -101,31 +101,24 @@
   }
 
   function navigateToCfi(cfi: string, text?: string) {
-    console.log('[Sidebar] navigateToCfi called with:', { cfi, text: text?.slice(0, 40) });
     if (!activeBookPath) {
-      console.log('[Sidebar] No activeBookPath, aborting');
       return;
     }
     // Find the reader view and navigate
     const leaves = plugin.app.workspace.getLeavesOfType('los-libros-reader');
-    console.log('[Sidebar] Found reader leaves:', leaves.length);
     for (const leaf of leaves) {
       const view = leaf.view as any;
       if (view.bookPath === activeBookPath || view.getState?.()?.bookPath === activeBookPath) {
-        console.log('[Sidebar] Found matching view, navigating...');
         // Use text-based navigation for better accuracy
         if (text) {
-          console.log('[Sidebar] Using text-based navigation');
           view.navigateToHighlight?.(cfi, text);
         } else {
-          console.log('[Sidebar] Using CFI-only navigation');
           view.navigateToCfi?.(cfi);
         }
         plugin.app.workspace.revealLeaf(leaf);
         return;
       }
     }
-    console.log('[Sidebar] No matching view found');
   }
 
   function deleteHighlight(id: string) {

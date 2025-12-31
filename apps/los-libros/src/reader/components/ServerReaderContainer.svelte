@@ -110,28 +110,12 @@
     const searchText = text.slice(0, 50);
     const mode = renderer?.getMode?.() || 'paginated';
 
-    console.warn('[navigateToHighlight] Start:', JSON.stringify({
-      hasRenderer: !!renderer,
-      hasIframe: !!iframe,
-      hasDoc: !!doc,
-      mode,
-    }));
-
     // Scroll mode: Use chapter-scoped search to avoid false matches
     if (mode === 'scrolled') {
       if (doc && iframe) {
         // Get the chapter element from CFI to scope the search
         const spineIndex = getSpineIndexFromCfi(cfi);
         const chapterElement = spineIndex !== null ? getChapterElement(doc, spineIndex) : null;
-
-        console.warn('[navigateToHighlight] Scroll mode lookup:', JSON.stringify({
-          spineIndex,
-          chapterExists: !!chapterElement,
-          chapterLoaded: chapterElement ? !chapterElement.classList.contains('epub-chapter-placeholder') : false,
-          chapterTextLen: chapterElement?.textContent?.length || 0,
-          chapterHasText: chapterElement?.textContent?.includes(searchText) || false,
-          searchText: searchText.slice(0, 30),
-        }));
 
         // Search within the specific chapter only
         const range = findTextRange(doc, searchText, chapterElement);
@@ -140,28 +124,16 @@
           const viewportHeight = iframe.clientHeight || 600;
           const MARGIN = 50;
 
-          console.warn('[navigateToHighlight] Text found:', JSON.stringify({
-            rectTop: Math.round(rect.top),
-            rectBottom: Math.round(rect.bottom),
-            viewportHeight,
-            isVisible: rect.top >= -MARGIN && rect.bottom <= viewportHeight + MARGIN,
-          }));
-
           // Check vertical visibility for scroll mode
           if (rect.top >= -MARGIN && rect.bottom <= viewportHeight + MARGIN) {
-            console.warn('[navigateToHighlight] Scroll mode: text already visible in chapter');
-            return;
+            return; // Already visible
           }
           // Text found but not visible - scroll directly to it
-          console.warn('[navigateToHighlight] Scroll mode: scrolling to text in chapter');
           navigateToTextRangeScrolled(range, doc);
           return;
-        } else {
-          console.warn('[navigateToHighlight] Text NOT found in chapter');
         }
       }
       // Text not found in chapter - chapter might not be loaded, use CFI navigation
-      console.warn('[navigateToHighlight] Scroll mode: text not found, using CFI navigation');
       renderer?.display({ type: 'cfi', cfi });
       waitForTextAndScrollNavigate(text, 0, cfi);
       return;
@@ -175,8 +147,7 @@
         const viewportWidth = iframe.clientWidth || 800;
         const MARGIN = 50;
         if (rect.left >= -MARGIN && rect.right <= viewportWidth + MARGIN) {
-          console.warn('[navigateToHighlight] Text already visible');
-          return;
+          return; // Already visible
         }
         // Navigate in paginated mode
         navigateToTextRange(range, iframe);
@@ -185,7 +156,6 @@
     }
 
     // Text not found - use CFI to load the correct chapter
-    console.warn('[navigateToHighlight] Text not found, using CFI');
     renderer?.display({ type: 'cfi', cfi });
     waitForTextAndNavigate(text, 0);
   }
@@ -205,7 +175,6 @@
       : range.commonAncestorContainer.parentElement?.closest('.epub-chapter');
 
     if (!chapterElement) {
-      console.warn('[navigateToTextRangeScrolled] Could not find chapter element');
       return;
     }
 
@@ -217,7 +186,6 @@
 
       // Check if already in view
       if (rect.top >= MARGIN && rect.bottom <= viewportHeight - MARGIN) {
-        console.warn('[navigateToTextRangeScrolled] Target now visible, done', { attempt });
         renderer?.reanchorHighlights?.();
         return;
       }
@@ -225,14 +193,6 @@
       // Calculate document-relative position
       const documentTop = rect.top + currentScrollTop;
       const targetScrollTop = documentTop - (viewportHeight / 2) + (rect.height / 2);
-
-      console.warn('[navigateToTextRangeScrolled]', JSON.stringify({
-        attempt,
-        currentScrollTop: Math.round(currentScrollTop),
-        rectTop: Math.round(rect.top),
-        targetScrollTop: Math.round(targetScrollTop),
-        scrollHeight: scrollContainer.scrollHeight,
-      }));
 
       // Use instant scroll for retries, smooth for first attempt
       scrollContainer.scrollTo({
@@ -253,7 +213,6 @@
 
     // Start the scroll sequence
     scrollToTarget(0);
-    console.warn('[navigateToHighlight] Started scroll sequence (scroll mode)');
   }
 
   /**
