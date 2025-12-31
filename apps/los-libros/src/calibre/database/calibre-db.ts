@@ -1,0 +1,653 @@
+/**
+ * Calibre Database Reader/Writer
+ *
+ * Uses sql.js to read Calibre's metadata.db SQLite database.
+ * In Electron/Obsidian, we load the WASM file and read the database.
+ *
+ * IMPORTANT: Calibre expects exclusive access to metadata.db.
+ * We should only write when Calibre is not running, or use
+ * the Calibre Content Server API for safer writes.
+ */
+
+import initSqlJs, { Database, SqlJsStatic } from 'sql.js';
+import * as path from 'path';
+import * as fs from 'fs';
+import type {
+  CalibreBook,
+  CalibreAuthor,
+  CalibreSeries,
+  CalibreTag,
+  CalibrePublisher,
+  CalibreLanguage,
+  CalibreFormat,
+  CalibreIdentifier,
+  CalibreBookFull,
+} from '../calibre-types';
+import * as queries from './queries';
+
+/**
+ * CalibreDatabase - Read/write interface to Calibre's metadata.db
+ */
+export class CalibreDatabase {
+  private SQL: SqlJsStatic | null = null;
+  private db: Database | null = null;
+  private libraryPath: string;
+  private readonly: boolean;
+
+  constructor(libraryPath: string, readonly = true) {
+    this.libraryPath = libraryPath;
+    this.readonly = readonly;
+  }
+
+  /**
+   * Initialize sql.js and open the database
+   */
+  async open(): Promise<void> {
+    if (this.db) {
+      return; // Already open
+    }
+
+    // Initialize sql.js with the WASM file
+    // In Obsidian/Electron, we need to load from node_modules or bundled
+    this.SQL = await initSqlJs({
+      // Locate the WASM file - in Obsidian plugin, this may need adjustment
+      locateFile: (file: string) => {
+        // Try to find sql-wasm.wasm in common locations
+        const possiblePaths = [
+          // Node modules path
+          path.join(__dirname, '..', 'node_modules', 'sql.js', 'dist', file),
+          // Bundled with plugin
+          path.join(__dirname, file),
+          // CDN fallback
+          `https://sql.js.org/dist/${file}`,
+        ];
+
+        // For Electron/Node.js, try local paths first
+        for (const p of possiblePaths.slice(0, -1)) {
+          try {
+            if (fs.existsSync(p)) {
+              return p;
+            }
+          } catch {
+            // Path doesn't exist or not accessible
+          }
+        }
+
+        // Fall back to CDN
+        return possiblePaths[possiblePaths.length - 1];
+      },
+    });
+
+    // Read the database file
+    const dbPath = path.join(this.libraryPath, 'metadata.db');
+
+    if (!fs.existsSync(dbPath)) {
+      throw new Error(`Calibre database not found: ${dbPath}`);
+    }
+
+    const buffer = fs.readFileSync(dbPath);
+    // Convert Buffer to Uint8Array for sql.js compatibility
+    const uint8Array = new Uint8Array(
+      buffer.buffer,
+      buffer.byteOffset,
+      buffer.byteLength
+    );
+    this.db = new this.SQL.Database(uint8Array);
+  }
+
+  /**
+   * Close the database
+   */
+  close(): void {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+  }
+
+  /**
+   * Check if database is open
+   */
+  isOpen(): boolean {
+    return this.db !== null;
+  }
+
+  /**
+   * Save changes back to the database file
+   * WARNING: Only call when Calibre is not running!
+   */
+  save(): void {
+    if (!this.db || this.readonly) {
+      throw new Error('Cannot save: database is readonly or not open');
+    }
+
+    const data = this.db.export();
+    const dbPath = path.join(this.libraryPath, 'metadata.db');
+
+    // Create a backup first
+    const backupPath = dbPath + '.backup';
+    fs.copyFileSync(dbPath, backupPath);
+
+    // Write the new database - use Uint8Array directly
+    fs.writeFileSync(dbPath, data);
+  }
+
+  // ===========================================================================
+  // Book Read Operations
+  // ===========================================================================
+
+  /**
+   * Get all books (basic metadata only)
+   */
+  getAllBooks(): CalibreBook[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_ALL_BOOKS);
+    const books: CalibreBook[] = [];
+
+    while (stmt.step()) {
+      books.push(this.rowToBook(stmt.getAsObject() as Record<string, unknown>));
+    }
+    stmt.free();
+
+    return books;
+  }
+
+  /**
+   * Get a book by ID with all related metadata
+   */
+  getBookById(bookId: number): CalibreBookFull | null {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_BOOK_BY_ID);
+    stmt.bind([bookId]);
+
+    if (!stmt.step()) {
+      stmt.free();
+      return null;
+    }
+
+    const book = this.rowToBook(stmt.getAsObject() as Record<string, unknown>);
+    stmt.free();
+
+    return this.hydrateBook(book);
+  }
+
+  /**
+   * Get a book by UUID with all related metadata
+   */
+  getBookByUuid(uuid: string): CalibreBookFull | null {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_BOOK_BY_UUID);
+    stmt.bind([uuid]);
+
+    if (!stmt.step()) {
+      stmt.free();
+      return null;
+    }
+
+    const book = this.rowToBook(stmt.getAsObject() as Record<string, unknown>);
+    stmt.free();
+
+    return this.hydrateBook(book);
+  }
+
+  /**
+   * Get all books with full metadata (hydrated)
+   */
+  getAllBooksFull(): CalibreBookFull[] {
+    const books = this.getAllBooks();
+    return books.map((book) => this.hydrateBook(book));
+  }
+
+  /**
+   * Search books by title
+   */
+  searchByTitle(query: string): CalibreBookFull[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.SEARCH_BOOKS_BY_TITLE);
+    const pattern = `%${query}%`;
+    stmt.bind([pattern, pattern]);
+
+    const books: CalibreBook[] = [];
+    while (stmt.step()) {
+      books.push(this.rowToBook(stmt.getAsObject() as Record<string, unknown>));
+    }
+    stmt.free();
+
+    return books.map((book) => this.hydrateBook(book));
+  }
+
+  // ===========================================================================
+  // Relationship Queries
+  // ===========================================================================
+
+  /**
+   * Get authors for a book
+   */
+  getAuthorsForBook(bookId: number): CalibreAuthor[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_AUTHORS_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    const authors: CalibreAuthor[] = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Record<string, unknown>;
+      authors.push({
+        id: row.id as number,
+        name: row.name as string,
+        sort: row.sort as string,
+        link: (row.link as string) || '',
+      });
+    }
+    stmt.free();
+
+    return authors;
+  }
+
+  /**
+   * Get series for a book
+   */
+  getSeriesForBook(bookId: number): CalibreSeries | null {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_SERIES_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    if (!stmt.step()) {
+      stmt.free();
+      return null;
+    }
+
+    const row = stmt.getAsObject() as Record<string, unknown>;
+    stmt.free();
+
+    return {
+      id: row.id as number,
+      name: row.name as string,
+      sort: row.sort as string,
+    };
+  }
+
+  /**
+   * Get tags for a book
+   */
+  getTagsForBook(bookId: number): CalibreTag[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_TAGS_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    const tags: CalibreTag[] = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Record<string, unknown>;
+      tags.push({
+        id: row.id as number,
+        name: row.name as string,
+      });
+    }
+    stmt.free();
+
+    return tags;
+  }
+
+  /**
+   * Get publisher for a book
+   */
+  getPublisherForBook(bookId: number): CalibrePublisher | null {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_PUBLISHER_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    if (!stmt.step()) {
+      stmt.free();
+      return null;
+    }
+
+    const row = stmt.getAsObject() as Record<string, unknown>;
+    stmt.free();
+
+    return {
+      id: row.id as number,
+      name: row.name as string,
+      sort: (row.sort as string) || (row.name as string),
+    };
+  }
+
+  /**
+   * Get languages for a book
+   */
+  getLanguagesForBook(bookId: number): CalibreLanguage[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_LANGUAGES_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    const languages: CalibreLanguage[] = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Record<string, unknown>;
+      languages.push({
+        id: row.id as number,
+        lang_code: row.lang_code as string,
+      });
+    }
+    stmt.free();
+
+    return languages;
+  }
+
+  /**
+   * Get formats for a book
+   */
+  getFormatsForBook(bookId: number): CalibreFormat[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_FORMATS_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    const formats: CalibreFormat[] = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Record<string, unknown>;
+      formats.push({
+        id: row.id as number,
+        book: row.book as number,
+        format: row.format as string,
+        uncompressed_size: row.uncompressed_size as number,
+        name: row.name as string,
+      });
+    }
+    stmt.free();
+
+    return formats;
+  }
+
+  /**
+   * Get identifiers for a book
+   */
+  getIdentifiersForBook(bookId: number): Record<string, string> {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_IDENTIFIERS_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    const identifiers: Record<string, string> = {};
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Record<string, unknown>;
+      identifiers[row.type as string] = row.val as string;
+    }
+    stmt.free();
+
+    return identifiers;
+  }
+
+  /**
+   * Get rating for a book (0-5 scale)
+   */
+  getRatingForBook(bookId: number): number | null {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_RATING_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    if (!stmt.step()) {
+      stmt.free();
+      return null;
+    }
+
+    const row = stmt.getAsObject() as Record<string, unknown>;
+    stmt.free();
+
+    return row.rating as number;
+  }
+
+  /**
+   * Get description/comment for a book
+   */
+  getDescriptionForBook(bookId: number): string | null {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_COMMENT_FOR_BOOK);
+    stmt.bind([bookId]);
+
+    if (!stmt.step()) {
+      stmt.free();
+      return null;
+    }
+
+    const row = stmt.getAsObject() as Record<string, unknown>;
+    stmt.free();
+
+    return row.text as string;
+  }
+
+  // ===========================================================================
+  // Index Queries
+  // ===========================================================================
+
+  /**
+   * Get all unique authors
+   */
+  getAllAuthors(): CalibreAuthor[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_ALL_AUTHORS);
+    const authors: CalibreAuthor[] = [];
+
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Record<string, unknown>;
+      authors.push({
+        id: row.id as number,
+        name: row.name as string,
+        sort: row.sort as string,
+        link: (row.link as string) || '',
+      });
+    }
+    stmt.free();
+
+    return authors;
+  }
+
+  /**
+   * Get all unique series
+   */
+  getAllSeries(): CalibreSeries[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_ALL_SERIES);
+    const series: CalibreSeries[] = [];
+
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Record<string, unknown>;
+      series.push({
+        id: row.id as number,
+        name: row.name as string,
+        sort: row.sort as string,
+      });
+    }
+    stmt.free();
+
+    return series;
+  }
+
+  /**
+   * Get all unique tags
+   */
+  getAllTags(): CalibreTag[] {
+    this.ensureOpen();
+
+    const stmt = this.db!.prepare(queries.GET_ALL_TAGS);
+    const tags: CalibreTag[] = [];
+
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Record<string, unknown>;
+      tags.push({
+        id: row.id as number,
+        name: row.name as string,
+      });
+    }
+    stmt.free();
+
+    return tags;
+  }
+
+  // ===========================================================================
+  // Write Operations (for bidirectional sync)
+  // ===========================================================================
+
+  /**
+   * Update rating for a book
+   */
+  setRating(bookId: number, rating: number): void {
+    if (this.readonly) {
+      throw new Error('Database is readonly');
+    }
+    this.ensureOpen();
+
+    // Calibre stores ratings as 0-10 (2 per star)
+    const calibreRating = Math.round(rating * 2);
+
+    // First, upsert the rating value
+    this.db!.run(queries.UPSERT_RATING, [calibreRating]);
+
+    // Then link it to the book
+    this.db!.run(queries.LINK_BOOK_RATING, [bookId, calibreRating]);
+
+    // Update last_modified
+    this.updateBookModified(bookId);
+  }
+
+  /**
+   * Add a tag to a book
+   */
+  addTag(bookId: number, tagName: string): void {
+    if (this.readonly) {
+      throw new Error('Database is readonly');
+    }
+    this.ensureOpen();
+
+    // Create tag if it doesn't exist
+    this.db!.run(queries.CREATE_TAG, [tagName]);
+
+    // Link to book
+    this.db!.run(queries.ADD_TAG_TO_BOOK, [bookId, tagName]);
+
+    // Update last_modified
+    this.updateBookModified(bookId);
+  }
+
+  /**
+   * Remove a tag from a book
+   */
+  removeTag(bookId: number, tagName: string): void {
+    if (this.readonly) {
+      throw new Error('Database is readonly');
+    }
+    this.ensureOpen();
+
+    this.db!.run(queries.REMOVE_TAG_FROM_BOOK, [bookId, tagName]);
+
+    // Update last_modified
+    this.updateBookModified(bookId);
+  }
+
+  /**
+   * Update book's last_modified timestamp
+   */
+  private updateBookModified(bookId: number): void {
+    const now = new Date().toISOString();
+    this.db!.run(queries.UPDATE_BOOK_MODIFIED, [now, bookId]);
+  }
+
+  // ===========================================================================
+  // Helper Methods
+  // ===========================================================================
+
+  /**
+   * Ensure database is open
+   */
+  private ensureOpen(): void {
+    if (!this.db) {
+      throw new Error('Database is not open. Call open() first.');
+    }
+  }
+
+  /**
+   * Convert a database row to a CalibreBook object
+   */
+  private rowToBook(row: Record<string, unknown>): CalibreBook {
+    return {
+      id: row.id as number,
+      title: row.title as string,
+      sort: row.sort as string,
+      timestamp: row.timestamp as string,
+      pubdate: (row.pubdate as string) || null,
+      series_index: (row.series_index as number) || 1,
+      author_sort: row.author_sort as string,
+      isbn: (row.isbn as string) || null,
+      lccn: (row.lccn as string) || null,
+      path: row.path as string,
+      flags: (row.flags as number) || 0,
+      uuid: row.uuid as string,
+      has_cover: Boolean(row.has_cover),
+      last_modified: row.last_modified as string,
+    };
+  }
+
+  /**
+   * Hydrate a CalibreBook with all related data
+   */
+  private hydrateBook(book: CalibreBook): CalibreBookFull {
+    const authors = this.getAuthorsForBook(book.id);
+    const series = this.getSeriesForBook(book.id);
+    const tags = this.getTagsForBook(book.id);
+    const publisher = this.getPublisherForBook(book.id);
+    const languages = this.getLanguagesForBook(book.id);
+    const formats = this.getFormatsForBook(book.id);
+    const identifiers = this.getIdentifiersForBook(book.id);
+    const rating = this.getRatingForBook(book.id);
+    const description = this.getDescriptionForBook(book.id);
+
+    // Build full paths
+    const calibrePath = path.join(this.libraryPath, book.path);
+    const coverPath = book.has_cover
+      ? path.join(calibrePath, 'cover.jpg')
+      : null;
+
+    // Find EPUB path
+    const epubFormat = formats.find((f) => f.format === 'EPUB');
+    const epubPath = epubFormat
+      ? path.join(calibrePath, `${epubFormat.name}.epub`)
+      : null;
+
+    return {
+      id: book.id,
+      uuid: book.uuid,
+      title: book.title,
+      titleSort: book.sort,
+      path: book.path,
+      hasCover: book.has_cover,
+      addedAt: new Date(book.timestamp),
+      lastModified: new Date(book.last_modified),
+
+      authors,
+      series,
+      seriesIndex: series ? book.series_index : null,
+      tags,
+      publisher,
+      languages,
+      formats,
+      identifiers,
+      rating,
+      description,
+      pubdate: book.pubdate ? new Date(book.pubdate) : null,
+
+      coverPath,
+      epubPath,
+      calibrePath,
+    };
+  }
+}

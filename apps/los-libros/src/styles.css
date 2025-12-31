@@ -1,0 +1,775 @@
+/* Los Libros - Main Styles */
+
+/* ============================================
+   LOS LIBROS CSS VARIABLES
+   Override these in Obsidian CSS snippets
+   for hotswappable theming customization.
+   ============================================ */
+
+:root {
+  /* Reader Chrome */
+  --los-libros-toolbar-bg: var(--background-primary);
+  --los-libros-toolbar-border: var(--background-modifier-border);
+  --los-libros-sidebar-bg: var(--background-secondary);
+  --los-libros-sidebar-width: 300px;
+
+  /* Progress Bar */
+  --los-libros-progress-height: 4px;
+  --los-libros-progress-bg: var(--background-modifier-border);
+  --los-libros-progress-fill: var(--interactive-accent);
+
+  /* Highlight Colors (customizable via snippets) */
+  --los-libros-highlight-yellow: rgba(254, 243, 199, 0.6);
+  --los-libros-highlight-green: rgba(209, 250, 229, 0.6);
+  --los-libros-highlight-blue: rgba(219, 234, 254, 0.6);
+  --los-libros-highlight-pink: rgba(252, 231, 243, 0.6);
+  --los-libros-highlight-purple: rgba(237, 233, 254, 0.6);
+
+  /* Highlight Cards */
+  --los-libros-highlight-card-bg: var(--background-primary);
+  --los-libros-highlight-card-border: var(--background-modifier-border);
+  --los-libros-highlight-card-radius: var(--radius-s);
+  --los-libros-highlight-border-width: 3px;
+
+  /* Popup Styling */
+  --los-libros-popup-bg: var(--background-primary);
+  --los-libros-popup-border: var(--background-modifier-border);
+  --los-libros-popup-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --los-libros-popup-radius: 8px;
+
+  /* Quick Color Palette (Instant Highlight) */
+  --los-libros-palette-bg: var(--background-primary);
+  --los-libros-palette-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+
+  /* Reader Theme Colors (epub.js injection) */
+  --los-libros-reader-bg-light: #ffffff;
+  --los-libros-reader-text-light: #333333;
+  --los-libros-reader-bg-dark: #1e1e1e;
+  --los-libros-reader-text-dark: #e0e0e0;
+  --los-libros-reader-bg-sepia: #f4ecd8;
+  --los-libros-reader-text-sepia: #5b4636;
+  --los-libros-reader-bg-night: #000000;
+  --los-libros-reader-text-night: #ffcc66;
+  --los-libros-reader-bg-paper: #f5f5f0;
+  --los-libros-reader-text-paper: #1a1a1a;
+  --los-libros-reader-bg-forest: #1a2e1a;
+  --los-libros-reader-text-forest: #a8d8a8;
+
+  /* Book Cards */
+  --los-libros-card-hover-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --los-libros-card-radius: 8px;
+
+  /* Auto-scroll */
+  --los-libros-autoscroll-indicator-bg: var(--interactive-accent);
+  --los-libros-autoscroll-indicator-size: 8px;
+}
+
+/* Dark mode overrides */
+.theme-dark {
+  --los-libros-popup-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --los-libros-palette-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  --los-libros-card-hover-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+/* @settings
+name: Los Libros Reader
+id: los-libros
+settings:
+  - id: los-libros-highlights-heading
+    title: Highlight Colors
+    type: heading
+    level: 1
+  - id: los-libros-highlight-yellow
+    title: Yellow Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(254, 243, 199, 0.6)'
+  - id: los-libros-highlight-green
+    title: Green Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(209, 250, 229, 0.6)'
+  - id: los-libros-highlight-blue
+    title: Blue Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(219, 234, 254, 0.6)'
+  - id: los-libros-highlight-pink
+    title: Pink Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(252, 231, 243, 0.6)'
+  - id: los-libros-highlight-purple
+    title: Purple Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(237, 233, 254, 0.6)'
+
+  - id: los-libros-reader-heading
+    title: Reader Themes
+    type: heading
+    level: 1
+  - id: los-libros-reader-bg-light
+    title: Light Theme Background
+    type: variable-color
+    format: hex
+    default: '#ffffff'
+  - id: los-libros-reader-text-light
+    title: Light Theme Text
+    type: variable-color
+    format: hex
+    default: '#333333'
+  - id: los-libros-reader-bg-dark
+    title: Dark Theme Background
+    type: variable-color
+    format: hex
+    default: '#1e1e1e'
+  - id: los-libros-reader-text-dark
+    title: Dark Theme Text
+    type: variable-color
+    format: hex
+    default: '#e0e0e0'
+  - id: los-libros-reader-bg-sepia
+    title: Sepia Theme Background
+    type: variable-color
+    format: hex
+    default: '#f4ecd8'
+  - id: los-libros-reader-text-sepia
+    title: Sepia Theme Text
+    type: variable-color
+    format: hex
+    default: '#5b4636'
+
+  - id: los-libros-ui-heading
+    title: UI Customization
+    type: heading
+    level: 1
+  - id: los-libros-sidebar-width
+    title: Sidebar Width
+    type: variable-number-slider
+    default: 300
+    min: 200
+    max: 500
+    step: 10
+    format: px
+  - id: los-libros-progress-height
+    title: Progress Bar Height
+    type: variable-number-slider
+    default: 4
+    min: 2
+    max: 10
+    step: 1
+    format: px
+  - id: los-libros-highlight-border-width
+    title: Highlight Card Border Width
+    type: variable-number-slider
+    default: 3
+    min: 1
+    max: 8
+    step: 1
+    format: px
+*/
+
+/* =========================================================================
+   Quick Color Palette (Instant Highlight Mode)
+   ========================================================================= */
+
+.los-libros-quick-palette {
+  position: fixed;
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--los-libros-palette-bg);
+  border-radius: var(--los-libros-popup-radius);
+  box-shadow: var(--los-libros-palette-shadow);
+  z-index: 1000;
+  animation: los-libros-palette-appear 0.15s ease-out;
+}
+
+.los-libros-quick-palette-color {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: transform 0.1s ease, border-color 0.1s ease;
+}
+
+.los-libros-quick-palette-color:hover {
+  transform: scale(1.15);
+  border-color: var(--text-normal);
+}
+
+.los-libros-quick-palette-color:active {
+  transform: scale(0.95);
+}
+
+@keyframes los-libros-palette-appear {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* =========================================================================
+   Brightness Overlay
+   ========================================================================= */
+
+.los-libros-brightness-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 999;
+  transition: background-color 0.2s ease;
+}
+
+/* =========================================================================
+   Auto-Scroll Indicator
+   ========================================================================= */
+
+.los-libros-autoscroll-indicator {
+  position: fixed;
+  top: 50%;
+  right: 16px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+  background: var(--los-libros-popup-bg);
+  border-radius: var(--los-libros-popup-radius);
+  box-shadow: var(--los-libros-popup-shadow);
+  z-index: 100;
+}
+
+.los-libros-autoscroll-dot {
+  width: var(--los-libros-autoscroll-indicator-size);
+  height: var(--los-libros-autoscroll-indicator-size);
+  background: var(--los-libros-autoscroll-indicator-bg);
+  border-radius: 50%;
+  animation: los-libros-autoscroll-pulse 1s ease-in-out infinite;
+}
+
+@keyframes los-libros-autoscroll-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+/* Library View */
+.los-libros-library {
+  padding: 16px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.los-libros-library-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.los-libros-library-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.los-libros-library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 16px;
+}
+
+/* Book Card */
+.los-libros-book-card {
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.los-libros-book-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.los-libros-book-cover {
+  aspect-ratio: 2/3;
+  width: 100%;
+  object-fit: cover;
+  background-color: var(--background-secondary);
+  border-radius: 4px;
+}
+
+.los-libros-book-cover-placeholder {
+  aspect-ratio: 2/3;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--background-secondary);
+  border-radius: 4px;
+  font-size: 2rem;
+}
+
+.los-libros-book-title {
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-top: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.los-libros-book-author {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reader View */
+.los-libros-reader {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.los-libros-reader-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.los-libros-reader-content {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Scroll mode: allow epub.js container to scroll */
+.los-libros-reader-content.scrolled-mode {
+  overflow: visible !important;
+}
+
+/* epub.js continuous manager uses .epub-container as scroll container
+   epub.js sets inline style: overflow: hidden scroll
+   We must NOT override this with !important - just add touch scrolling support */
+.los-libros-reader-content.scrolled-mode .epub-container {
+  -webkit-overflow-scrolling: touch;
+}
+
+.los-libros-epub-container {
+  height: 100%;
+  width: 100%;
+}
+
+/* epub.js annotation highlights */
+.epub-view {
+  position: relative !important;
+}
+
+/* SVG overlay for highlights - epub.js creates SVG without class */
+.epub-view > svg {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  width: 100% !important;
+  height: 100% !important;
+  pointer-events: none;
+  z-index: 10 !important; /* Must be higher than iframe z-index (1) */
+}
+
+/* Highlight groups - we use class "los-libros-highlight" */
+.epub-view > svg g.los-libros-highlight,
+.epub-view > svg g.epub-highlight {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* Highlight rectangles - use visible opacity */
+.epub-view > svg g.los-libros-highlight rect,
+.epub-view > svg g.epub-highlight rect {
+  fill-opacity: 0.5 !important; /* Override epub.js default */
+  mix-blend-mode: multiply;
+}
+
+/* Ensure iframe content displays properly */
+.epub-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* Page Controls */
+.los-libros-page-controls {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  padding: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.los-libros-progress-bar {
+  width: 100%;
+  height: 4px;
+  background-color: var(--background-secondary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.los-libros-progress-fill {
+  height: 100%;
+  background-color: var(--interactive-accent);
+  transition: width 0.3s ease;
+}
+
+/* Highlights Sidebar */
+.los-libros-highlights {
+  padding: 16px;
+}
+
+.los-libros-highlight-card {
+  padding: 12px;
+  margin-bottom: 8px;
+  background-color: var(--background-secondary);
+  border-radius: 8px;
+  border-left: 3px solid var(--interactive-accent);
+}
+
+.los-libros-highlight-text {
+  font-style: italic;
+  margin-bottom: 8px;
+}
+
+.los-libros-highlight-note {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* Loading State */
+.los-libros-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.los-libros-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--background-secondary);
+  border-top-color: var(--interactive-accent);
+  border-radius: 50%;
+  animation: los-libros-spin 1s linear infinite;
+}
+
+@keyframes los-libros-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Empty State */
+.los-libros-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.los-libros-empty-icon {
+  font-size: 3rem;
+  margin-bottom: 16px;
+}
+
+/* Folder Suggestion Modal */
+.ll-folder-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.ll-folder-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.ll-folder-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Mobile Optimizations */
+@media (max-width: 768px) {
+  .los-libros-library-grid {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 12px;
+  }
+
+  .los-libros-book-title {
+    font-size: 0.75rem;
+  }
+
+  .los-libros-book-author {
+    font-size: 0.625rem;
+  }
+}
+
+/* =========================================================================
+   Status Bar
+   ========================================================================= */
+
+.los-libros-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.los-libros-status-bar .status-bar-item-icon {
+  display: flex;
+  align-items: center;
+}
+
+.los-libros-status-bar .status-bar-item-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.los-libros-status-bar.syncing .status-bar-item-icon {
+  animation: los-libros-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes los-libros-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* =========================================================================
+   Calibre Sync Progress UI (Settings Tab)
+   ========================================================================= */
+
+.los-libros-sync-progress {
+  margin-bottom: 16px;
+  padding: 12px;
+  background-color: var(--background-secondary);
+  border-radius: 8px;
+}
+
+.sync-progress-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sync-phase {
+  font-weight: 500;
+  color: var(--text-normal);
+}
+
+.sync-progress-bar {
+  width: 100%;
+  height: 8px;
+  background-color: var(--background-primary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.sync-progress-fill {
+  height: 100%;
+  background-color: var(--interactive-accent);
+  border-radius: 4px;
+  transition: width 0.2s ease;
+}
+
+.sync-stats {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--interactive-accent);
+}
+
+.sync-current-item {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sync-status-container {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sync-status-icon {
+  display: flex;
+  align-items: center;
+}
+
+.sync-status-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sync-status-icon.connected svg {
+  color: var(--text-success);
+}
+
+.sync-status-icon.disconnected svg {
+  color: var(--text-warning);
+}
+
+.sync-status-text {
+  font-weight: 500;
+}
+
+.sync-last-time {
+  width: 100%;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* =========================================================================
+   Settings Tab Icon
+   ========================================================================= */
+
+.settings-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+}
+
+.settings-tab-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* =========================================================================
+   Fullscreen Mode - Hide Obsidian UI
+   ========================================================================= */
+
+/* When fullscreen mode is active, hide Obsidian chrome */
+body.los-libros-fullscreen-mode .workspace-tab-header-container {
+  display: none !important;
+}
+
+body.los-libros-fullscreen-mode .status-bar {
+  display: none !important;
+}
+
+body.los-libros-fullscreen-mode .mod-left-split,
+body.los-libros-fullscreen-mode .mod-right-split {
+  display: none !important;
+}
+
+body.los-libros-fullscreen-mode .side-dock-ribbon {
+  display: none !important;
+}
+
+body.los-libros-fullscreen-mode .titlebar {
+  display: none !important;
+}
+
+body.los-libros-fullscreen-mode .workspace-split.mod-root {
+  height: 100vh !important;
+}
+
+body.los-libros-fullscreen-mode .workspace-leaf-content {
+  height: 100% !important;
+}
+
+/* Fullscreen reader specific styles */
+.los-libros-reader.fullscreen {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 9999 !important;
+  background: var(--background-primary) !important;
+}
+
+/* Ensure bottom nav is clickable in fullscreen */
+.los-libros-reader.fullscreen .progress-slider-container {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+}
+
+/* Ensure toolbar is clickable in fullscreen */
+.los-libros-reader.fullscreen .los-libros-reader-toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  background: var(--background-primary);
+}
+
+/* Adjust content area in fullscreen */
+.los-libros-reader.fullscreen .los-libros-reader-content {
+  position: fixed;
+  top: 48px;
+  left: 0;
+  right: 0;
+  bottom: 60px;
+  height: auto !important;
+}
+
+/* Sidebars in fullscreen */
+.los-libros-reader.fullscreen .los-libros-sidebar {
+  position: fixed;
+  top: 48px;
+  bottom: 60px;
+  z-index: 10001;
+}
+
+/* Backdrop in fullscreen */
+.los-libros-reader.fullscreen .los-libros-backdrop {
+  position: fixed;
+  z-index: 10000;
+}
+
+/* Settings panel in fullscreen */
+.los-libros-reader.fullscreen :global(.settings-panel) {
+  position: fixed;
+  top: 48px;
+  bottom: 60px;
+  z-index: 10001;
+}
+
+/* Highlight popup in fullscreen */
+.los-libros-reader.fullscreen :global(.highlight-popup) {
+  z-index: 10002;
+}
+
+/* Quick color palette in fullscreen */
+.los-libros-reader.fullscreen .los-libros-quick-palette {
+  z-index: 10002;
+}

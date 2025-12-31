@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # MinIO - S3-compatible storage for local development
+  minio:
+    image: minio/minio:latest
+    container_name: los-libros-minio
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web Console
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO client for initial setup
+  minio-setup:
+    image: minio/mc:latest
+    container_name: los-libros-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 admin password123;
+      mc mb local/library --ignore-existing;
+      mc policy set public local/library;
+      echo 'MinIO bucket created successfully';
+      "
+
+  # Los Libros Server
+  server:
+    build:
+      context: ./apps/los-libros-server
+      dockerfile: Dockerfile
+    container_name: los-libros-server
+    ports:
+      - "3000:3000"
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 3000
+      S3_PROVIDER: minio
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: library
+      S3_ACCESS_KEY: admin
+      S3_SECRET_KEY: password123
+      S3_REGION: us-east-1
+      DATABASE_URL: sqlite:./libros.db
+      RUST_LOG: los_libros_server=debug,tower_http=debug
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - server-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  minio-data:
+    driver: local
+  server-data:
+    driver: local
+
+networks:
+  default:
+    name: los-libros-network

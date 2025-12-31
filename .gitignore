@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+*.js
+*.js.map
+*.d.ts
+!esbuild.config.mjs
+
+# Rust
+target/
+Cargo.lock
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Obsidian plugin dev
+temp/
+*.hot-update.*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Docker
+.docker/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*

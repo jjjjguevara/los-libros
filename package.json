@@ -1,0 +1,28 @@
+{
+  "name": "los-libros",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Obsidian ebook reader ecosystem",
+  "scripts": {
+    "dev": "pnpm -r dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint"
+  },
+  "keywords": [
+    "obsidian",
+    "ebook",
+    "reader",
+    "epub",
+    "opds"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

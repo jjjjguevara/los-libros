@@ -1,0 +1,44 @@
+{
+  "name": "los-libros",
+  "version": "0.1.0",
+  "description": "Ebook reader for Obsidian with OPDS support and Doc Doctor integration",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "obsidian",
+    "ebook",
+    "reader",
+    "epub",
+    "opds",
+    "highlights"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@tanstack/svelte-virtual": "^3.0.0",
+    "fast-xml-parser": "^4.3.0",
+    "liquidjs": "^10.10.0",
+    "sql.js": "^1.10.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@tsconfig/svelte": "5.0.2",
+    "@types/node": "16.11.6",
+    "@types/uuid": "^9.0.0",
+    "builtin-modules": "3.3.0",
+    "esbuild": "0.17.3",
+    "esbuild-svelte": "0.8.0",
+    "lucide-svelte": "0.292.0",
+    "obsidian": "latest",
+    "svelte": "4.2.1",
+    "svelte-preprocess": "5.0.4",
+    "tslib": "2.4.0",
+    "typescript": "5.9.3",
+    "vitest": "0.34.5"
+  }
+}
