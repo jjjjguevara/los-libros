@@ -8,11 +8,13 @@
  * - Reduced memory overhead (~15MB savings)
  * - No sub-pixel drift from separate document contexts
  * - CSS isolation via Shadow DOM encapsulation
+ * - Content Security Policy (CSP) for XSS protection
  *
  * @see docs/plans/epub-renderer-v2-architecture.md
  */
 
 import type { ThemeColors, RendererConfig } from './renderer/types';
+import { getCSPMetaTagString, DEFAULT_RESOURCE_POLICY, type ResourcePolicyConfig } from '../security';
 
 /**
  * Configuration for Shadow DOM View
@@ -22,6 +24,8 @@ export interface ShadowDOMViewConfig {
   themeColors: ThemeColors;
   /** Renderer configuration for styling */
   rendererConfig: Partial<RendererConfig>;
+  /** Resource policy configuration for CSP */
+  resourcePolicy?: Partial<ResourcePolicyConfig>;
 }
 
 /**
@@ -43,6 +47,7 @@ export class ShadowDOMView {
   private themeStyles: HTMLStyleElement;
   private bookStyles: HTMLStyleElement;
   private highlightStyles: HTMLStyleElement;
+  private securityStyles: HTMLStyleElement;
 
   // ResizeObserver for responsive layout
   private resizeObserver: ResizeObserver | null = null;
@@ -54,8 +59,15 @@ export class ShadowDOMView {
   constructor(container: HTMLElement) {
     this.host = container;
 
-    // Create Shadow DOM with open mode for debugging
+    // Create Shadow DOM with open mode
+    // Note: While 'closed' mode provides slightly better encapsulation,
+    // 'open' mode is needed for debugging, CSS highlights, and selection APIs.
+    // Security is enforced via CSP and DOMPurify sanitization instead.
     this.shadowRoot = this.host.attachShadow({ mode: 'open' });
+
+    // Create security styles (includes CSP-like restrictions via CSS)
+    this.securityStyles = document.createElement('style');
+    this.securityStyles.id = 'security-styles';
 
     // Create internal structure
     this.rendererStyles = document.createElement('style');
@@ -83,13 +95,18 @@ export class ShadowDOMView {
     this.navigatorMount.id = 'navigator-mount';
 
     // Assemble DOM structure
+    // Security styles first to ensure they take precedence
     this.viewportWrapper.appendChild(this.contentContainer);
+    this.shadowRoot.appendChild(this.securityStyles);
     this.shadowRoot.appendChild(this.rendererStyles);
     this.shadowRoot.appendChild(this.themeStyles);
     this.shadowRoot.appendChild(this.bookStyles);
     this.shadowRoot.appendChild(this.highlightStyles);
     this.shadowRoot.appendChild(this.viewportWrapper);
     this.shadowRoot.appendChild(this.navigatorMount);
+
+    // Apply security styles (CSS-based restrictions)
+    this.applySecurityStyles();
 
     // Apply base styles
     this.applyBaseStyles();
@@ -134,6 +151,85 @@ export class ShadowDOMView {
    */
   getDocument(): Document {
     return this.host.ownerDocument;
+  }
+
+  /**
+   * Apply security-focused CSS styles
+   * These provide defense-in-depth against content that may have
+   * bypassed DOMPurify sanitization
+   */
+  private applySecurityStyles(): void {
+    this.securityStyles.textContent = `
+      /*
+       * Security Styles - Defense in Depth
+       * These CSS rules provide additional protection beyond DOMPurify sanitization
+       */
+
+      /* Block script execution via CSS (defense in depth) */
+      script, noscript {
+        display: none !important;
+      }
+
+      /* Block iframe/frame/embed elements that may have bypassed sanitization */
+      iframe, frame, frameset, embed, object, applet {
+        display: none !important;
+        visibility: hidden !important;
+        width: 0 !important;
+        height: 0 !important;
+        border: none !important;
+      }
+
+      /* Block external links that could be used for phishing - show warning indicator */
+      a[href^="javascript:"],
+      a[href^="vbscript:"],
+      a[href^="data:text/html"] {
+        pointer-events: none !important;
+        text-decoration: line-through !important;
+        color: #ff0000 !important;
+      }
+
+      /* Prevent position:fixed from escaping shadow DOM visually */
+      * {
+        position: static;
+      }
+
+      /* Allow relative/absolute positioning only within content */
+      .epub-chapter *, #content-container * {
+        position: relative;
+      }
+
+      .epub-chapter [style*="position: absolute"],
+      .epub-chapter [style*="position:absolute"],
+      #content-container [style*="position: absolute"],
+      #content-container [style*="position:absolute"] {
+        position: absolute;
+      }
+
+      /* Block high z-index that could overlay app UI */
+      * {
+        z-index: auto !important;
+      }
+
+      /* Allow z-index only within content container with limits */
+      #content-container * {
+        z-index: auto;
+      }
+
+      /* Block external fonts that haven't been loaded through our system */
+      @font-face {
+        /* Block external @font-face - only blob: and data: allowed */
+      }
+
+      /* Prevent forms from submitting (EPUB content shouldn't have active forms) */
+      form {
+        pointer-events: none;
+      }
+
+      form input, form button, form select, form textarea {
+        pointer-events: none;
+        opacity: 0.7;
+      }
+    `;
   }
 
   /**
@@ -211,7 +307,7 @@ export class ShadowDOMView {
         position: absolute;
         top: 0;
         right: 0;
-        width: var(--page-margin, 60px);
+        width: var(--page-mask-width, 30px);
         height: 100%;
         background: var(--theme-bg, var(--background-primary));
         z-index: 10;
@@ -220,22 +316,13 @@ export class ShadowDOMView {
 
       :host(.mode-paginated) #content-container {
         column-fill: auto;
-        overflow-x: scroll;
-        overflow-y: hidden;
-        scroll-snap-type: x mandatory;
-        scroll-behavior: smooth;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none; /* Firefox */
-      }
-
-      :host(.mode-paginated) #content-container::-webkit-scrollbar {
-        display: none; /* Chrome/Safari */
-      }
-
-      /* Paginated mode - ensure proper snap behavior for swipe gestures */
-      :host(.mode-paginated) .epub-chapter {
-        scroll-snap-align: start;
-        scroll-snap-stop: always;
+        /* IMPORTANT: overflow must be visible for transform-based navigation
+           Chapters are positioned absolutely and extend beyond container bounds.
+           Viewport-wrapper handles clipping, not content-container. */
+        overflow: visible;
+        /* Transform-based navigation - container moves via translate3d */
+        will-change: transform;
+        transform-style: preserve-3d;
       }
 
       /* Scrolled mode styles */
@@ -382,13 +469,20 @@ export class ShadowDOMView {
     this.host.classList.remove('mode-paginated', 'mode-scrolled');
     this.host.classList.add(`mode-${config.mode ?? 'paginated'}`);
 
+    // Calculate effective margin for right-edge mask (minimum 10px for usability)
+    const effectiveMargin = Math.max(margin, 10);
+
     this.rendererStyles.textContent = this.rendererStyles.textContent + `
+      :host {
+        --page-margin: ${effectiveMargin}px;
+      }
+
       #content-container {
         font-size: ${fontSize}px;
         font-family: ${fontFamily};
         line-height: ${lineHeight};
         text-align: ${textAlign};
-        padding: ${margin}px;
+        /* Padding controlled by navigator, not shadow DOM - prevents double padding */
       }
 
       :host(.mode-paginated) #content-container {

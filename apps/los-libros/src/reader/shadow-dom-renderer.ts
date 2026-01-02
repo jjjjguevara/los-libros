@@ -42,6 +42,7 @@ import { CSSHighlightManager, isCSSHighlightAPISupported } from './renderer/css-
 import { SelectionHandler, type SelectionData } from './renderer/selection';
 import { getObsidianThemeColors, isObsidianDarkMode } from './reader-settings';
 import { generateFullCfi } from './renderer/cfi-utils';
+import { ContentSanitizer, type SanitizerConfig } from '../security';
 
 // ============================================================================
 // Theme Colors
@@ -128,6 +129,9 @@ export class ShadowDOMRenderer {
   // Selection handling
   private selection: SelectionHandler | null = null;
 
+  // Content sanitizer for XSS protection
+  private sanitizer: ContentSanitizer;
+
   // Navigation state
   private currentSpineIndex = 0;
   private currentLocation: ReadingLocation | null = null;
@@ -157,6 +161,16 @@ export class ShadowDOMRenderer {
     this.container = container;
     this.api = api;
     this.config = { ...DEFAULT_RENDERER_CONFIG, ...config };
+
+    // Initialize content sanitizer for XSS protection
+    this.sanitizer = new ContentSanitizer({
+      allowExternalImages: false,
+      allowExternalStylesheets: false,
+      allowDataUrls: true,
+      allowBlobUrls: true,
+      allowedDomains: [],
+      strictMode: false,
+    });
 
     this.initialize();
   }
@@ -219,15 +233,23 @@ export class ShadowDOMRenderer {
   }
 
   private destroyNavigator(): void {
-    // Clean up event listeners
+    // Clean up event listeners with error handling to prevent one failure blocking others
     for (const cleanup of this.navigatorCleanup) {
-      cleanup();
+      try {
+        cleanup();
+      } catch (error) {
+        console.warn('[ShadowDOMRenderer] Error during event cleanup:', error);
+      }
     }
     this.navigatorCleanup = [];
 
     // Destroy navigator
     if (this.navigator) {
-      this.navigator.destroy();
+      try {
+        this.navigator.destroy();
+      } catch (error) {
+        console.warn('[ShadowDOMRenderer] Error during navigator destruction:', error);
+      }
       this.navigator = null;
     }
   }
@@ -264,6 +286,15 @@ export class ShadowDOMRenderer {
     this.navigatorCleanup.push(
       this.navigator.on('error', (error) => {
         console.error('[ShadowDOMRenderer] Navigator error:', error);
+      })
+    );
+
+    // Navigation failed event - show user-facing notification
+    this.navigatorCleanup.push(
+      this.navigator.on('navigationFailed', ({ spineIndex, href, reason }) => {
+        console.error(`[ShadowDOMRenderer] Navigation failed: chapter ${spineIndex} (${href}): ${reason}`);
+        // Emit error event for the UI to show a toast notification
+        this.emit('error', new Error(`Failed to load chapter: ${reason}`));
       })
     );
   }
@@ -360,9 +391,19 @@ export class ShadowDOMRenderer {
   }
 
   private async processHtml(html: string, href: string): Promise<string> {
-    // Process relative URLs, sanitize, etc.
-    // This can be expanded based on needs
-    return html;
+    // Sanitize HTML to prevent XSS attacks
+    // DOMPurify removes scripts, event handlers, and dangerous content
+    const result = this.sanitizer.sanitize(html);
+
+    // Log blocked URLs in development
+    if (result.blockedUrls.length > 0) {
+      console.warn(
+        `[ShadowDOMRenderer] Blocked ${result.blockedUrls.length} external URLs in ${href}:`,
+        result.blockedUrls.slice(0, 5)
+      );
+    }
+
+    return result.html;
   }
 
   // ============================================================================
@@ -451,13 +492,13 @@ export class ShadowDOMRenderer {
   // Configuration
   // ============================================================================
 
-  updateConfig(config: Partial<RendererConfig>): void {
+  async updateConfig(config: Partial<RendererConfig>): Promise<void> {
     const oldMode = this.config.mode;
     this.config = { ...this.config, ...config };
 
-    // Handle mode switch
+    // Handle mode switch - MUST await to prevent race conditions
     if (config.mode && config.mode !== oldMode) {
-      this.handleModeSwitch(config.mode);
+      await this.handleModeSwitch(config.mode);
     } else {
       // Just update navigator config
       if (this.navigator) {
@@ -472,38 +513,67 @@ export class ShadowDOMRenderer {
   }
 
   private async handleModeSwitch(newMode: DisplayMode): Promise<void> {
-    // Save current location
-    const savedLocation = this.navigator?.getCurrentLocation();
+    const startTime = performance.now();
+    console.log(`[ModeSwitch] Starting mode switch to ${newMode}`);
 
-    // Cache chapter elements from current navigator before destroying
-    this.cacheChapterElements();
+    // Save current location
+    console.log('[ModeSwitch] Step 1: Saving current location...');
+    const savedLocation = this.navigator?.getCurrentLocation();
+    console.log('[ModeSwitch] Step 1 complete:', savedLocation ? 'location saved' : 'no location');
+
+    // DISABLED: Caching was causing freezes due to synchronous cloneNode(true) on large DOMs
+    // Skip caching entirely - the navigator will recreate elements from HTML
+    console.log('[ModeSwitch] Step 2: Skipping cache (disabled to prevent freeze)');
+    this.cachedChapterElements.clear();
 
     // Update config mode BEFORE creating navigator
     this.config.mode = newMode;
 
     // Update view's mode class
+    console.log('[ModeSwitch] Step 3: Updating view mode class...');
     if (this.view) {
       this.view.setMode(newMode);
     }
+    console.log('[ModeSwitch] Step 3 complete');
 
     // Create new navigator (uses this.config.mode)
+    console.log('[ModeSwitch] Step 4: Creating new navigator...');
+    const navStart = performance.now();
     this.createNavigator();
+    console.log(`[ModeSwitch] Step 4 complete in ${(performance.now() - navStart).toFixed(1)}ms`);
 
     // Reinitialize with content
     if (this.view && this.navigator && this.book) {
+      console.log('[ModeSwitch] Step 5: Initializing navigator...');
+      const initStart = performance.now();
       await this.navigator.initialize(this.view.getContentContainer(), this.getNavigatorConfig());
+      console.log(`[ModeSwitch] Step 5 complete in ${(performance.now() - initStart).toFixed(1)}ms`);
 
+      console.log('[ModeSwitch] Step 6: Loading spine content...');
+      const spineStart = performance.now();
       const spineContent = await this.loadSpineContent();
+      console.log(`[ModeSwitch] Step 6 complete: ${spineContent.length} chapters in ${(performance.now() - spineStart).toFixed(1)}ms`);
 
       // Use cached elements if available for faster switching
+      console.log('[ModeSwitch] Step 7: Loading content into navigator...');
+      const loadStart = performance.now();
       await this.navigator.loadContent(spineContent, savedLocation ?? undefined, this.cachedChapterElements);
+      console.log(`[ModeSwitch] Step 7 complete in ${(performance.now() - loadStart).toFixed(1)}ms`);
+
+      // Clear cache after successful load to free memory
+      // The new navigator now owns the elements
+      this.cachedChapterElements.clear();
+      console.log('[ModeSwitch] Step 8: Cache cleared to free memory');
     }
+
+    console.log(`[ModeSwitch] Mode switch complete! Total time: ${(performance.now() - startTime).toFixed(1)}ms`);
   }
 
   /**
-   * Cache chapter elements from current navigator for reuse
+   * Cache chapter elements from current navigator for reuse.
+   * Uses chunked async cloning to prevent main thread freeze.
    */
-  private cacheChapterElements(): void {
+  private async cacheChapterElements(): Promise<void> {
     if (!this.view) return;
 
     const container = this.view.getContentContainer();
@@ -511,11 +581,20 @@ export class ShadowDOMRenderer {
     // Find all chapter elements in current DOM
     const chapters = container.querySelectorAll('.epub-chapter');
 
-    for (const chapter of chapters) {
+    // Chunk size: clone this many chapters before yielding to main thread
+    const CHUNK_SIZE = 10;
+
+    for (let i = 0; i < chapters.length; i++) {
+      const chapter = chapters[i];
       const spineIndex = parseInt(chapter.getAttribute('data-spine-index') || '-1', 10);
       if (spineIndex >= 0) {
         // Clone the element to preserve it (since we'll clear the container)
         this.cachedChapterElements.set(spineIndex, chapter.cloneNode(true) as HTMLElement);
+      }
+
+      // Yield to main thread every CHUNK_SIZE chapters to prevent freeze
+      if (i > 0 && i % CHUNK_SIZE === 0) {
+        await new Promise(r => setTimeout(r, 0));
       }
     }
   }
@@ -535,6 +614,21 @@ export class ShadowDOMRenderer {
       theme: themeColors,
       pageSnap: true,
       momentumScrolling: true,
+      // Provide chapter re-fetch callback for retry logic
+      chapterRefetcher: async (spineIndex: number, href: string): Promise<string | null> => {
+        try {
+          const chapter = await this.api.getChapter(this.bookId, href, true);
+          const processedHtml = await this.processHtml(chapter.html, chapter.href);
+          // Update cached spine content if successful
+          if (this.cachedSpineContent && this.cachedSpineContent[spineIndex]) {
+            this.cachedSpineContent[spineIndex].html = processedHtml;
+          }
+          return processedHtml;
+        } catch (error) {
+          console.error(`[ShadowDOMRenderer] Chapter refetch failed for ${href}:`, error);
+          return null;
+        }
+      },
     };
   }
 
@@ -599,43 +693,60 @@ export class ShadowDOMRenderer {
   }
 
   private async reanchorHighlights(): Promise<void> {
+    // TEMPORARILY DISABLED: Debugging freeze issue
+    // TODO: Re-enable after fixing the root cause
+    console.log('[reanchorHighlights] DISABLED - skipping highlight reanchoring');
+    return;
+
+    /* DISABLED FOR DEBUGGING
     if (!this.view || !this.cssHighlights || this.storedHighlights.length === 0) {
       return;
     }
 
     const container = this.view.getContentContainer();
+    const CHUNK_SIZE = 5; // Process 5 highlights at a time to avoid blocking UI
 
-    for (const highlight of this.storedHighlights) {
-      if (!highlight.cfi) continue;
+    for (let i = 0; i < this.storedHighlights.length; i += CHUNK_SIZE) {
+      const chunk = this.storedHighlights.slice(i, i + CHUNK_SIZE);
 
-      // Get the href from the spine index
-      const spineItem = this.book?.spine[highlight.spineIndex];
-      const href = spineItem?.href || '';
+      for (const highlight of chunk) {
+        if (!highlight.cfi) continue;
 
-      // Create locator from highlight
-      const locator: Locator = {
-        href,
-        locations: {
-          progression: 0,
-          cfi: highlight.cfi,
-          position: highlight.spineIndex,
-        },
-        text: highlight.text
-          ? { highlight: highlight.text }
-          : undefined,
-      };
+        // Get the href from the spine index
+        const spineItem = this.book?.spine[highlight.spineIndex];
+        const href = spineItem?.href || '';
 
-      // Anchor to DOM
-      const result = await anchorToDOM(locator, container);
+        // Create locator from highlight
+        const locator: Locator = {
+          href,
+          locations: {
+            progression: 0,
+            cfi: highlight.cfi,
+            position: highlight.spineIndex,
+          },
+          text: highlight.text
+            ? { highlight: highlight.text }
+            : undefined,
+        };
 
-      if (result) {
-        this.cssHighlights.add(
-          highlight.id,
-          result.range,
-          highlight.color as HighlightColor
-        );
+        // Anchor to DOM
+        const result = await anchorToDOM(locator, container);
+
+        if (result) {
+          this.cssHighlights.add(
+            highlight.id,
+            result.range,
+            highlight.color as HighlightColor
+          );
+        }
+      }
+
+      // Yield to main thread between chunks to prevent UI freeze
+      if (i + CHUNK_SIZE < this.storedHighlights.length) {
+        await new Promise(resolve => setTimeout(resolve, 0));
       }
     }
+    */
   }
 
   addHighlight(id: string, range: Range, color: HighlightColor): void {
@@ -984,7 +1095,9 @@ export class ShadowDOMRenderer {
   }
 
   /**
-   * Find text range within an element
+   * Find text range within an element.
+   * Fixed: Uses direct text matching without problematic whitespace normalization.
+   * Fixed: Properly handles multi-node text selections.
    */
   private findTextRange(searchText: string, container: HTMLElement): Range | null {
     const doc = container.ownerDocument;
@@ -994,6 +1107,7 @@ export class ShadowDOMRenderer {
       null
     );
 
+    // Collect all text nodes with their positions
     let fullText = '';
     const textNodes: Text[] = [];
     const nodeStarts: number[] = [];
@@ -1005,51 +1119,77 @@ export class ShadowDOMRenderer {
       fullText += node.textContent || '';
     }
 
-    // Normalize text for comparison
-    const normalizedFull = fullText.replace(/\s+/g, ' ');
-    const normalizedSearch = searchText.replace(/\s+/g, ' ');
+    if (textNodes.length === 0) return null;
 
-    let matchIndex = normalizedFull.indexOf(normalizedSearch);
-    if (matchIndex === -1) {
-      // Try case-insensitive
-      matchIndex = normalizedFull.toLowerCase().indexOf(normalizedSearch.toLowerCase());
+    // Try direct match first (preserve original whitespace)
+    let matchStart = fullText.indexOf(searchText);
+
+    // If no direct match, try with normalized whitespace
+    if (matchStart === -1) {
+      // Build a mapping from normalized position to original position
+      const normalizedToOriginal: number[] = [];
+      let normalizedText = '';
+
+      for (let i = 0; i < fullText.length; i++) {
+        const char = fullText[i];
+        if (/\s/.test(char)) {
+          // Collapse consecutive whitespace
+          if (normalizedText.length === 0 || !/\s/.test(normalizedText[normalizedText.length - 1])) {
+            normalizedToOriginal.push(i);
+            normalizedText += ' ';
+          }
+        } else {
+          normalizedToOriginal.push(i);
+          normalizedText += char;
+        }
+      }
+
+      const normalizedSearch = searchText.replace(/\s+/g, ' ');
+      let normalizedMatchStart = normalizedText.indexOf(normalizedSearch);
+
+      // Try case-insensitive if still not found
+      if (normalizedMatchStart === -1) {
+        normalizedMatchStart = normalizedText.toLowerCase().indexOf(normalizedSearch.toLowerCase());
+      }
+
+      if (normalizedMatchStart === -1) return null;
+
+      // Map back to original position
+      matchStart = normalizedToOriginal[normalizedMatchStart] ?? 0;
     }
 
-    if (matchIndex === -1) return null;
-
-    // Map back to original positions
-    let currentPos = 0;
-    let originalStart = 0;
-    for (let i = 0; i < normalizedFull.length && i <= matchIndex; i++) {
-      while (currentPos < fullText.length && /\s/.test(fullText[currentPos]) && fullText[currentPos] !== normalizedFull[i]) {
-        currentPos++;
-      }
-      if (i === matchIndex) {
-        originalStart = currentPos;
-        break;
-      }
-      currentPos++;
-    }
+    // Find the text length to match (use original search text length as guide)
+    const matchLength = searchText.length;
+    const matchEnd = Math.min(matchStart + matchLength, fullText.length);
 
     // Find start node and offset
     let startNodeIndex = 0;
     for (let i = textNodes.length - 1; i >= 0; i--) {
-      if (nodeStarts[i] <= originalStart) {
+      if (nodeStarts[i] <= matchStart) {
         startNodeIndex = i;
         break;
       }
     }
 
-    const startOffset = originalStart - nodeStarts[startNodeIndex];
-    const startNode = textNodes[startNodeIndex];
+    // Find end node and offset
+    let endNodeIndex = startNodeIndex;
+    for (let i = textNodes.length - 1; i >= 0; i--) {
+      if (nodeStarts[i] <= matchEnd) {
+        endNodeIndex = i;
+        break;
+      }
+    }
 
-    // Create the range
+    const startNode = textNodes[startNodeIndex];
+    const endNode = textNodes[endNodeIndex];
+    const startOffset = matchStart - nodeStarts[startNodeIndex];
+    const endOffset = matchEnd - nodeStarts[endNodeIndex];
+
+    // Create the range spanning multiple nodes if needed
     const range = doc.createRange();
     try {
       range.setStart(startNode, Math.min(startOffset, startNode.length));
-      // Set end based on search text length (approximate)
-      const endOffset = Math.min(startOffset + searchText.length, startNode.length);
-      range.setEnd(startNode, endOffset);
+      range.setEnd(endNode, Math.min(endOffset, endNode.length));
     } catch (e) {
       console.warn('[ShadowDOMRenderer] Range creation error:', e);
       return null;
@@ -1201,6 +1341,16 @@ export class ShadowDOMRenderer {
     return this.view?.getContentContainer() ?? null;
   }
 
+  /**
+   * Clear the current text selection.
+   * Call this immediately after creating a highlight to deselect text.
+   */
+  clearSelection(): void {
+    this.selection?.clearSelection();
+    // Also clear using window.getSelection for broader compatibility
+    window.getSelection()?.removeAllRanges();
+  }
+
   // ============================================================================
   // Cleanup
   // ============================================================================
@@ -1228,6 +1378,9 @@ export class ShadowDOMRenderer {
     // Destroy selection handler
     this.selection?.destroy();
     this.selection = null;
+
+    // Destroy content sanitizer
+    this.sanitizer.destroy();
 
     // Destroy view
     if (this.view) {

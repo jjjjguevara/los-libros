@@ -44,16 +44,28 @@ export function generateFullCfi(
   // Spine position uses EPUB CFI even-numbering: (index + 1) * 2
   const spinePosition = (spineIndex + 1) * 2;
 
-  // Generate the intra-document path using epub-cfi-resolver
-  // CFI.generate returns epubcfi(...), so we need to extract the inner path
-  const intraDocCfi = CFI.generate(node, offset) as string;
+  try {
+    // Generate the intra-document path using epub-cfi-resolver
+    // CFI.generate returns epubcfi(...), so we need to extract the inner path
+    const intraDocCfi = CFI.generate(node, offset) as string;
 
-  // Extract the path from epubcfi(...)
-  const innerPath = intraDocCfi.replace(/^epubcfi\(/, '').replace(/\)$/, '');
+    // Validate that we got a proper CFI
+    if (!intraDocCfi || typeof intraDocCfi !== 'string' || !intraDocCfi.startsWith('epubcfi(')) {
+      console.warn('[CFI] Invalid CFI generated, using fallback');
+      return `epubcfi(/6/${spinePosition}!/4/1:0)`;
+    }
 
-  // Combine with spine position
-  // Format: epubcfi(/6/{spinePosition}!{innerPath})
-  return `epubcfi(/6/${spinePosition}!${innerPath})`;
+    // Extract the path from epubcfi(...)
+    const innerPath = intraDocCfi.replace(/^epubcfi\(/, '').replace(/\)$/, '');
+
+    // Combine with spine position
+    // Format: epubcfi(/6/{spinePosition}!{innerPath})
+    return `epubcfi(/6/${spinePosition}!${innerPath})`;
+  } catch (error) {
+    // Phase 7: Protect against infinite loops or errors in CFI generation
+    console.warn('[CFI] Error generating CFI, using fallback:', error);
+    return `epubcfi(/6/${spinePosition}!/4/1:0)`;
+  }
 }
 
 /**

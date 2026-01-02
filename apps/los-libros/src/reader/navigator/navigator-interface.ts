@@ -122,6 +122,20 @@ export interface NavigatorConfig {
 
   /** Snap to page boundaries in paginated mode */
   pageSnap?: boolean;
+
+  /**
+   * Number of chapters to keep loaded in DOM for virtualization.
+   * Only applies to paginated mode. Default: 3.
+   * Increase if you experience lag when navigating between chapters.
+   */
+  chapterWindowSize?: number;
+
+  /**
+   * Callback to re-fetch a chapter that failed to load.
+   * Used for retry logic when navigating to chapters with error placeholders.
+   * Returns the fresh HTML content, or null if still failed.
+   */
+  chapterRefetcher?: (spineIndex: number, href: string) => Promise<string | null>;
 }
 
 // ============================================================================
@@ -158,6 +172,9 @@ export interface NavigatorEvents {
 
   /** Chapter visibility changed */
   chapterVisible: { spineIndex: number; visible: boolean };
+
+  /** Navigation to a chapter failed (e.g., chapter failed to load after retries) */
+  navigationFailed: { spineIndex: number; href: string; reason: string };
 }
 
 export type NavigatorEventListener<K extends keyof NavigatorEvents> = (

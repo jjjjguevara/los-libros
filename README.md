@@ -1,5 +1,7 @@
 # Los Libros
 
+> **Version 0.2.0**
+
 **Los Libros** is a self-hosted ebook reader ecosystem for Obsidian, consisting of a Rust-based server and an Obsidian plugin. Part of the **DD** (Doc Doctor) + **LL** (Los Libros) suite.
 
 ## Features
@@ -12,6 +14,7 @@
 - **BookFusion-style templates** — Liquid templating for customization
 - **iPad optimized** — Performance-tuned for Obsidian mobile
 - **OCR for scanned PDFs** — Tesseract and Ollama vision model support
+- **Public API** — Fully typed API for plugin interoperability and automation
 
 ## Project Structure
 
@@ -20,8 +23,22 @@ los-libros/
 ├── apps/
 │   ├── los-libros-server/     # Rust server (Axum, S3, OPDS)
 │   └── los-libros/            # Obsidian plugin (Svelte, Epub.js)
+│       └── src/
+│           ├── api/           # Public API (v0.2.0)
+│           │   ├── events/    # Event emitter & hooks
+│           │   ├── facades/   # Domain APIs (library, reader, highlights)
+│           │   ├── ui/        # UI extension points
+│           │   ├── security/  # Capabilities & validation
+│           │   └── helpers/   # Templater integration
+│           ├── reader/        # EPUB/PDF rendering
+│           ├── library/       # Book management
+│           ├── highlights/    # Annotation system
+│           └── bookmarks/     # Bookmark system
 ├── packages/
 │   └── shared-types/          # Shared TypeScript types
+├── docs/
+│   └── specifications/
+│       └── API/               # API documentation
 ├── docker-compose.yml         # Local development setup
 └── pnpm-workspace.yaml
 ```
@@ -100,6 +117,185 @@ los-libros/
 - **Unified Reader** — DocumentRenderer interface for both formats
 - **Liquid Templates** — Customizable note generation
 - **Doc Doctor Integration** — Shared highlights system
+
+## Public API
+
+Los Libros exposes a fully-typed public API for external plugins, Templater scripts, and automation workflows.
+
+> **Full API documentation**: [`docs/specifications/API/`](docs/specifications/API/)
+
+### API Access
+
+The API is available via two access points:
+
+```typescript
+// From another Obsidian plugin
+const api = app.plugins.plugins['los-libros'].api;
+
+// From Templater, QuickAdd, or DataviewJS
+const api = window.LosLibros;
+```
+
+### Core Features
+
+| Domain | State Store | Commands |
+|--------|-------------|----------|
+| **Reader** | Location, pagination, config | `goTo()`, `next()`, `prev()`, `updateConfig()` |
+| **Library** | Books, loading state | `getBook()`, `search()`, `filterByStatus()`, `updateProgress()` |
+| **Highlights** | Highlights by book | `create()`, `update()`, `delete()`, `getHighlights()` |
+| **Bookmarks** | Bookmarks by book | `create()`, `update()`, `delete()`, `getBookmarks()` |
+
+### Example Usage
+
+```typescript
+const api = window.LosLibros;
+
+// Subscribe to reactive state (Svelte stores)
+api.state.library.subscribe(state => {
+  console.log('Books:', state.books.length);
+});
+
+// Listen to events
+const disposable = api.events.on('page-turn', ({ from, to }) => {
+  console.log(`Turned from page ${from} to ${to}`);
+});
+
+// Connect with capabilities for write access
+const scopedApi = await api.connect('my-plugin', ['write-annotations']);
+await scopedApi.commands.highlights.create(
+  bookId,
+  'Selected text',
+  cfiLocation,
+  'yellow',
+  'My annotation'
+);
+
+// Clean up
+disposable.dispose();
+```
+
+### Events System
+
+25+ typed events for navigation, content, highlights, and library changes:
+
+```typescript
+// Navigation events
+api.events.on('relocated', ({ location }) => { ... });
+api.events.on('page-turn', ({ from, to, spineIndex }) => { ... });
+
+// Content events
+api.events.on('text-selected', ({ text, cfi, selector }) => { ... });
+api.events.on('link-clicked', ({ href, external }) => { ... });
+
+// Highlight events
+api.events.on('highlight-created', ({ highlight }) => { ... });
+
+// Library events
+api.events.on('progress-updated', ({ bookId, progress }) => { ... });
+```
+
+### Hook System
+
+Middleware-style hooks with cancellation support:
+
+```typescript
+api.hooks.register('onBeforePageTurn', async (context) => {
+  console.log(`About to turn from ${context.currentPage} to ${context.nextPage}`);
+  return true; // Allow navigation (return false to cancel)
+});
+
+api.hooks.register('onBeforeHighlightCreate', async (context) => {
+  // Validate or transform highlight before creation
+  return context.text.length > 10; // Only allow highlights > 10 chars
+});
+```
+
+### UI Extension Points
+
+Register custom toolbar buttons, sidebar views, and context menu items:
+
+```typescript
+// Add a toolbar button
+api.ui.toolbar.register({
+  id: 'my-button',
+  icon: 'star',
+  label: 'My Action',
+  onClick: (context) => {
+    console.log('Current book:', context.bookId);
+  }
+});
+
+// Add a sidebar view
+api.ui.sidebar.register({
+  id: 'my-view',
+  title: 'My Panel',
+  icon: 'layout-list',
+  mount: (container) => {
+    container.innerHTML = '<h3>Custom Content</h3>';
+    return () => container.innerHTML = ''; // Cleanup function
+  }
+});
+
+// Add context menu items
+api.ui.contextMenu.register({
+  id: 'copy-quote',
+  label: 'Copy as Quote',
+  condition: (ctx) => ctx.hasSelection,
+  action: (ctx) => navigator.clipboard.writeText(`> ${ctx.text}`)
+});
+```
+
+### Security Model
+
+Capability-based permissions protect sensitive operations:
+
+| Capability | Allows |
+|------------|--------|
+| `read-state` | Read all state stores |
+| `write-annotations` | Create/update/delete highlights |
+| `write-bookmarks` | Create/update/delete bookmarks |
+| `write-library` | Update progress, scan library |
+| `admin` | Full access (includes all above) |
+
+```typescript
+// Request specific capabilities
+const api = await window.LosLibros.connect('my-plugin', [
+  'read-state',
+  'write-annotations'
+]);
+
+// Operations without required capability will throw PermissionError
+```
+
+### Templater Helpers
+
+Convenient helpers for Templater scripts:
+
+```typescript
+const ll = window.LosLibros.helpers;
+
+// Get current book and location
+const book = ll.getCurrentBook();
+const location = ll.getCurrentLocation();
+const selection = ll.getCurrentSelection();
+
+// Get highlights for a book
+const highlights = ll.getHighlights(bookId);
+const randomHighlight = ll.getRandomHighlight();
+
+// Format citations
+const citation = ll.formatCitation('apa');
+```
+
+### API Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`api-v1.0.md`](docs/specifications/API/api-v1.0.md) | Complete API reference |
+| [`events.md`](docs/specifications/API/events.md) | Event catalog with payloads |
+| [`security.md`](docs/specifications/API/security.md) | Capability model |
+| [`ui-extensibility.md`](docs/specifications/API/ui-extensibility.md) | UI extension points |
+| [`expansion-points.md`](docs/specifications/API/expansion-points.md) | Future integrations |
 
 ## PDF Support
 
@@ -200,13 +396,35 @@ Configure in Obsidian Settings → Los Libros:
 
 ## Roadmap
 
+### Completed
+
 - [x] **Phase 0:** Server infrastructure (S3, OPDS, Docker)
 - [x] **Phase 1:** Plugin MVP (reader, library, progress)
 - [x] **Phase 2:** Highlights & Doc Doctor integration
 - [x] **Phase 3:** PDF support (server rendering, text layer, annotations)
 - [x] **Phase 4:** OCR integration (Tesseract, Ollama)
 - [x] **Phase 5:** PDF.js offline fallback
-- [ ] **Phase 6:** Intelligence layer (Smart Connections, LLM)
+- [x] **Phase 6:** Public API v1.0 (events, hooks, UI extensions, security)
+
+### In Progress
+
+- [ ] **Phase 7:** Intelligence layer (Smart Connections, LLM)
+
+### Planned API Expansions
+
+The following integrations are designed but not yet implemented. See [`expansion-points.md`](docs/specifications/API/expansion-points.md) for full specifications.
+
+| Integration | Priority | Description |
+|-------------|----------|-------------|
+| Shadow Notes | High | Markdown sidecar files for vault-wide search |
+| Templater Helpers | High | Extended helper functions for templates |
+| Dataview Integration | Medium | Reading dashboards and statistics queries |
+| QuickAdd Macros | Medium | Capture macros for highlights and notes |
+| Reading Statistics | Medium | Analytics, streaks, and reading goals |
+| Collections & Tags | Medium | Organize books into collections |
+| Calibre Sync | Low | Full metadata synchronization |
+| OPDS Browser | Low | Browse and download from OPDS catalogs |
+| PDF Annotations | Low | Import/export PDF native annotations |
 
 ## Related Projects
 

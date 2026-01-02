@@ -31,6 +31,7 @@ export const DEFAULT_NAVIGATOR_CONFIG: NavigatorConfig = {
   pageSnap: true,
   momentumScrolling: true,
   scrollSpeed: 1.0,
+  chapterWindowSize: 3, // Phase 3: Configurable virtualization window
 };
 
 /**

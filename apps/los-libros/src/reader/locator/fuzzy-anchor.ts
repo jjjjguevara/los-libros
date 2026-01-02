@@ -43,6 +43,12 @@ const MIN_CONTEXT_LENGTH = 10;
 /** Window size for sliding window search */
 const SEARCH_WINDOW_MULTIPLIER = 2;
 
+/** Maximum iterations before yielding to event loop */
+const CHUNK_SIZE = 1000;
+
+/** Maximum total iterations to prevent freezing on large texts */
+const MAX_ITERATIONS = 50000;
+
 // ============================================================================
 // Levenshtein Distance
 // ============================================================================
@@ -212,6 +218,7 @@ interface MatchResult {
 
 /**
  * Find the best fuzzy match using sliding window
+ * OPTIMIZED: Uses exact match first, limits iterations to prevent freezing
  */
 function findBestMatch(
   haystack: string,
@@ -224,10 +231,29 @@ function findBestMatch(
   if (!normalizedHaystack || !normalizedNeedle) return null;
 
   const windowSize = normalizedNeedle.length;
-  let bestMatch: MatchResult | null = null;
 
-  // Slide window through text
-  for (let i = 0; i <= normalizedHaystack.length - windowSize; i++) {
+  // OPTIMIZATION 1: Try exact match first (O(n) instead of O(n*m))
+  const exactIndex = normalizedHaystack.indexOf(normalizedNeedle);
+  if (exactIndex !== -1) {
+    return {
+      start: exactIndex,
+      end: exactIndex + windowSize,
+      distance: 0,
+      text: normalizedNeedle,
+    };
+  }
+
+  // If text is very long and we need fuzzy matching, limit search scope
+  // to prevent UI freezing
+  const haystackLen = normalizedHaystack.length;
+  const maxSearchPositions = Math.min(haystackLen - windowSize + 1, MAX_ITERATIONS);
+
+  let bestMatch: MatchResult | null = null;
+  let iterations = 0;
+
+  // Slide window through text with iteration limit
+  for (let i = 0; i <= haystackLen - windowSize && iterations < maxSearchPositions; i++) {
+    iterations++;
     const window = normalizedHaystack.slice(i, i + windowSize);
     const distance = levenshteinDistance(window, normalizedNeedle);
 
@@ -241,19 +267,27 @@ function findBestMatch(
           text: window,
         };
 
-        // Perfect match - no need to continue
-        if (distance === 0) break;
+        // OPTIMIZATION 2: Stop on very good match (distance <= 2)
+        // Perfect matches already handled above
+        if (distance <= 2) break;
       }
     }
   }
 
-  // Also try with slight variations in window size
-  if (!bestMatch || bestMatch.distance > 0) {
+  // OPTIMIZATION 3: Only try window variations if no good match found
+  // and we haven't exceeded iteration limit
+  if ((!bestMatch || bestMatch.distance > 2) && iterations < MAX_ITERATIONS) {
     for (const delta of [-2, -1, 1, 2]) {
       const adjustedSize = windowSize + delta;
       if (adjustedSize <= 0) continue;
 
-      for (let i = 0; i <= normalizedHaystack.length - adjustedSize; i++) {
+      const maxPos = Math.min(
+        haystackLen - adjustedSize + 1,
+        (MAX_ITERATIONS - iterations) / 4 // Distribute remaining budget across 4 deltas
+      );
+
+      for (let i = 0; i <= haystackLen - adjustedSize && i < maxPos; i++) {
+        iterations++;
         const window = normalizedHaystack.slice(i, i + adjustedSize);
         const distance = levenshteinDistance(window, normalizedNeedle);
 
@@ -265,9 +299,15 @@ function findBestMatch(
               distance,
               text: window,
             };
+
+            // Stop on good match
+            if (distance <= 2) break;
           }
         }
       }
+
+      // If we found a good match, stop trying other deltas
+      if (bestMatch && bestMatch.distance <= 2) break;
     }
   }
 

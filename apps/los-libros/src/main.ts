@@ -24,6 +24,9 @@ import { OPDSSyncService } from './opds/opds-sync';
 import { Migrator, BackupService, LinkUpdater } from './migration';
 import { BookSettingsStore, createBookSettingsStore } from './reader/book-settings-store';
 
+// Public API
+import { createAPI, type LosLibrosAPI, LosLibrosAPIImpl } from './api';
+
 export default class LosLibrosPlugin extends Plugin {
 	settings: LibrosSettings;
 	libraryStore: Store<LibraryState, LibraryAction>;
@@ -46,6 +49,9 @@ export default class LosLibrosPlugin extends Plugin {
 
 	// Per-book settings
 	bookSettingsStore: BookSettingsStore;
+
+	// Public API
+	api: LosLibrosAPIImpl;
 
 	private statusBarItem: HTMLElement | null = null;
 	private calibreStoreUnsubscribe: (() => void) | null = null;
@@ -157,6 +163,18 @@ export default class LosLibrosPlugin extends Plugin {
 		this.calibreStoreUnsubscribe = this.calibreService.getStore().subscribe(() => {
 			this.updateStatusBar();
 		});
+
+		// Initialize public API
+		this.api = createAPI({
+			libraryService: this.libraryService,
+			highlightService: this.highlightService,
+			bookmarkService: this.bookmarkService,
+			libraryStore: this.libraryStore,
+			highlightStore: this.highlightStore
+		});
+
+		// Expose API globally for Templater/QuickAdd
+		(window as any).LosLibros = this.api;
 
 		// Register views
 		this.registerView(
@@ -380,6 +398,12 @@ export default class LosLibrosPlugin extends Plugin {
 		if (this.calibreStoreUnsubscribe) {
 			this.calibreStoreUnsubscribe();
 		}
+
+		// Clean up API
+		if (this.api) {
+			this.api.dispose();
+		}
+		delete (window as any).LosLibros;
 	}
 
 	async loadSettings() {

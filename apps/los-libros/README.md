@@ -89,6 +89,16 @@ Custom theme support with configurable background and link colors.
 - Conflict resolution strategies (local-wins, remote-wins, last-write-wins)
 - Offline queue with retry logic
 
+### File System Architecture
+
+Advanced file handling with security-first design:
+
+- **Security Hardening**: DOMPurify HTML sanitization, path traversal protection, CSP headers, zip bomb detection
+- **Asset Extraction**: Unified API for images, audio, video, fonts with vault export and OCR integration
+- **Tiered Caching**: 3-tier cache (Memory LRU → IndexedDB → Server) with automatic promotion
+- **Offline Support**: Download books for offline reading, network monitoring, background sync
+- **Enhanced File Serving**: Chunked uploads, OPDS catalog generation, cover extraction, content deduplication
+
 ### Templates
 
 Liquid-based templating system for note generation:
@@ -183,7 +193,14 @@ src/
 ├── calibre/          # Calibre integration
 ├── sync/             # Sync services
 ├── templates/        # Note generation templates
-└── settings/         # Plugin settings
+├── settings/         # Plugin settings
+├── security/         # Content sanitization, CSP, resource policies
+├── assets/           # Asset extraction (images, media, covers, OCR)
+├── cache/            # Tiered caching (LRU, IndexedDB, monitoring)
+├── offline/          # Offline manager, network monitor, sync
+├── upload/           # Chunked upload system
+├── dedup/            # Content deduplication
+└── api/              # Public API, OPDS catalog/client
 ```
 
 ## Development

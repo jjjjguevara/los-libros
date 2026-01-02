@@ -55,6 +55,8 @@
     ChevronRight,
     Highlighter,
     StickyNote,
+    Columns,
+    AlignJustify,
   } from 'lucide-svelte';
 
   // Import the new renderer
@@ -1554,6 +1556,10 @@
   async function handleCreateHighlight(event: CustomEvent<{ color: HighlightColor; annotation?: string; tags?: string[]; type?: 'highlight' | 'underline' }>) {
     if (!pendingSelection) return;
 
+    // Clear text selection IMMEDIATELY when user clicks to create highlight
+    // This prevents overlay overlap with selection and gives immediate visual feedback
+    renderer?.clearSelection();
+
     const now = new Date();
 
     // Build W3C-aligned selector for robust re-anchoring
@@ -1607,9 +1613,6 @@
 
     // Sync to server
     syncManager?.create('annotation', highlight.id, highlight);
-
-    // Clear text selection to prevent double-highlight effect
-    renderer?.clearSelection();
 
     closePopup();
 
@@ -1942,6 +1945,20 @@
     isAutoScrolling = false;
   }
 
+  // Quick toggle between scrolled and paginated modes
+  async function toggleReadingMode() {
+    const newMode = readerSettings.flow === 'paginated' ? 'scrolled' : 'paginated';
+    console.log('[ServerReader] Toggling reading mode:', readerSettings.flow, '→', newMode);
+
+    // Dispatch settings change to use existing handler
+    const event = new CustomEvent('settingschange', {
+      detail: { settings: { flow: newMode } }
+    });
+    await handleSettingsChange(event as CustomEvent<{ settings: Partial<ReaderSettings> }>);
+
+    if (readerSettings.hapticFeedback) HapticFeedback.medium();
+  }
+
   function handleSpeedChange(event: CustomEvent<{ speed: number }>) {
     readerSettings = {
       ...readerSettings,
@@ -1999,6 +2016,12 @@
       case 'F':
         if (!event.metaKey && !event.ctrlKey) {
           toggleFullScreen();
+        }
+        break;
+      case 'm':
+      case 'M':
+        if (!event.metaKey && !event.ctrlKey && !loading) {
+          toggleReadingMode();
         }
         break;
     }
@@ -2139,6 +2162,19 @@
         <span class="font-size-display">{readerSettings.fontSize}</span>
         <button class="icon-button font-btn" on:click|stopPropagation={() => { readerSettings = {...readerSettings, fontSize: Math.min(40, readerSettings.fontSize + 2)}; renderer?.updateConfig({ fontSize: readerSettings.fontSize }); debouncedSaveSettings(); }} title="Increase font size">
           A+
+        </button>
+        <!-- Mode toggle -->
+        <button
+          class="icon-button mode-toggle"
+          on:click|stopPropagation={toggleReadingMode}
+          title={readerSettings.flow === 'paginated' ? 'Switch to Scrolled mode (M)' : 'Switch to Paginated mode (M)'}
+          disabled={loading}
+        >
+          {#if readerSettings.flow === 'paginated'}
+            <Columns size={18} />
+          {:else}
+            <AlignJustify size={18} />
+          {/if}
         </button>
       </div>
       <div class="topbar-right">
@@ -2459,6 +2495,22 @@
     font-weight: 600;
     font-size: 0.75rem;
     min-width: 32px;
+  }
+
+  .mode-toggle {
+    margin-left: 0.5rem;
+    padding: 0.35rem;
+    border-radius: 4px;
+    transition: background-color 0.2s, opacity 0.2s;
+  }
+
+  .mode-toggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .mode-toggle:hover:not(:disabled) {
+    background: var(--background-modifier-hover);
   }
 
   .font-size-display {

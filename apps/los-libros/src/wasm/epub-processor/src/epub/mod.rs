@@ -30,6 +30,100 @@ pub enum EpubError {
 
     #[error("Resource not found: {0}")]
     ResourceNotFound(String),
+
+    #[error("Security violation: {0}")]
+    SecurityViolation(String),
+}
+
+// ============================================================================
+// Security Constants
+// ============================================================================
+
+/// Maximum decompression ratio to prevent zip bombs (100:1)
+const MAX_DECOMPRESSION_RATIO: u64 = 100;
+
+/// Maximum total decompressed size (500MB)
+const MAX_TOTAL_SIZE: u64 = 500 * 1024 * 1024;
+
+/// Maximum number of files in an EPUB
+const MAX_FILE_COUNT: usize = 10000;
+
+// ============================================================================
+// Path Validation (Security)
+// ============================================================================
+
+/// Validate that a file path from a ZIP archive is safe.
+/// Returns an error if the path could be used for path traversal attacks.
+fn validate_zip_path(path: &str) -> Result<(), EpubError> {
+    // Empty paths are invalid
+    if path.is_empty() {
+        return Err(EpubError::SecurityViolation(
+            "Empty file path in archive".to_string(),
+        ));
+    }
+
+    // Absolute paths are not allowed
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Err(EpubError::SecurityViolation(format!(
+            "Absolute path not allowed: {}",
+            path
+        )));
+    }
+
+    // Windows-style absolute paths (C:\, D:\, etc.)
+    if path.len() >= 2 && path.chars().nth(1) == Some(':') {
+        return Err(EpubError::SecurityViolation(format!(
+            "Windows absolute path not allowed: {}",
+            path
+        )));
+    }
+
+    // Check for path traversal components
+    for component in path.split(['/', '\\']) {
+        match component {
+            // Parent directory traversal
+            ".." => {
+                return Err(EpubError::SecurityViolation(format!(
+                    "Path traversal detected: {}",
+                    path
+                )));
+            }
+            // Current directory is OK but we normalize it away
+            "." => continue,
+            // Empty components from double slashes are OK
+            "" => continue,
+            // Normal path component
+            _ => continue,
+        }
+    }
+
+    // Check for null bytes (could be used to bypass checks)
+    if path.contains('\0') {
+        return Err(EpubError::SecurityViolation(
+            "Null byte in file path".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Normalize a file path by removing redundant components.
+fn normalize_path(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+
+    for component in path.split(['/', '\\']) {
+        match component {
+            "" | "." => continue,
+            ".." => {
+                // This should have been caught by validate_zip_path,
+                // but handle defensively
+                components.pop();
+            }
+            _ => components.push(component),
+        }
+    }
+
+    components.join("/")
 }
 
 /// Parsed book metadata and structure
@@ -141,14 +235,55 @@ impl EpubBook {
                 format!("book-{:x}", hasher.finish())
             });
 
-        // Extract all resources into memory
+        // Extract all resources into memory with security checks
         let mut resources = HashMap::new();
-        for i in 0..archive.len() {
+        let mut total_size: u64 = 0;
+        let compressed_size = data.len() as u64;
+        let file_count = archive.len();
+
+        // Check file count limit
+        if file_count > MAX_FILE_COUNT {
+            return Err(EpubError::SecurityViolation(format!(
+                "Too many files in archive: {} (max {})",
+                file_count, MAX_FILE_COUNT
+            )));
+        }
+
+        for i in 0..file_count {
             let mut file = archive.by_index(i)?;
             if file.is_file() {
-                let name = file.name().to_string();
+                let raw_name = file.name().to_string();
+
+                // Security: Validate the file path
+                validate_zip_path(&raw_name)?;
+
+                // Normalize the path
+                let name = normalize_path(&raw_name);
+
+                // Read content with size limits
                 let mut content = Vec::new();
                 file.read_to_end(&mut content)?;
+
+                let file_size = content.len() as u64;
+                total_size += file_size;
+
+                // Security: Check for zip bomb (decompression ratio)
+                if compressed_size > 0 && total_size > compressed_size * MAX_DECOMPRESSION_RATIO {
+                    return Err(EpubError::SecurityViolation(format!(
+                        "Decompression ratio exceeded: {}:1 (max {}:1)",
+                        total_size / compressed_size,
+                        MAX_DECOMPRESSION_RATIO
+                    )));
+                }
+
+                // Security: Check total size limit
+                if total_size > MAX_TOTAL_SIZE {
+                    return Err(EpubError::SecurityViolation(format!(
+                        "Total decompressed size exceeded: {} bytes (max {} bytes)",
+                        total_size, MAX_TOTAL_SIZE
+                    )));
+                }
+
                 resources.insert(name, content);
             }
         }
@@ -509,5 +644,58 @@ mod tests {
     fn test_metadata_default() {
         let metadata = BookMetadata::default();
         assert!(metadata.title.is_empty());
+    }
+
+    // ========================================================================
+    // Security Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_zip_path_normal() {
+        // Normal paths should pass
+        assert!(validate_zip_path("OEBPS/content.opf").is_ok());
+        assert!(validate_zip_path("chapter1.html").is_ok());
+        assert!(validate_zip_path("images/cover.jpg").is_ok());
+        assert!(validate_zip_path("META-INF/container.xml").is_ok());
+    }
+
+    #[test]
+    fn test_validate_zip_path_traversal() {
+        // Path traversal should fail
+        assert!(validate_zip_path("../etc/passwd").is_err());
+        assert!(validate_zip_path("OEBPS/../../../etc/passwd").is_err());
+        assert!(validate_zip_path("..").is_err());
+        assert!(validate_zip_path("foo/../../bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_zip_path_absolute() {
+        // Absolute paths should fail
+        assert!(validate_zip_path("/etc/passwd").is_err());
+        assert!(validate_zip_path("\\Windows\\System32").is_err());
+        assert!(validate_zip_path("C:\\Windows\\System32").is_err());
+        assert!(validate_zip_path("D:\\data").is_err());
+    }
+
+    #[test]
+    fn test_validate_zip_path_empty() {
+        // Empty paths should fail
+        assert!(validate_zip_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_zip_path_null_byte() {
+        // Null bytes should fail
+        assert!(validate_zip_path("file\0name.txt").is_err());
+    }
+
+    #[test]
+    fn test_normalize_path() {
+        // Test path normalization
+        assert_eq!(normalize_path("a/b/c"), "a/b/c");
+        assert_eq!(normalize_path("a//b/c"), "a/b/c");
+        assert_eq!(normalize_path("a/./b/c"), "a/b/c");
+        assert_eq!(normalize_path("./a/b"), "a/b");
+        assert_eq!(normalize_path("a\\b\\c"), "a/b/c");
     }
 }

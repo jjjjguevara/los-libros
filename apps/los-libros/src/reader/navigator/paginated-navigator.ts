@@ -25,6 +25,7 @@ import type {
 } from './navigator-interface';
 import { createLocator } from './navigator-interface';
 import { DEFAULT_NAVIGATOR_CONFIG } from './navigator-factory';
+import { getSpineIndexFromCfi, resolveCfi } from '../renderer/cfi-utils';
 
 /**
  * Paginated Navigator implementation
@@ -41,6 +42,8 @@ export class PaginatedNavigator implements Navigator {
   private totalColumns = 0;
   private currentColumn = 0;
   private gap = 0;
+  private pageWidth = 0; // columnWidth + gap, for chapter positioning
+  private margin = 0; // Horizontal margin for chapter positioning and navigation
 
   // Content state
   private spineItems: SpineItemContent[] = [];
@@ -51,8 +54,15 @@ export class PaginatedNavigator implements Navigator {
 
   // Chapter windowing - only load chapters near current position for performance
   private loadedChapterWindow: Set<number> = new Set();
-  private readonly WINDOW_SIZE = 3; // Load current chapter ± 3 chapters
+  // Phase 3: Window size is now configurable via config.chapterWindowSize
   private readonly ACCURATE_WINDOW = 5; // Calculate accurate columns for ±5 chapters
+
+  /**
+   * Get the chapter window size from config (Phase 3: configurable)
+   */
+  private get windowSize(): number {
+    return this.config.chapterWindowSize ?? 3;
+  }
 
   // Navigation state
   private currentSpineIndex = 0;
@@ -75,10 +85,7 @@ export class PaginatedNavigator implements Navigator {
   private configUpdateTimer: number | null = null;
   private pendingConfigUpdate: Partial<NavigatorConfig> | null = null;
 
-  // Manual scroll handling (for swipe gestures)
-  private scrollEndTimer: number | null = null;
-  private isManualScrolling = false;
-  private boundHandleScroll: (() => void) | null = null;
+  // Wheel handling (for page turns)
   private boundHandleWheel: ((e: WheelEvent) => void) | null = null;
 
   get isReady(): boolean {
@@ -111,6 +118,9 @@ export class PaginatedNavigator implements Navigator {
     initialLocator?: Locator,
     cachedElements?: Map<number, HTMLElement>
   ): Promise<void> {
+    const loadStart = performance.now();
+    console.log(`[PaginatedNav] loadContent starting with ${spineItems.length} items`);
+
     if (!this.container) {
       throw new Error('Navigator not initialized');
     }
@@ -121,6 +131,7 @@ export class PaginatedNavigator implements Navigator {
       this.spineItems = spineItems;
 
       // Clear existing content
+      console.log('[PaginatedNav] Clearing existing content...');
       this.container.innerHTML = '';
       this.chapterElements.clear();
       this.chapterColumnOffsets.clear();
@@ -128,32 +139,102 @@ export class PaginatedNavigator implements Navigator {
       this.accurateColumnCounts.clear();
       this.loadedChapterWindow.clear();
 
-      // NOTE: Paginated mode requires all content loaded for CSS columns to work properly.
-      // Windowing/virtualization doesn't work with CSS multi-column layout because columns
-      // are calculated based on content flow, not fixed positions.
+      // Phase 3: Sliding window virtualization
+      // With per-chapter CSS columns (Phase 2), we can now virtualize!
+      // Only load chapters in the initial window, create placeholders for others.
 
-      // For small books, insert all at once
-      if (spineItems.length <= 20) {
-        await this.loadContentSync(spineItems, cachedElements);
-      } else {
-        // For large books, insert in chunks to avoid UI freeze
-        await this.loadContentChunked(spineItems, cachedElements);
+      // Determine initial position
+      const initialSpineIndex = initialLocator?.locations?.position ?? 0;
+      console.log(`[PaginatedNav] Initial spine index: ${initialSpineIndex}`);
+
+      // Calculate estimated layout FIRST (needed for placeholder positioning)
+      console.log('[PaginatedNav] Calculating estimated layout...');
+      const estStart = performance.now();
+      await this.initializeEstimatedLayout(spineItems);
+      console.log(`[PaginatedNav] Estimated layout done in ${(performance.now() - estStart).toFixed(1)}ms`);
+
+      // Load initial window of chapters
+      const windowStart = Math.max(0, initialSpineIndex - this.windowSize);
+      const windowEnd = Math.min(spineItems.length - 1, initialSpineIndex + this.windowSize);
+      console.log(`[PaginatedNav] Loading window [${windowStart}-${windowEnd}], creating ${spineItems.length} elements...`);
+
+      const fragStart = performance.now();
+      const fragment = document.createDocumentFragment();
+      for (let i = 0; i < spineItems.length; i++) {
+        const item = spineItems[i];
+        let chapterEl: HTMLElement;
+
+        if (i >= windowStart && i <= windowEnd) {
+          // Load real content for chapters in window
+          chapterEl = this.getOrCreateChapterElement(item, cachedElements);
+          this.loadedChapterWindow.add(i);
+        } else {
+          // Create placeholder for chapters outside window
+          chapterEl = this.createPlaceholderElement(item);
+        }
+
+        this.chapterElements.set(i, chapterEl);
+        fragment.appendChild(chapterEl);
+
+        // Yield to main thread every 20 elements to prevent freeze
+        if (i > 0 && i % 20 === 0) {
+          await new Promise(r => setTimeout(r, 0));
+        }
       }
+      console.log(`[PaginatedNav] Fragment built in ${(performance.now() - fragStart).toFixed(1)}ms`);
 
-      // Calculate layout
+      console.log('[PaginatedNav] Appending fragment to container...');
+      const appendStart = performance.now();
+      this.container.appendChild(fragment);
+      console.log(`[PaginatedNav] Fragment appended in ${(performance.now() - appendStart).toFixed(1)}ms`);
+
+      // Yield to browser to process layout before continuing
+      await new Promise(r => requestAnimationFrame(r));
+
+      // Calculate accurate layout for loaded chapters
+      console.log('[PaginatedNav] Calculating accurate layout...');
+      const layoutStart = performance.now();
       await this.calculateLayout();
+      console.log(`[PaginatedNav] Layout calculated in ${(performance.now() - layoutStart).toFixed(1)}ms`);
 
       // Navigate to initial position
+      console.log('[PaginatedNav] Navigating to initial position...');
+      const navStart = performance.now();
       if (initialLocator) {
         await this.goTo({ type: 'locator', locator: initialLocator }, { instant: true });
       } else {
         await this.goTo({ type: 'position', position: 0 }, { instant: true });
       }
+      console.log(`[PaginatedNav] Initial navigation done in ${(performance.now() - navStart).toFixed(1)}ms`);
 
       this.emit('rendered', { spineIndex: this.currentSpineIndex });
+      console.log(`[PaginatedNav] loadContent complete! Total: ${(performance.now() - loadStart).toFixed(1)}ms`);
     } finally {
       this.emit('loading', false);
     }
+  }
+
+  /**
+   * Initialize estimated layout before loading content
+   * Phase 3: Needed for placeholder positioning
+   */
+  private async initializeEstimatedLayout(spineItems: SpineItemContent[]): Promise<void> {
+    const containerWidth = this.columnWidth + this.gap;
+    if (containerWidth <= 0) return;
+
+    const charsPerColumn = 2500;
+    let totalColumns = 0;
+
+    for (const item of spineItems) {
+      const contentLength = item.html?.length || 3000;
+      const estimatedColumns = Math.max(1, Math.ceil(contentLength / charsPerColumn));
+
+      this.chapterColumnOffsets.set(item.index, totalColumns);
+      this.chapterColumnCounts.set(item.index, estimatedColumns);
+      totalColumns += estimatedColumns;
+    }
+
+    this.totalColumns = totalColumns;
   }
 
   /**
@@ -206,23 +287,59 @@ export class PaginatedNavigator implements Navigator {
 
   /**
    * Get cached element or create new one
+   * Phase 2: Always apply per-chapter column styles (even to cached elements)
    */
   private getOrCreateChapterElement(
     item: SpineItemContent,
     cachedElements?: Map<number, HTMLElement>
   ): HTMLElement {
+    let chapterEl: HTMLElement;
+
     if (cachedElements?.has(item.index)) {
       const cached = cachedElements.get(item.index)!;
       if (cached.innerHTML && !cached.classList.contains('epub-chapter-placeholder')) {
-        return cached.cloneNode(true) as HTMLElement;
+        chapterEl = cached.cloneNode(true) as HTMLElement;
+      } else {
+        chapterEl = this.createChapterElement(item);
+        return chapterEl; // Already has correct styles from createChapterElement
       }
+    } else {
+      chapterEl = this.createChapterElement(item);
+      return chapterEl; // Already has correct styles from createChapterElement
     }
-    return this.createChapterElement(item);
+
+    // Phase 2: Apply per-chapter column styles to cached elements
+    const { height } = this.getIntegerDimensions();
+    const effectiveMargin = Math.max(this.config.margin, 10);
+
+    // Get estimated position from layout calculations
+    const containerWidth = this.columnWidth + this.gap;
+    const columnOffset = this.chapterColumnOffsets.get(item.index) ?? 0;
+    const leftPosition = this.margin + columnOffset * containerWidth;
+
+    // Estimate width based on content length
+    const estimatedColumns = Math.max(1, Math.ceil((item.html?.length || 3000) / 2500));
+    const estimatedWidth = estimatedColumns * containerWidth;
+
+    chapterEl.style.cssText = `
+      position: absolute;
+      top: 0;
+      left: ${leftPosition}px;
+      width: ${estimatedWidth}px;
+      height: ${height - 2 * effectiveMargin}px;
+      box-sizing: border-box;
+      column-width: ${this.columnWidth}px;
+      column-gap: ${this.gap}px;
+      column-fill: auto;
+      overflow: hidden;
+    `;
+
+    return chapterEl;
   }
 
   /**
    * Create a placeholder element for chapters outside the loading window
-   * Placeholders have estimated dimensions to maintain scroll position accuracy
+   * Phase 2: Placeholders use absolute positioning like real chapters
    */
   private createPlaceholderElement(item: SpineItemContent): HTMLElement {
     const chapterEl = document.createElement('div');
@@ -230,16 +347,40 @@ export class PaginatedNavigator implements Navigator {
     chapterEl.dataset.spineIndex = String(item.index);
     chapterEl.dataset.href = item.href;
 
-    // Estimate height based on content length (rough: 1 column per 3000 chars)
-    const estimatedColumns = Math.max(1, Math.ceil((item.html?.length || 3000) / 3000));
-    const estimatedWidth = estimatedColumns * (this.columnWidth + this.gap);
+    // Estimate columns based on content length (rough: 1 column per 2500 chars)
+    const estimatedColumns = Math.max(1, Math.ceil((item.html?.length || 3000) / 2500));
+    const containerWidth = this.columnWidth + this.gap;
+    const estimatedWidth = estimatedColumns * containerWidth;
 
-    // Set inline-block to maintain column flow
+    // Get estimated position from our layout calculations
+    // Include margin offset so chapters position inside container padding
+    const columnOffset = this.chapterColumnOffsets.get(item.index) ?? 0;
+    const leftPosition = this.margin + columnOffset * containerWidth;
+
+    // DEBUG: Log placeholder positioning (only first few and sample)
+    if (item.index < 3 || item.index === 100) {
+      console.log(`[Placeholder ${item.index}]`, {
+        margin: this.margin,
+        columnOffset,
+        containerWidth,
+        leftPosition,
+        estimatedWidth,
+        formula: `left = ${this.margin} + ${columnOffset} * ${containerWidth} = ${leftPosition}`
+      });
+    }
+
+    const { height } = this.getIntegerDimensions();
+    const effectiveMargin = Math.max(this.config.margin, 10);
+
+    // Phase 2: Absolute positioning for placeholders
     chapterEl.style.cssText = `
-      display: inline-block;
+      position: absolute;
+      top: 0;
+      left: ${leftPosition}px;
       width: ${estimatedWidth}px;
-      height: 100%;
-      vertical-align: top;
+      height: ${height - 2 * effectiveMargin}px;
+      background: var(--background-secondary, #f5f5f5);
+      opacity: 0.3;
     `;
 
     return chapterEl;
@@ -250,8 +391,8 @@ export class PaginatedNavigator implements Navigator {
    * Loads nearby chapters and unloads distant ones
    */
   private async updateChapterWindow(targetSpineIndex: number): Promise<void> {
-    const startIdx = Math.max(0, targetSpineIndex - this.WINDOW_SIZE);
-    const endIdx = Math.min(this.spineItems.length - 1, targetSpineIndex + this.WINDOW_SIZE);
+    const startIdx = Math.max(0, targetSpineIndex - this.windowSize);
+    const endIdx = Math.min(this.spineItems.length - 1, targetSpineIndex + this.windowSize);
 
     // Load chapters that should be in window but aren't loaded
     for (let i = startIdx; i <= endIdx; i++) {
@@ -261,7 +402,7 @@ export class PaginatedNavigator implements Navigator {
     }
 
     // Unload chapters that are far outside the window (keep a buffer)
-    const unloadDistance = this.WINDOW_SIZE + 2;
+    const unloadDistance = this.windowSize + 2;
     for (const loadedIdx of this.loadedChapterWindow) {
       if (Math.abs(loadedIdx - targetSpineIndex) > unloadDistance) {
         this.unloadChapterContent(loadedIdx);
@@ -270,13 +411,34 @@ export class PaginatedNavigator implements Navigator {
   }
 
   /**
-   * Load content for a specific chapter
+   * Load content for a specific chapter.
+   * Includes retry logic for chapters that failed to load initially.
    */
   private async loadChapterContent(index: number): Promise<void> {
     const item = this.spineItems[index];
     const element = this.chapterElements.get(index);
 
     if (!item || !element || this.loadedChapterWindow.has(index)) return;
+
+    // Check if the chapter has error placeholder content
+    const isErrorPlaceholder = item.html.includes('class="error"') ||
+                               item.html.includes('Failed to load chapter');
+
+    // If it's an error placeholder and we have a refetcher, try to reload
+    if (isErrorPlaceholder && this.config.chapterRefetcher) {
+      const freshHtml = await this.loadChapterWithRetry(index, item.href, 2);
+      if (freshHtml) {
+        // Update the cached content with fresh HTML
+        item.html = freshHtml;
+      } else {
+        // Retry failed, emit navigation failed event
+        this.emit('navigationFailed', {
+          spineIndex: index,
+          href: item.href,
+          reason: 'Failed to load chapter after multiple retries',
+        });
+      }
+    }
 
     // Create loaded element and replace placeholder
     const loadedEl = this.createChapterElement(item);
@@ -289,7 +451,38 @@ export class PaginatedNavigator implements Navigator {
   }
 
   /**
+   * Attempt to load a chapter with retry and exponential backoff.
+   * @returns Fresh HTML content if successful, null if all retries failed.
+   */
+  private async loadChapterWithRetry(
+    index: number,
+    href: string,
+    maxRetries: number
+  ): Promise<string | null> {
+    if (!this.config.chapterRefetcher) return null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const freshHtml = await this.config.chapterRefetcher(index, href);
+        if (freshHtml && !freshHtml.includes('class="error"')) {
+          return freshHtml;
+        }
+      } catch (error) {
+        console.warn(`[PaginatedNavigator] Retry ${attempt + 1}/${maxRetries + 1} failed for chapter ${index}:`, error);
+      }
+
+      // Exponential backoff before next retry
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Recalculate layout for a single chapter after content change
+   * Phase 2: Also updates chapter positions
    */
   private recalculateChapterLayout(index: number): void {
     const chapterEl = this.chapterElements.get(index);
@@ -297,21 +490,32 @@ export class PaginatedNavigator implements Navigator {
 
     const containerWidth = this.columnWidth + this.gap;
     const scrollWidth = chapterEl.scrollWidth;
-    const chapterColumns = Math.ceil(scrollWidth / containerWidth);
+    const chapterColumns = Math.max(1, Math.ceil(scrollWidth / containerWidth));
 
     // Update column count for this chapter
     const oldColumns = this.chapterColumnCounts.get(index) ?? 0;
     this.chapterColumnCounts.set(index, chapterColumns);
+    this.accurateColumnCounts.add(index);
 
-    // Adjust total columns
+    // Phase 2: Update this chapter's width
+    chapterEl.style.width = `${chapterColumns * containerWidth}px`;
+
+    // Adjust total columns and update positions for subsequent chapters
     const delta = chapterColumns - oldColumns;
     if (delta !== 0) {
       this.totalColumns += delta;
 
-      // Update offsets for all subsequent chapters
+      // Update offsets and positions for all subsequent chapters
       for (let i = index + 1; i < this.spineItems.length; i++) {
         const currentOffset = this.chapterColumnOffsets.get(i) ?? 0;
-        this.chapterColumnOffsets.set(i, currentOffset + delta);
+        const newOffset = currentOffset + delta;
+        this.chapterColumnOffsets.set(i, newOffset);
+
+        // Phase 2: Update chapter position (include margin offset)
+        const subsequentEl = this.chapterElements.get(i);
+        if (subsequentEl) {
+          subsequentEl.style.left = `${this.margin + newOffset * containerWidth}px`;
+        }
       }
     }
   }
@@ -341,12 +545,8 @@ export class PaginatedNavigator implements Navigator {
       this.resizeObserver = null;
     }
 
-    // Clean up scroll and wheel handlers
+    // Clean up wheel handler
     if (this.container) {
-      if (this.boundHandleScroll) {
-        this.container.removeEventListener('scroll', this.boundHandleScroll);
-        this.boundHandleScroll = null;
-      }
       if (this.boundHandleWheel) {
         this.container.removeEventListener('wheel', this.boundHandleWheel);
         this.boundHandleWheel = null;
@@ -357,10 +557,6 @@ export class PaginatedNavigator implements Navigator {
     if (this.resizeDebounceTimer !== null) {
       window.clearTimeout(this.resizeDebounceTimer);
       this.resizeDebounceTimer = null;
-    }
-    if (this.scrollEndTimer !== null) {
-      window.clearTimeout(this.scrollEndTimer);
-      this.scrollEndTimer = null;
     }
     if (this.configUpdateTimer !== null) {
       window.clearTimeout(this.configUpdateTimer);
@@ -394,8 +590,8 @@ export class PaginatedNavigator implements Navigator {
     const effectiveColumns = this.calculateEffectiveColumns(width);
     const totalGap = (effectiveColumns - 1) * this.config.columnGap;
 
-    // Increase effective margin for better reading experience (minimum 60px)
-    const effectiveMargin = Math.max(this.config.margin, 60);
+    // Minimum margin for usability (10px to prevent cramped layouts)
+    const effectiveMargin = Math.max(this.config.margin, 10);
 
     // Force integer column width to prevent sub-pixel drift
     // This is the KEY algorithm for zero drift
@@ -407,35 +603,45 @@ export class PaginatedNavigator implements Navigator {
     const exactContentWidth = this.columnWidth * effectiveColumns + totalGap;
     const actualMargin = Math.floor((width - exactContentWidth) / 2);
 
-    // Use scroll-based pagination instead of transform
-    // This matches the proven approach from the iframe-based paginator
+    // Store margin for chapter positioning and navigation transforms
+    this.margin = actualMargin;
+
+    // DEBUG: Log all layout calculations
+    console.log('[Layout] Container dimensions:', { width, height });
+    console.log('[Layout] Column config:', {
+      effectiveColumns,
+      columnWidth: this.columnWidth,
+      gap: this.gap,
+      totalGap,
+      exactContentWidth,
+      actualMargin: this.margin,
+      pageWidth: this.columnWidth + this.gap
+    });
+
+    // Use transform-based pagination for clean clipping and virtualization
+    // Each chapter will have its own CSS columns, navigated via translate3d
+    // NOTE: overflow is NOT hidden here - viewport-wrapper handles clipping
+    // Content-container must allow absolutely-positioned chapters to extend beyond bounds
     this.container.style.cssText = `
       width: ${width}px;
       height: ${height}px;
-      overflow-x: scroll;
-      overflow-y: hidden;
+      overflow: visible;
       position: relative;
       box-sizing: border-box;
-      scroll-snap-type: x mandatory;
-      scroll-behavior: smooth;
-      -webkit-overflow-scrolling: touch;
       --page-margin: ${actualMargin}px;
+      --page-mask-width: ${Math.min(30, actualMargin)}px;
     `;
 
-    // Hide scrollbar but keep scroll functionality
-    this.container.style.scrollbarWidth = 'none'; // Firefox
-    // @ts-ignore - WebKit scrollbar hiding
-    this.container.style.msOverflowStyle = 'none'; // IE/Edge
-
-    // Apply CSS columns to container
-    // Use exact integer values to prevent drift
-    this.container.style.columnWidth = `${this.columnWidth}px`;
-    this.container.style.columnGap = `${this.gap}px`;
-    this.container.style.columnFill = 'auto';
+    // Phase 2: NO CSS columns on main container
+    // Each chapter gets its own CSS columns for per-chapter pagination
+    // This enables virtualization (only load 3-5 chapters at a time)
     this.container.style.paddingLeft = `${actualMargin}px`;
     this.container.style.paddingRight = `${actualMargin}px`;
     this.container.style.paddingTop = `${effectiveMargin}px`;
     this.container.style.paddingBottom = `${effectiveMargin}px`;
+
+    // Store column dimensions for chapter CSS
+    this.pageWidth = this.columnWidth + this.gap;
 
     // Typography
     this.container.style.fontSize = `${this.config.fontSize}px`;
@@ -446,6 +652,9 @@ export class PaginatedNavigator implements Navigator {
     // Theme
     this.container.style.backgroundColor = this.config.theme.background;
     this.container.style.color = this.config.theme.foreground;
+
+    // NOTE: overflow:visible is intentional - viewport-wrapper handles clipping
+    // The content-container must allow chapters to extend beyond for transform-based nav
   }
 
   /**
@@ -489,6 +698,45 @@ export class PaginatedNavigator implements Navigator {
     // Parse and insert HTML content
     chapterEl.innerHTML = item.html;
 
+    // Phase 2: Per-chapter CSS columns
+    // Each chapter is its own multi-column container, enabling virtualization
+    const { height } = this.getIntegerDimensions();
+    const effectiveMargin = Math.max(this.config.margin, 10);
+
+    // Get estimated position from layout calculations
+    const containerWidth = this.columnWidth + this.gap;
+    const columnOffset = this.chapterColumnOffsets.get(item.index) ?? 0;
+    const leftPosition = this.margin + columnOffset * containerWidth;
+
+    // Estimate width based on content length (will be refined during accurate layout)
+    const estimatedColumns = Math.max(1, Math.ceil((item.html?.length || 3000) / 2500));
+    const estimatedWidth = estimatedColumns * containerWidth;
+
+    // DEBUG: Log chapter positioning (only first few and sample)
+    if (item.index < 3 || item.index === 100) {
+      console.log(`[Chapter ${item.index}]`, {
+        margin: this.margin,
+        columnOffset,
+        containerWidth,
+        leftPosition,
+        estimatedWidth,
+        formula: `left = ${this.margin} + ${columnOffset} * ${containerWidth} = ${leftPosition}`
+      });
+    }
+
+    chapterEl.style.cssText = `
+      position: absolute;
+      top: 0;
+      left: ${leftPosition}px;
+      width: ${estimatedWidth}px;
+      height: ${height - 2 * effectiveMargin}px;
+      box-sizing: border-box;
+      column-width: ${this.columnWidth}px;
+      column-gap: ${this.gap}px;
+      column-fill: auto;
+      overflow: hidden;
+    `;
+
     // Apply chapter-specific styles plus column break handling
     const columnStyles = `
       /* Prevent awkward column breaks */
@@ -512,10 +760,6 @@ export class PaginatedNavigator implements Navigator {
     const styleEl = document.createElement('style');
     styleEl.textContent = columnStyles + (item.css || '');
     chapterEl.insertBefore(styleEl, chapterEl.firstChild);
-
-    // Note: scroll-snap-align doesn't work with CSS columns since columns
-    // are virtual, not actual DOM elements. The snap must be handled via
-    // JavaScript in handleScrollEnd() which snaps to column boundaries.
 
     return chapterEl;
   }
@@ -549,16 +793,26 @@ export class PaginatedNavigator implements Navigator {
 
   /**
    * Synchronous layout calculation for small books (accurate measurement)
+   * Phase 2: Also positions chapters absolutely at their column offsets
    */
   private calculateLayoutSync(containerWidth: number): void {
     let totalColumns = 0;
 
     for (const [index, chapterEl] of this.chapterElements) {
       this.chapterColumnOffsets.set(index, totalColumns);
+
+      // Phase 2: Position chapter at its column offset (include margin offset)
+      const leftPosition = this.margin + totalColumns * containerWidth;
+      chapterEl.style.left = `${leftPosition}px`;
+
       const scrollWidth = chapterEl.scrollWidth;
       const chapterColumns = Math.max(1, Math.ceil(scrollWidth / containerWidth));
       this.chapterColumnCounts.set(index, chapterColumns);
       this.accurateColumnCounts.add(index);
+
+      // Set chapter width to accommodate all its columns
+      chapterEl.style.width = `${chapterColumns * containerWidth}px`;
+
       totalColumns += chapterColumns;
     }
 
@@ -569,29 +823,42 @@ export class PaginatedNavigator implements Navigator {
    * Estimation-based layout for large books.
    * Uses content length to estimate columns - NO reflow triggered.
    * Accurate measurements happen lazily during navigation.
+   * NOTE: This only updates offset maps, NOT element positions.
+   * Elements are positioned during creation (createPlaceholderElement/createChapterElement)
+   * and refined during refineColumnsAroundPosition for nearby chapters.
    */
   private async calculateLayoutEstimated(containerWidth: number): Promise<void> {
+    console.log(`[PaginatedNav] calculateLayoutEstimated: ${this.spineItems.length} items, containerWidth=${containerWidth}`);
+    const startTime = performance.now();
     let totalColumns = 0;
 
     // Estimate columns based on content length (chars per column estimate)
     // Average: ~2500 chars per column at default font size
     const charsPerColumn = 2500;
 
-    for (const item of this.spineItems) {
+    for (let i = 0; i < this.spineItems.length; i++) {
+      const item = this.spineItems[i];
       const contentLength = item.html?.length || 3000;
       const estimatedColumns = Math.max(1, Math.ceil(contentLength / charsPerColumn));
 
       this.chapterColumnOffsets.set(item.index, totalColumns);
       this.chapterColumnCounts.set(item.index, estimatedColumns);
+
+      // NOTE: DO NOT set element positions here - it triggers massive reflows
+      // with 277 chapters. Elements are already positioned during creation.
+      // Positions are refined lazily in refineColumnsAroundPosition.
+
       totalColumns += estimatedColumns;
     }
 
     this.totalColumns = totalColumns;
+    console.log(`[PaginatedNav] calculateLayoutEstimated done: ${totalColumns} total columns in ${(performance.now() - startTime).toFixed(1)}ms`);
   }
 
   /**
    * Lazily measure accurate column counts for chapters around the current position.
    * Called during navigation to refine estimates without blocking.
+   * Phase 2: Also updates chapter positions after recalculation
    */
   private refineColumnsAroundPosition(spineIndex: number): void {
     if (!this.container) return;
@@ -620,17 +887,24 @@ export class PaginatedNavigator implements Navigator {
       this.chapterColumnOffsets.set(i, totalColumns);
 
       // Measure accurately if in window, otherwise keep estimate
-      if (i >= startIdx && i <= endIdx) {
-        const chapterEl = this.chapterElements.get(i);
-        if (chapterEl) {
-          const scrollWidth = chapterEl.scrollWidth;
-          const chapterColumns = Math.max(1, Math.ceil(scrollWidth / containerWidth));
-          this.chapterColumnCounts.set(i, chapterColumns);
-          this.accurateColumnCounts.add(i);
-        }
+      const chapterEl = this.chapterElements.get(i);
+      if (i >= startIdx && i <= endIdx && chapterEl) {
+        const scrollWidth = chapterEl.scrollWidth;
+        const chapterColumns = Math.max(1, Math.ceil(scrollWidth / containerWidth));
+        this.chapterColumnCounts.set(i, chapterColumns);
+        this.accurateColumnCounts.add(i);
       }
 
-      totalColumns += this.chapterColumnCounts.get(i) || 1;
+      const columns = this.chapterColumnCounts.get(i) || 1;
+
+      // Phase 2: Update chapter position (include margin offset)
+      if (chapterEl) {
+        const leftPosition = this.margin + totalColumns * containerWidth;
+        chapterEl.style.left = `${leftPosition}px`;
+        chapterEl.style.width = `${columns * containerWidth}px`;
+      }
+
+      totalColumns += columns;
     }
 
     this.totalColumns = totalColumns;
@@ -660,6 +934,9 @@ export class PaginatedNavigator implements Navigator {
         targetSpineIndex = this.findSpineIndexByHref(target.href);
         if (targetSpineIndex === -1) return false;
 
+        // Phase 3: Update chapter window to ensure target chapter is loaded
+        await this.updateChapterWindow(targetSpineIndex);
+
         // Refine column counts around target position (lazy accurate measurement)
         this.refineColumnsAroundPosition(targetSpineIndex);
 
@@ -688,8 +965,10 @@ export class PaginatedNavigator implements Navigator {
         this.currentColumn = targetColumn;
         this.updateCurrentLocator();
 
-        // Trigger blink animation on target element after navigation
+        // Phase 6: Add delay after navigation before triggering blink
+        // This ensures the view has settled and the element is visible
         if (blinkTarget) {
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           this.triggerBlinkAnimation(blinkTarget);
         }
 
@@ -701,11 +980,65 @@ export class PaginatedNavigator implements Navigator {
         return true;
 
       case 'cfi':
-        // Parse CFI to find spine item and position
-        const cfiResult = this.parseCfiToColumn(target.cfi);
-        if (!cfiResult) return false;
-        targetSpineIndex = cfiResult.spineIndex;
-        targetColumn = cfiResult.column;
+        // Phase 5: Fix CFI navigation with proper chapter preloading
+        // 1. Extract spine index from CFI first
+        const cfiSpineIndex = getSpineIndexFromCfi(target.cfi);
+        if (cfiSpineIndex === null || cfiSpineIndex < 0 || cfiSpineIndex >= this.spineItems.length) {
+          console.warn('[Navigator] Invalid CFI spine index:', cfiSpineIndex);
+          return false;
+        }
+        targetSpineIndex = cfiSpineIndex;
+
+        // 2. Load the chapter window BEFORE trying to resolve CFI
+        await this.updateChapterWindow(targetSpineIndex);
+        this.refineColumnsAroundPosition(targetSpineIndex);
+
+        // 3. Wait for render to complete
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+        // 4. Get the chapter element and resolve CFI
+        const cfiChapterEl = this.chapterElements.get(targetSpineIndex);
+        if (cfiChapterEl && this.loadedChapterWindow.has(targetSpineIndex)) {
+          try {
+            // Resolve CFI to find the target node
+            const resolution = await resolveCfi(document, target.cfi);
+            if (resolution && resolution.node) {
+              // Find the element containing this node
+              let targetEl: HTMLElement | null = null;
+              if (resolution.node.nodeType === Node.TEXT_NODE) {
+                targetEl = resolution.node.parentElement;
+              } else if (resolution.node.nodeType === Node.ELEMENT_NODE) {
+                targetEl = resolution.node as HTMLElement;
+              }
+
+              if (targetEl && cfiChapterEl.contains(targetEl)) {
+                // Calculate which column contains this element
+                const elementColumn = this.getColumnForElement(targetEl, targetSpineIndex);
+                if (elementColumn !== null) {
+                  targetColumn = elementColumn;
+                  // Navigate and trigger blink
+                  await this.navigateToColumn(targetColumn, instant);
+                  this.currentSpineIndex = targetSpineIndex;
+                  this.currentColumn = targetColumn;
+                  this.updateCurrentLocator();
+                  this.triggerBlinkAnimation(targetEl);
+
+                  // Emit events
+                  this.emit('chapterVisible', { spineIndex: targetSpineIndex, visible: true });
+                  if (this.currentLocator) {
+                    this.emit('relocated', this.currentLocator);
+                  }
+                  return true;
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('[Navigator] CFI resolution failed:', err);
+          }
+        }
+
+        // Fallback: Navigate to chapter start if CFI resolution failed
+        targetColumn = this.chapterColumnOffsets.get(targetSpineIndex) ?? 0;
         break;
 
       case 'progression':
@@ -725,6 +1058,9 @@ export class PaginatedNavigator implements Navigator {
         targetColumn = chapterOffset + progressionColumn;
         break;
     }
+
+    // Phase 3: Update chapter window BEFORE navigation to ensure content is loaded
+    await this.updateChapterWindow(targetSpineIndex);
 
     // Refine column counts around target position (lazy accurate measurement)
     this.refineColumnsAroundPosition(targetSpineIndex);
@@ -820,25 +1156,38 @@ export class PaginatedNavigator implements Navigator {
   // ============================================================================
 
   /**
-   * Navigate to a specific column using scrollLeft
-   * This uses native scroll with scroll-snap for reliable pagination
+   * Navigate to a specific column using CSS transforms
+   * This uses translate3d for GPU-accelerated, clean-clipping navigation
+   * NOTE: Transform must NOT include margin offset - chapters are positioned with margin,
+   * so transform only needs to account for column offset. Adding margin to transform
+   * would double-offset the content.
    */
   private async navigateToColumn(column: number, instant: boolean): Promise<void> {
     if (!this.container) return;
 
     const pageWidth = this.columnWidth + this.gap;
-    const targetScrollLeft = column * pageWidth;
+    // Transform moves by column offset only - margin is already in chapter positions
+    const targetTranslateX = -(column * pageWidth);
+
+    // DEBUG: Log navigation transform
+    console.log(`[Navigate] column=${column}`, {
+      pageWidth,
+      targetTranslateX,
+      margin: this.margin,
+      formula: `translateX = -(${column} * ${pageWidth}) = ${targetTranslateX}`,
+      instant
+    });
 
     if (instant) {
-      // Disable smooth scrolling temporarily for instant navigation
-      this.container.style.scrollBehavior = 'auto';
-      this.container.scrollLeft = targetScrollLeft;
-      // Re-enable smooth scrolling
-      this.container.style.scrollBehavior = 'smooth';
+      // Instant navigation: no transition
+      this.container.style.transition = 'none';
+      this.container.style.transform = `translate3d(${targetTranslateX}px, 0, 0)`;
+      // Force reflow to apply transform immediately
+      void this.container.offsetWidth;
       return;
     }
 
-    // Animated scroll using native smooth scrolling
+    // Animated navigation using CSS transition
     this.isAnimating = true;
 
     return new Promise(resolve => {
@@ -848,28 +1197,24 @@ export class PaginatedNavigator implements Navigator {
         return;
       }
 
-      const handleScrollEnd = () => {
+      const handleTransitionEnd = () => {
         this.isAnimating = false;
-        this.container?.removeEventListener('scrollend', handleScrollEnd);
+        this.container?.removeEventListener('transitionend', handleTransitionEnd);
         resolve();
       };
 
-      // Use scrollend event if available, fallback to timeout
-      if ('onscrollend' in window) {
-        this.container.addEventListener('scrollend', handleScrollEnd, { once: true });
-      }
+      // Set up transition
+      this.container.style.transition = 'transform 300ms ease-out';
+      this.container.addEventListener('transitionend', handleTransitionEnd, { once: true });
 
-      // Perform smooth scroll
-      this.container.scrollTo({
-        left: targetScrollLeft,
-        behavior: 'smooth'
-      });
+      // Apply transform
+      this.container.style.transform = `translate3d(${targetTranslateX}px, 0, 0)`;
 
-      // Fallback timeout in case scrollend doesn't fire or isn't supported
+      // Fallback timeout in case transitionend doesn't fire
       setTimeout(() => {
         if (this.isAnimating) {
           this.isAnimating = false;
-          this.container?.removeEventListener('scrollend', handleScrollEnd);
+          this.container?.removeEventListener('transitionend', handleTransitionEnd);
           resolve();
         }
       }, 400);
@@ -1056,12 +1401,35 @@ export class PaginatedNavigator implements Navigator {
     const containerRect = this.container.getBoundingClientRect();
     const elementRect = element.getBoundingClientRect();
 
-    // Calculate which column the element is in based on scroll position
-    const scrollLeft = this.container.scrollLeft;
-    const elementLeft = elementRect.left - containerRect.left + scrollLeft;
+    // Get current transform offset (negative value)
+    const currentTransformX = this.getCurrentTransformX();
+    const elementLeft = elementRect.left - containerRect.left - currentTransformX;
     const elementColumn = Math.floor(elementLeft / pageWidth);
 
     return chapterOffset + elementColumn;
+  }
+
+  /**
+   * Get the current translateX value from the container transform
+   */
+  private getCurrentTransformX(): number {
+    if (!this.container) return 0;
+
+    const transform = this.container.style.transform;
+    if (!transform || transform === 'none') return 0;
+
+    // Parse translate3d(Xpx, Ypx, Zpx) or translateX(Xpx)
+    const match = transform.match(/translate3d\(([-\d.]+)px/);
+    if (match) {
+      return parseFloat(match[1]);
+    }
+
+    const matchX = transform.match(/translateX\(([-\d.]+)px/);
+    if (matchX) {
+      return parseFloat(matchX[1]);
+    }
+
+    return 0;
   }
 
   // ============================================================================
@@ -1247,16 +1615,11 @@ export class PaginatedNavigator implements Navigator {
   // ============================================================================
 
   /**
-   * Setup scroll and wheel event listeners for navigation
-   * - Scroll handler: snaps to column boundaries after manual swipe
-   * - Wheel handler: turns pages with scrollwheel
+   * Setup wheel event listener for page navigation
+   * With transform-based navigation, we only need wheel handling (no scroll events)
    */
   private setupScrollHandler(): void {
     if (!this.container) return;
-
-    // Scroll handler for swipe gesture snapping
-    this.boundHandleScroll = () => this.handleScroll();
-    this.container.addEventListener('scroll', this.boundHandleScroll, { passive: true });
 
     // Wheel handler for page turns
     this.boundHandleWheel = (e: WheelEvent) => this.handleWheel(e);
@@ -1289,74 +1652,6 @@ export class PaginatedNavigator implements Navigator {
     }
   }
 
-  /**
-   * Handle scroll events to detect manual scrolling and snap when stopped
-   */
-  private handleScroll(): void {
-    // Skip if we're programmatically animating
-    if (this.isAnimating) return;
-
-    // Mark as manual scrolling
-    this.isManualScrolling = true;
-
-    // Clear existing timer
-    if (this.scrollEndTimer !== null) {
-      window.clearTimeout(this.scrollEndTimer);
-    }
-
-    // Set timer to detect scroll end (debounce)
-    this.scrollEndTimer = window.setTimeout(() => {
-      this.handleScrollEnd();
-    }, 100);
-  }
-
-  /**
-   * Snap to the nearest column boundary when manual scrolling ends
-   * This provides the "rubber-band" snap effect for swipe gestures
-   */
-  private handleScrollEnd(): void {
-    if (!this.container || !this.isManualScrolling) return;
-
-    this.isManualScrolling = false;
-    this.scrollEndTimer = null;
-
-    const pageWidth = this.columnWidth + this.gap;
-    if (pageWidth <= 0) return;
-
-    const currentScroll = this.container.scrollLeft;
-    const targetColumn = Math.round(currentScroll / pageWidth);
-    const targetScroll = targetColumn * pageWidth;
-
-    // Snap to column boundary if not aligned
-    if (Math.abs(currentScroll - targetScroll) > 1) {
-      this.isAnimating = true;
-      this.container.scrollTo({
-        left: targetScroll,
-        behavior: 'smooth'
-      });
-
-      // Reset animation flag after scroll completes
-      setTimeout(() => {
-        this.isAnimating = false;
-      }, 300);
-    }
-
-    // Update state if column changed
-    if (targetColumn !== this.currentColumn) {
-      const oldColumn = this.currentColumn;
-      this.currentColumn = targetColumn;
-      this.currentSpineIndex = this.getSpineIndexFromColumn(targetColumn);
-      this.updateCurrentLocator();
-
-      // Emit navigation events
-      const direction = targetColumn > oldColumn ? 'forward' : 'backward';
-      this.emit('pageAnimationStart', { direction });
-      this.emit('pageAnimationEnd', { direction });
-      if (this.currentLocator) {
-        this.emit('relocated', this.currentLocator);
-      }
-    }
-  }
 
   // ============================================================================
   // Event System
