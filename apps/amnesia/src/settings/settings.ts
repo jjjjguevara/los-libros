@@ -118,6 +118,73 @@ export interface AssetSettings {
   exportFolder: string;
 }
 
+// ==========================================================================
+// Unified Sync Architecture Settings Types
+// ==========================================================================
+
+/**
+ * Conflict resolution strategy for unified sync
+ */
+export type UnifiedConflictStrategy =
+  | 'last-write-wins'
+  | 'prefer-local'
+  | 'prefer-remote'
+  | 'merge'
+  | 'ask-user';
+
+/**
+ * Default sync mode
+ */
+export type UnifiedSyncMode = 'incremental' | 'full' | 'custom';
+
+/**
+ * Unified sync architecture settings
+ */
+export interface UnifiedSyncSettings {
+  /** Enable unified sync engine. Default: false */
+  enabled: boolean;
+
+  /** Default sync mode. Default: 'incremental' */
+  defaultMode: UnifiedSyncMode;
+
+  /** Default conflict resolution strategy. Default: 'last-write-wins' */
+  defaultConflictStrategy: UnifiedConflictStrategy;
+
+  /** Maximum concurrent operations. Default: 5 */
+  concurrency: number;
+
+  /** Checkpoint interval (items processed before saving). Default: 100 */
+  checkpointInterval: number;
+
+  /** Enable cross-session resume. Default: true */
+  enableResume: boolean;
+
+  /** Rate limit: max requests per second. Default: 10 */
+  rateLimit: number;
+
+  /** Show resume notification on startup. Default: true */
+  showResumeNotification: boolean;
+
+  /** Enabled adapters. Default: all */
+  enabledAdapters: {
+    calibre: boolean;
+    server: boolean;
+    file: boolean;
+  };
+
+  /** Parallel cover downloads. Default: true */
+  parallelCoverDownloads: boolean;
+
+  /** Cover download concurrency. Default: 5 */
+  coverDownloadConcurrency: number;
+
+  /** Batch note generation. Default: true */
+  batchNoteGeneration: boolean;
+
+  /** Note generation batch size. Default: 50 */
+  noteGenerationBatchSize: number;
+}
+
 export interface LibrosSettings {
   // Server connection
   serverUrl: string;
@@ -183,6 +250,26 @@ export interface LibrosSettings {
   templatesFolder: string;                 // Vault folder for custom templates
 
   // ==========================================================================
+  // Note Generation Settings
+  // ==========================================================================
+  notesFolder: string;                     // Where book notes are created
+  noteUpdateMode: 'never' | 'frontmatter' | 'full';  // How to update existing notes
+
+  // Frontmatter Mapping (for metadata sync)
+  frontmatterMapping: {
+    author?: string;
+    series?: string;
+    bookshelves?: string;
+    rating?: string;
+    progress?: string;
+  };
+
+  // Wikilink formatting
+  wikilinkAuthors: boolean;
+  wikilinkSeries: boolean;
+  wikilinkBookshelves: boolean;
+
+  // ==========================================================================
   // Per-Book Settings Storage
   // ==========================================================================
   perBookSettings: Record<string, BookSettingsRecord>;
@@ -208,6 +295,13 @@ export interface LibrosSettings {
 
   /** Asset extraction and export settings */
   assets: AssetSettings;
+
+  // ==========================================================================
+  // Unified Sync Architecture Settings
+  // ==========================================================================
+
+  /** Unified sync engine configuration */
+  unifiedSync: UnifiedSyncSettings;
 }
 
 export const DEFAULT_SETTINGS: LibrosSettings = {
@@ -268,6 +362,20 @@ export const DEFAULT_SETTINGS: LibrosSettings = {
   templates: DEFAULT_TEMPLATE_SETTINGS,
   templatesFolder: 'Templates/Amnesia',
 
+  // Note Generation Settings
+  notesFolder: 'Books',
+  noteUpdateMode: 'frontmatter',
+  frontmatterMapping: {
+    author: 'author',
+    series: 'series',
+    bookshelves: 'bookshelves',
+    rating: 'rating',
+    progress: 'progress',
+  },
+  wikilinkAuthors: true,
+  wikilinkSeries: true,
+  wikilinkBookshelves: true,
+
   // Per-Book Settings Storage
   perBookSettings: {},
 
@@ -323,5 +431,29 @@ export const DEFAULT_SETTINGS: LibrosSettings = {
     generateThumbnails: true,
     thumbnailMaxSize: 200,
     exportFolder: 'Assets/Books',
+  },
+
+  // ==========================================================================
+  // Unified Sync Architecture Settings Defaults
+  // ==========================================================================
+
+  unifiedSync: {
+    enabled: false,
+    defaultMode: 'incremental',
+    defaultConflictStrategy: 'last-write-wins',
+    concurrency: 5,
+    checkpointInterval: 100,
+    enableResume: true,
+    rateLimit: 10,
+    showResumeNotification: true,
+    enabledAdapters: {
+      calibre: true,
+      server: true,
+      file: true,
+    },
+    parallelCoverDownloads: true,
+    coverDownloadConcurrency: 5,
+    batchNoteGeneration: true,
+    noteGenerationBatchSize: 50,
   },
 };

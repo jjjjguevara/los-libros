@@ -18,7 +18,9 @@ Amnesia is an Obsidian plugin for reading EPUBs and PDFs. The plugin uses:
 | `apps/amnesia/src/reader/shadow-dom-renderer.ts` | Shadow DOM content loading, mode switching |
 | `apps/amnesia/src/reader/shadow-dom-view.ts` | Container management, CSS variables |
 | `apps/amnesia/src/main.ts` | Plugin entry point, service initialization |
-| `apps/amnesia/src/settings/settings.ts` | Plugin settings interface |
+| `apps/amnesia/src/settings/settings.ts` | Plugin settings interface and defaults |
+| `apps/amnesia/src/settings/settings-tab/` | Tabbed settings UI (Library, Reading, Sync, Notes, Advanced) |
+| `apps/amnesia/src/settings/templates-settings-tab.ts` | Liquid template configuration for note generation |
 
 ## Build & Deploy
 
@@ -394,4 +396,5 @@ mcp__obsidian-devtools__obsidian_capture_screenshot({ format: 'png' })
 
 | Version | Change |
 |---------|--------|
-| 2026-01-02 | Fixed column count over-estimation (4x → accurate), fixed vertical margins |
+| 0.2.2 (2026-01-03) | Restructured settings UI: 5 tabs (Library, Reading, Sync, Notes, Advanced), integrated Liquid templates for note generation, added metadata mapping settings |
+| 0.2.1 (2026-01-02) | Fixed column count over-estimation (4x → accurate), fixed vertical margins |

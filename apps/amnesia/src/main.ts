@@ -1,6 +1,6 @@
 import { Plugin, WorkspaceLeaf, setIcon, Notice, TFile } from 'obsidian';
 import type { SyncProgress } from './calibre/calibre-types';
-import { LibrosSettingTab } from './settings/settings-tab';
+import { AmnesiaSettingTab } from './settings/settings-tab/settings-tab';
 import { LibrosSettings, DEFAULT_SETTINGS } from './settings/settings';
 import { LibraryView, LIBRARY_VIEW_TYPE } from './library/library-view';
 import { ReaderView, READER_VIEW_TYPE } from './reader/reader-view';
@@ -37,6 +37,9 @@ import { DeduplicationManager, type DedupManagerConfig, InMemoryDedupStorage } f
 import { AssetExtractor } from './assets/asset-extractor';
 import { OPDSFeedClient, type OPDSClientConfig } from './api/opds-feed-client';
 
+// Unified Sync Architecture
+import { UnifiedSyncEngine, type SyncConfig, type SyncProgress as UnifiedSyncProgress } from './sync';
+
 export default class AmnesiaPlugin extends Plugin {
 	settings: LibrosSettings;
 	libraryStore: Store<LibraryState, LibraryAction>;
@@ -67,6 +70,10 @@ export default class AmnesiaPlugin extends Plugin {
 	deduplicationManager: DeduplicationManager | null = null;
 	assetExtractor: AssetExtractor | null = null;
 	opdsFeedClient: OPDSFeedClient | null = null;
+
+	// Unified Sync Architecture
+	syncEngine: UnifiedSyncEngine | null = null;
+	private syncEngineUnsubscribes: (() => void)[] = [];
 
 	// Public API
 	api: AmnesiaAPIImpl;
@@ -472,6 +479,88 @@ export default class AmnesiaPlugin extends Plugin {
 			}
 		});
 
+		// Unified Sync commands
+		this.addCommand({
+			id: 'unified-sync-full',
+			name: 'Unified Sync: Full Library Sync',
+			callback: async () => {
+				if (!this.syncEngine) {
+					new Notice('Unified Sync is not enabled');
+					return;
+				}
+				new Notice('Starting full sync...');
+				try {
+					const result = await this.syncEngine.fullSync();
+					new Notice(`Sync complete: ${result.stats.succeeded} items processed`);
+				} catch (error) {
+					new Notice(`Sync failed: ${error}`);
+				}
+			}
+		});
+
+		this.addCommand({
+			id: 'unified-sync-incremental',
+			name: 'Unified Sync: Incremental Sync (Catch-Up)',
+			callback: async () => {
+				if (!this.syncEngine) {
+					new Notice('Unified Sync is not enabled');
+					return;
+				}
+				new Notice('Starting incremental sync...');
+				try {
+					const result = await this.syncEngine.incrementalSync();
+					new Notice(`Sync complete: ${result.stats.succeeded} changes processed`);
+				} catch (error) {
+					new Notice(`Sync failed: ${error}`);
+				}
+			}
+		});
+
+		this.addCommand({
+			id: 'unified-sync-cancel',
+			name: 'Unified Sync: Cancel Active Sync',
+			callback: async () => {
+				if (!this.syncEngine) {
+					new Notice('Unified Sync is not enabled');
+					return;
+				}
+				await this.syncEngine.cancel();
+				new Notice('Sync cancelled');
+			}
+		});
+
+		this.addCommand({
+			id: 'unified-sync-status',
+			name: 'Unified Sync: Show Status',
+			callback: () => {
+				if (!this.syncEngine) {
+					new Notice('Unified Sync is not enabled');
+					return;
+				}
+				const status = this.syncEngine.getStatus();
+				const progress = this.syncEngine.getProgress();
+				console.log('Unified Sync Status:', { status, progress });
+				new Notice(`Sync Status: ${status} (${progress?.percentage || 0}%)`);
+			}
+		});
+
+		this.addCommand({
+			id: 'unified-sync-resume',
+			name: 'Unified Sync: Resume Incomplete Sync',
+			callback: async () => {
+				if (!this.syncEngine) {
+					new Notice('Unified Sync is not enabled');
+					return;
+				}
+				const result = await this.syncEngine.resumeIfIncomplete();
+				if (result) {
+					new Notice(`Resumed and completed sync: ${result.stats.succeeded} items`);
+				} else {
+					new Notice('No incomplete sync to resume');
+				}
+			}
+		});
+
 		// Migration commands
 		this.addCommand({
 			id: 'create-backup',
@@ -553,7 +642,7 @@ export default class AmnesiaPlugin extends Plugin {
 		});
 
 		// Add settings tab
-		this.addSettingTab(new LibrosSettingTab(this.app, this));
+		this.addSettingTab(new AmnesiaSettingTab(this.app, this));
 
 		// Initialize services on layout ready
 		this.app.workspace.onLayoutReady(async () => {
@@ -579,6 +668,11 @@ export default class AmnesiaPlugin extends Plugin {
 					console.warn('Failed to connect to Calibre library:', error);
 				}
 			}
+
+			// Initialize Unified Sync Engine if enabled
+			if (this.settings.unifiedSync.enabled) {
+				await this.initializeUnifiedSyncEngine();
+			}
 		});
 
 		console.log('Amnesia plugin loaded');
@@ -586,6 +680,19 @@ export default class AmnesiaPlugin extends Plugin {
 
 	onunload() {
 		console.log('Unloading Amnesia plugin');
+
+		// ==========================================================================
+		// Cleanup Unified Sync Architecture
+		// ==========================================================================
+		for (const unsubscribe of this.syncEngineUnsubscribes) {
+			unsubscribe();
+		}
+		this.syncEngineUnsubscribes = [];
+
+		if (this.syncEngine) {
+			this.syncEngine.destroy();
+			this.syncEngine = null;
+		}
 
 		// ==========================================================================
 		// Cleanup File System Architecture Services (reverse order of initialization)
@@ -1051,5 +1158,79 @@ export default class AmnesiaPlugin extends Plugin {
 		});
 
 		workspace.revealLeaf(leaf);
+	}
+
+	// ==========================================================================
+	// Unified Sync Engine
+	// ==========================================================================
+
+	/**
+	 * Initialize the Unified Sync Engine with adapters
+	 */
+	private async initializeUnifiedSyncEngine(): Promise<void> {
+		const syncSettings = this.settings.unifiedSync;
+
+		// Build sync config from settings
+		const config: Partial<SyncConfig> = {
+			defaultMode: syncSettings.defaultMode,
+			defaultConflictStrategy: syncSettings.defaultConflictStrategy,
+			concurrency: syncSettings.concurrency,
+			enableResume: syncSettings.enableResume,
+			checkpointInterval: syncSettings.checkpointInterval,
+			rateLimit: syncSettings.rateLimit,
+		};
+
+		// Create the sync engine
+		this.syncEngine = new UnifiedSyncEngine(
+			this.app,
+			() => this.settings,
+			{ config }
+		);
+
+		// Register adapters based on settings
+		if (syncSettings.enabledAdapters.calibre && this.calibreService) {
+			const { CalibreSyncAdapter } = await import('./sync/adapters/calibre-adapter');
+			const calibreAdapter = new CalibreSyncAdapter(
+				this.app,
+				this.calibreService,
+				() => this.settings
+			);
+			this.syncEngine.registerAdapter(calibreAdapter);
+		}
+
+		// Note: ServerSyncAdapter and FileSyncAdapter would be registered here
+		// when AmnesiaClient and ChunkedUploader are available
+		// Currently these are placeholders for future implementation
+
+		// Subscribe to sync engine events
+		const progressUnsub = this.syncEngine.on('progress', (progress: UnifiedSyncProgress) => {
+			console.log('Sync progress:', progress);
+			// Could update a status bar or progress modal here
+		});
+		this.syncEngineUnsubscribes.push(progressUnsub);
+
+		const errorUnsub = this.syncEngine.on('error', (data) => {
+			console.error('Sync error:', data.error);
+			new Notice(`Sync error: ${data.error.message}`);
+		});
+		this.syncEngineUnsubscribes.push(errorUnsub);
+
+		const completeUnsub = this.syncEngine.on('complete', (data) => {
+			console.log('Sync complete:', data.session);
+			if (data.session.errorItems > 0) {
+				new Notice(`Sync complete with ${data.session.errorItems} errors`);
+			}
+		});
+		this.syncEngineUnsubscribes.push(completeUnsub);
+
+		// Check for incomplete syncs to resume
+		if (syncSettings.enableResume && syncSettings.showResumeNotification) {
+			const hasResumable = await this.syncEngine.hasResumableSync();
+			if (hasResumable) {
+				new Notice('An incomplete sync was detected. Use "Unified Sync: Resume" to continue.');
+			}
+		}
+
+		console.log('Unified Sync Engine initialized');
 	}
 }

@@ -1,6 +1,6 @@
 {
   "name": "amnesia",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Ebook reader for Obsidian with OPDS support and Doc Doctor integration",
   "main": "main.js",
   "scripts": {
@@ -26,6 +26,7 @@
     "epub-cfi-resolver": "^1.0.2",
     "fast-xml-parser": "^4.3.0",
     "liquidjs": "^10.10.0",
+    "minisearch": "^7.2.0",
     "pdfjs-dist": "^4.0.0",
     "sql.js": "^1.10.0",
     "uuid": "^9.0.0"
