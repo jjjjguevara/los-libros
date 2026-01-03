@@ -1,0 +1,59 @@
+[package]
+name = "epub-processor"
+version = "0.1.0"
+authors = ["Amnesia"]
+edition = "2021"
+description = "WASM-based EPUB processor for Amnesia Obsidian plugin"
+repository = "https://github.com/amnesia/amnesia"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+]}
+
+# Serde for serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+
+# ZIP extraction (pure Rust)
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+# XML parsing
+roxmltree = "0.19"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Regex for search
+regex = "1.10"
+
+# Optional: better panic messages in debug
+console_error_panic_hook = { version = "0.1", optional = true }
+
+# Unicode normalization
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+# Optimize for size
+opt-level = "s"
+lto = true

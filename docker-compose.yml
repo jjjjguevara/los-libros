@@ -4,7 +4,7 @@ services:
   # MinIO - S3-compatible storage for local development
   minio:
     image: minio/minio:latest
-    container_name: los-libros-minio
+    container_name: amnesia-minio
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # Web Console
@@ -23,7 +23,7 @@ services:
   # MinIO client for initial setup
   minio-setup:
     image: minio/mc:latest
-    container_name: los-libros-minio-setup
+    container_name: amnesia-minio-setup
     depends_on:
       minio:
         condition: service_healthy
@@ -35,12 +35,12 @@ services:
       echo 'MinIO bucket created successfully';
       "
 
-  # Los Libros Server
+  # Amnesia Server
   server:
     build:
-      context: ./apps/los-libros-server
+      context: ./apps/amnesia-server
       dockerfile: Dockerfile
-    container_name: los-libros-server
+    container_name: amnesia-server
     ports:
       - "3000:3000"
     environment:
@@ -53,7 +53,7 @@ services:
       S3_SECRET_KEY: password123
       S3_REGION: us-east-1
       DATABASE_URL: sqlite:./libros.db
-      RUST_LOG: los_libros_server=debug,tower_http=debug
+      RUST_LOG: amnesia_server=debug,tower_http=debug
     depends_on:
       minio:
         condition: service_healthy
@@ -73,4 +73,4 @@ volumes:
 
 networks:
   default:
-    name: los-libros-network
+    name: amnesia-network

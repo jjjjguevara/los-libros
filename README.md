@@ -1,8 +1,8 @@
-# Los Libros
+# Amnesia
 
 > **Version 0.2.0**
 
-**Los Libros** is a self-hosted ebook reader ecosystem for Obsidian, consisting of a Rust-based server and an Obsidian plugin. Part of the **DD** (Doc Doctor) + **LL** (Los Libros) suite.
+**Amnesia** is a self-hosted ebook reader ecosystem for Obsidian, consisting of a Rust-based server and an Obsidian plugin. Part of the **DD** (Doc Doctor) + **LL** (Amnesia) suite.
 
 ## Features
 
@@ -19,10 +19,10 @@
 ## Project Structure
 
 ```
-los-libros/
+amnesia/
 ├── apps/
-│   ├── los-libros-server/     # Rust server (Axum, S3, OPDS)
-│   └── los-libros/            # Obsidian plugin (Svelte, Epub.js)
+│   ├── amnesia-server/     # Rust server (Axum, S3, OPDS)
+│   └── amnesia/            # Obsidian plugin (Svelte, Epub.js)
 │       └── src/
 │           ├── api/           # Public API (v0.2.0)
 │           │   ├── events/    # Event emitter & hooks
@@ -58,7 +58,7 @@ los-libros/
 
 1. **Clone and install dependencies:**
    ```bash
-   cd los-libros
+   cd amnesia
    pnpm install
    ```
 
@@ -69,13 +69,13 @@ los-libros/
 
 3. **Start the server (development):**
    ```bash
-   cd apps/los-libros-server
+   cd apps/amnesia-server
    cargo run
    ```
 
 4. **Start the plugin (development):**
    ```bash
-   cd apps/los-libros
+   cd apps/amnesia
    pnpm dev
    ```
 
@@ -131,7 +131,7 @@ The plugin uses a sophisticated multi-column CSS layout system for paginated rea
 
 ## Public API
 
-Los Libros exposes a fully-typed public API for external plugins, Templater scripts, and automation workflows.
+Amnesia exposes a fully-typed public API for external plugins, Templater scripts, and automation workflows.
 
 > **Full API documentation**: [`docs/specifications/API/`](docs/specifications/API/)
 
@@ -141,10 +141,10 @@ The API is available via two access points:
 
 ```typescript
 // From another Obsidian plugin
-const api = app.plugins.plugins['los-libros'].api;
+const api = app.plugins.plugins['amnesia'].api;
 
 // From Templater, QuickAdd, or DataviewJS
-const api = window.LosLibros;
+const api = window.Amnesia;
 ```
 
 ### Core Features
@@ -159,7 +159,7 @@ const api = window.LosLibros;
 ### Example Usage
 
 ```typescript
-const api = window.LosLibros;
+const api = window.Amnesia;
 
 // Subscribe to reactive state (Svelte stores)
 api.state.library.subscribe(state => {
@@ -270,7 +270,7 @@ Capability-based permissions protect sensitive operations:
 
 ```typescript
 // Request specific capabilities
-const api = await window.LosLibros.connect('my-plugin', [
+const api = await window.Amnesia.connect('my-plugin', [
   'read-state',
   'write-annotations'
 ]);
@@ -283,7 +283,7 @@ const api = await window.LosLibros.connect('my-plugin', [
 Convenient helpers for Templater scripts:
 
 ```typescript
-const ll = window.LosLibros.helpers;
+const ll = window.Amnesia.helpers;
 
 // Get current book and location
 const book = ll.getCurrentBook();
@@ -310,7 +310,7 @@ const citation = ll.formatCitation('apa');
 
 ## PDF Support
 
-Los Libros provides comprehensive PDF rendering with feature parity to EPUB:
+Amnesia provides comprehensive PDF rendering with feature parity to EPUB:
 
 ### Server-Side Rendering (pdfium-render)
 
@@ -398,9 +398,9 @@ DATABASE_URL=sqlite:./libros.db
 
 ### Plugin Settings
 
-Configure in Obsidian Settings → Los Libros:
+Configure in Obsidian Settings → Amnesia:
 
-- **Server URL** — Your Los Libros server instance
+- **Server URL** — Your Amnesia server instance
 - **Books Folder** — Local vault folder for EPUBs
 - **Sync Settings** — Progress and highlight sync options
 - **Templates** — Liquid templates for book notes and highlights

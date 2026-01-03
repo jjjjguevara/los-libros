@@ -1,10 +1,10 @@
-# CLAUDE.md - Los Libros Development Guide
+# CLAUDE.md - Amnesia Development Guide
 
 > This document captures learnings, patterns, and best practices from debugging sessions with Claude Code.
 
 ## Project Overview
 
-Los Libros is an Obsidian plugin for reading EPUBs and PDFs. The plugin uses:
+Amnesia is an Obsidian plugin for reading EPUBs and PDFs. The plugin uses:
 - **Svelte** for UI components
 - **Shadow DOM** for isolated EPUB rendering
 - **CSS Multi-Column Layout** for paginated reading
@@ -14,11 +14,11 @@ Los Libros is an Obsidian plugin for reading EPUBs and PDFs. The plugin uses:
 
 | File | Purpose |
 |------|---------|
-| `apps/los-libros/src/reader/navigator/paginated-navigator.ts` | Core pagination logic, column calculation, navigation |
-| `apps/los-libros/src/reader/shadow-dom-renderer.ts` | Shadow DOM content loading, mode switching |
-| `apps/los-libros/src/reader/shadow-dom-view.ts` | Container management, CSS variables |
-| `apps/los-libros/src/main.ts` | Plugin entry point, service initialization |
-| `apps/los-libros/src/settings/settings.ts` | Plugin settings interface |
+| `apps/amnesia/src/reader/navigator/paginated-navigator.ts` | Core pagination logic, column calculation, navigation |
+| `apps/amnesia/src/reader/shadow-dom-renderer.ts` | Shadow DOM content loading, mode switching |
+| `apps/amnesia/src/reader/shadow-dom-view.ts` | Container management, CSS variables |
+| `apps/amnesia/src/main.ts` | Plugin entry point, service initialization |
+| `apps/amnesia/src/settings/settings.ts` | Plugin settings interface |
 
 ## Build & Deploy
 
@@ -27,11 +27,11 @@ Los Libros is an Obsidian plugin for reading EPUBs and PDFs. The plugin uses:
 npm run build
 
 # The built file goes to:
-# apps/los-libros/temp/vault/.obsidian/plugins/los-libros/main.js
+# apps/amnesia/temp/vault/.obsidian/plugins/amnesia/main.js
 
 # IMPORTANT: Copy to actual vault for testing
-cp apps/los-libros/temp/vault/.obsidian/plugins/los-libros/main.js \
-   "/path/to/your/vault/.obsidian/plugins/los-libros/main.js"
+cp apps/amnesia/temp/vault/.obsidian/plugins/amnesia/main.js \
+   "/path/to/your/vault/.obsidian/plugins/amnesia/main.js"
 ```
 
 ## Obsidian DevTools MCP Usage
@@ -53,7 +53,7 @@ mcp__obsidian-devtools__obsidian_get_vault_info()
 ```javascript
 // The reader is nested in Svelte component context
 (function() {
-  const leaves = app.workspace.getLeavesOfType('los-libros-reader');
+  const leaves = app.workspace.getLeavesOfType('amnesia-reader');
   const view = leaves[0]?.view;
   const component = view.component;
   const ctx = component.$$.ctx;
@@ -72,7 +72,7 @@ Test fixes on the DOM before modifying code:
 
 ```javascript
 (function() {
-  const leaves = app.workspace.getLeavesOfType('los-libros-reader');
+  const leaves = app.workspace.getLeavesOfType('amnesia-reader');
   const view = leaves[0].view;
   const contentEl = view.contentEl;
 
@@ -97,7 +97,7 @@ Test fixes on the DOM before modifying code:
 
 ```javascript
 (async function() {
-  const leaves = app.workspace.getLeavesOfType('los-libros-reader');
+  const leaves = app.workspace.getLeavesOfType('amnesia-reader');
   const view = leaves[0].view;
   const ctx = view.component.$$.ctx;
   const nav = ctx[3].navigator;
@@ -126,7 +126,7 @@ mcp__obsidian-devtools__obsidian_get_console_logs({ level: 'all', limit: 50 })
 ### Reloading Plugin
 
 ```javascript
-mcp__obsidian-devtools__obsidian_reload_plugin({ pluginId: 'los-libros' })
+mcp__obsidian-devtools__obsidian_reload_plugin({ pluginId: 'amnesia' })
 ```
 
 ## CSS Multi-Column Layout Pitfalls

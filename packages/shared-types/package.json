@@ -1,7 +1,7 @@
 {
-  "name": "@los-libros/shared-types",
+  "name": "@amnesia/shared-types",
   "version": "0.1.0",
-  "description": "Shared TypeScript types for Los Libros ecosystem",
+  "description": "Shared TypeScript types for Amnesia ecosystem",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -9,7 +9,7 @@
     "dev": "tsc --watch"
   },
   "keywords": [
-    "los-libros",
+    "amnesia",
     "types",
     "typescript"
   ],

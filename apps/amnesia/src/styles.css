@@ -1,0 +1,827 @@
+/* Amnesia - Main Styles */
+
+/* ============================================
+   LOS LIBROS CSS VARIABLES
+   Override these in Obsidian CSS snippets
+   for hotswappable theming customization.
+   ============================================ */
+
+:root {
+  /* Reader Chrome */
+  --amnesia-toolbar-bg: var(--background-primary);
+  --amnesia-toolbar-border: var(--background-modifier-border);
+  --amnesia-sidebar-bg: transparent;
+  --amnesia-sidebar-width: 300px;
+
+  /* Progress Bar */
+  --amnesia-progress-height: 4px;
+  --amnesia-progress-bg: var(--background-modifier-border);
+  --amnesia-progress-fill: var(--interactive-accent);
+
+  /* Highlight Colors (customizable via snippets) */
+  --amnesia-highlight-yellow: rgba(254, 243, 199, 0.6);
+  --amnesia-highlight-green: rgba(209, 250, 229, 0.6);
+  --amnesia-highlight-blue: rgba(219, 234, 254, 0.6);
+  --amnesia-highlight-pink: rgba(252, 231, 243, 0.6);
+  --amnesia-highlight-purple: rgba(237, 233, 254, 0.6);
+
+  /* Highlight Cards */
+  --amnesia-highlight-card-bg: var(--background-primary);
+  --amnesia-highlight-card-border: var(--background-modifier-border);
+  --amnesia-highlight-card-radius: var(--radius-s);
+  --amnesia-highlight-border-width: 3px;
+
+  /* Popup Styling */
+  --amnesia-popup-bg: var(--background-primary);
+  --amnesia-popup-border: var(--background-modifier-border);
+  --amnesia-popup-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --amnesia-popup-radius: 8px;
+
+  /* Quick Color Palette (Instant Highlight) */
+  --amnesia-palette-bg: var(--background-primary);
+  --amnesia-palette-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+
+  /* Reader Theme Colors (epub.js injection) */
+  --amnesia-reader-bg-light: #ffffff;
+  --amnesia-reader-text-light: #333333;
+  --amnesia-reader-bg-dark: #1e1e1e;
+  --amnesia-reader-text-dark: #e0e0e0;
+  --amnesia-reader-bg-sepia: #f4ecd8;
+  --amnesia-reader-text-sepia: #5b4636;
+  --amnesia-reader-bg-night: #000000;
+  --amnesia-reader-text-night: #ffcc66;
+  --amnesia-reader-bg-paper: #f5f5f0;
+  --amnesia-reader-text-paper: #1a1a1a;
+  --amnesia-reader-bg-forest: #1a2e1a;
+  --amnesia-reader-text-forest: #a8d8a8;
+
+  /* Book Cards */
+  --amnesia-card-hover-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --amnesia-card-radius: 8px;
+
+  /* Auto-scroll */
+  --amnesia-autoscroll-indicator-bg: var(--interactive-accent);
+  --amnesia-autoscroll-indicator-size: 8px;
+}
+
+/* Dark mode overrides */
+.theme-dark {
+  --amnesia-popup-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --amnesia-palette-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  --amnesia-card-hover-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+/* Override default view-content padding for sidebar */
+.view-content.amnesia-book-sidebar {
+  padding: 8px 0 0 !important;
+}
+
+/* @settings
+name: Amnesia Reader
+id: amnesia
+settings:
+  - id: amnesia-highlights-heading
+    title: Highlight Colors
+    type: heading
+    level: 1
+  - id: amnesia-highlight-yellow
+    title: Yellow Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(254, 243, 199, 0.6)'
+  - id: amnesia-highlight-green
+    title: Green Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(209, 250, 229, 0.6)'
+  - id: amnesia-highlight-blue
+    title: Blue Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(219, 234, 254, 0.6)'
+  - id: amnesia-highlight-pink
+    title: Pink Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(252, 231, 243, 0.6)'
+  - id: amnesia-highlight-purple
+    title: Purple Highlight
+    type: variable-color
+    format: rgba
+    default: 'rgba(237, 233, 254, 0.6)'
+
+  - id: amnesia-reader-heading
+    title: Reader Themes
+    type: heading
+    level: 1
+  - id: amnesia-reader-bg-light
+    title: Light Theme Background
+    type: variable-color
+    format: hex
+    default: '#ffffff'
+  - id: amnesia-reader-text-light
+    title: Light Theme Text
+    type: variable-color
+    format: hex
+    default: '#333333'
+  - id: amnesia-reader-bg-dark
+    title: Dark Theme Background
+    type: variable-color
+    format: hex
+    default: '#1e1e1e'
+  - id: amnesia-reader-text-dark
+    title: Dark Theme Text
+    type: variable-color
+    format: hex
+    default: '#e0e0e0'
+  - id: amnesia-reader-bg-sepia
+    title: Sepia Theme Background
+    type: variable-color
+    format: hex
+    default: '#f4ecd8'
+  - id: amnesia-reader-text-sepia
+    title: Sepia Theme Text
+    type: variable-color
+    format: hex
+    default: '#5b4636'
+
+  - id: amnesia-ui-heading
+    title: UI Customization
+    type: heading
+    level: 1
+  - id: amnesia-sidebar-width
+    title: Sidebar Width
+    type: variable-number-slider
+    default: 300
+    min: 200
+    max: 500
+    step: 10
+    format: px
+  - id: amnesia-progress-height
+    title: Progress Bar Height
+    type: variable-number-slider
+    default: 4
+    min: 2
+    max: 10
+    step: 1
+    format: px
+  - id: amnesia-highlight-border-width
+    title: Highlight Card Border Width
+    type: variable-number-slider
+    default: 3
+    min: 1
+    max: 8
+    step: 1
+    format: px
+*/
+
+/* =========================================================================
+   Quick Color Palette (Instant Highlight Mode)
+   ========================================================================= */
+
+.amnesia-quick-palette {
+  position: fixed;
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--amnesia-palette-bg);
+  border-radius: var(--amnesia-popup-radius);
+  box-shadow: var(--amnesia-palette-shadow);
+  z-index: 1000;
+  animation: amnesia-palette-appear 0.15s ease-out;
+}
+
+.amnesia-quick-palette-color {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: transform 0.1s ease, border-color 0.1s ease;
+}
+
+.amnesia-quick-palette-color:hover {
+  transform: scale(1.15);
+  border-color: var(--text-normal);
+}
+
+.amnesia-quick-palette-color:active {
+  transform: scale(0.95);
+}
+
+@keyframes amnesia-palette-appear {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* =========================================================================
+   Brightness Overlay
+   ========================================================================= */
+
+.amnesia-brightness-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 999;
+  transition: background-color 0.2s ease;
+}
+
+/* =========================================================================
+   Auto-Scroll Indicator
+   ========================================================================= */
+
+.amnesia-autoscroll-indicator {
+  position: fixed;
+  top: 50%;
+  right: 16px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+  background: var(--amnesia-popup-bg);
+  border-radius: var(--amnesia-popup-radius);
+  box-shadow: var(--amnesia-popup-shadow);
+  z-index: 100;
+}
+
+.amnesia-autoscroll-dot {
+  width: var(--amnesia-autoscroll-indicator-size);
+  height: var(--amnesia-autoscroll-indicator-size);
+  background: var(--amnesia-autoscroll-indicator-bg);
+  border-radius: 50%;
+  animation: amnesia-autoscroll-pulse 1s ease-in-out infinite;
+}
+
+@keyframes amnesia-autoscroll-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+/* Library View */
+.amnesia-library {
+  padding: 16px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.amnesia-library-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.amnesia-library-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.amnesia-library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 16px;
+}
+
+/* Book Card */
+.amnesia-book-card {
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.amnesia-book-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.amnesia-book-cover {
+  aspect-ratio: 2/3;
+  width: 100%;
+  object-fit: cover;
+  background-color: var(--background-secondary);
+  border-radius: 4px;
+}
+
+.amnesia-book-cover-placeholder {
+  aspect-ratio: 2/3;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--background-secondary);
+  border-radius: 4px;
+  font-size: 2rem;
+}
+
+.amnesia-book-title {
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-top: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.amnesia-book-author {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reader View */
+.amnesia-reader {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.amnesia-reader-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.amnesia-reader-content {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Scroll mode: allow epub.js container to scroll */
+.amnesia-reader-content.scrolled-mode {
+  overflow: visible !important;
+}
+
+/* epub.js continuous manager uses .epub-container as scroll container
+   epub.js sets inline style: overflow: hidden scroll
+   We must NOT override this with !important - just add touch scrolling support */
+.amnesia-reader-content.scrolled-mode .epub-container {
+  -webkit-overflow-scrolling: touch;
+}
+
+.amnesia-epub-container {
+  height: 100%;
+  width: 100%;
+}
+
+/* epub.js annotation highlights */
+.epub-view {
+  position: relative !important;
+}
+
+/* SVG overlay for highlights - epub.js creates SVG without class */
+.epub-view > svg {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  width: 100% !important;
+  height: 100% !important;
+  pointer-events: none;
+  z-index: 10 !important; /* Must be higher than iframe z-index (1) */
+}
+
+/* Highlight groups - we use class "amnesia-highlight" */
+.epub-view > svg g.amnesia-highlight,
+.epub-view > svg g.epub-highlight {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* Highlight rectangles - use visible opacity */
+.epub-view > svg g.amnesia-highlight rect,
+.epub-view > svg g.epub-highlight rect {
+  fill-opacity: 0.5 !important; /* Override epub.js default */
+  mix-blend-mode: multiply;
+}
+
+/* Ensure iframe content displays properly */
+.epub-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* Page Controls */
+.amnesia-page-controls {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  padding: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.amnesia-progress-bar {
+  width: 100%;
+  height: 4px;
+  background-color: var(--background-secondary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.amnesia-progress-fill {
+  height: 100%;
+  background-color: var(--interactive-accent);
+  transition: width 0.3s ease;
+}
+
+/* Highlights Sidebar */
+.amnesia-highlights {
+  padding: 16px;
+}
+
+.amnesia-highlight-card {
+  padding: 12px;
+  margin-bottom: 8px;
+  background-color: var(--background-secondary);
+  border-radius: 8px;
+  border-left: 3px solid var(--interactive-accent);
+}
+
+.amnesia-highlight-text {
+  font-style: italic;
+  margin-bottom: 8px;
+}
+
+.amnesia-highlight-note {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* Loading State */
+.amnesia-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.amnesia-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--background-secondary);
+  border-top-color: var(--interactive-accent);
+  border-radius: 50%;
+  animation: amnesia-spin 1s linear infinite;
+}
+
+@keyframes amnesia-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Empty State */
+.amnesia-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.amnesia-empty-icon {
+  font-size: 3rem;
+  margin-bottom: 16px;
+}
+
+/* Folder Suggestion Modal */
+.ll-folder-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.ll-folder-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.ll-folder-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Mobile Optimizations */
+@media (max-width: 768px) {
+  .amnesia-library-grid {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 12px;
+  }
+
+  .amnesia-book-title {
+    font-size: 0.75rem;
+  }
+
+  .amnesia-book-author {
+    font-size: 0.625rem;
+  }
+}
+
+/* =========================================================================
+   Status Bar
+   ========================================================================= */
+
+.amnesia-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.amnesia-status-bar .status-bar-item-icon {
+  display: flex;
+  align-items: center;
+}
+
+.amnesia-status-bar .status-bar-item-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.amnesia-status-bar.syncing .status-bar-item-icon {
+  animation: amnesia-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes amnesia-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Link target blinking animation - highlights navigation targets */
+@keyframes amnesia-target-blink {
+  0%, 100% {
+    background-color: transparent;
+  }
+  50% {
+    background-color: var(--interactive-accent);
+    opacity: 0.4;
+  }
+}
+
+.epub-link-target {
+  animation: amnesia-target-blink 0.5s ease-in-out 3;
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* =========================================================================
+   Calibre Sync Progress UI (Settings Tab)
+   ========================================================================= */
+
+.amnesia-sync-progress {
+  margin-bottom: 16px;
+  padding: 12px;
+  background-color: var(--background-secondary);
+  border-radius: 8px;
+}
+
+.sync-progress-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sync-phase {
+  font-weight: 500;
+  color: var(--text-normal);
+}
+
+.sync-progress-bar {
+  width: 100%;
+  height: 8px;
+  background-color: var(--background-primary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.sync-progress-fill {
+  height: 100%;
+  background-color: var(--interactive-accent);
+  border-radius: 4px;
+  transition: width 0.2s ease;
+}
+
+.sync-stats {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--interactive-accent);
+}
+
+.sync-current-item {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sync-status-container {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sync-status-icon {
+  display: flex;
+  align-items: center;
+}
+
+.sync-status-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sync-status-icon.connected svg {
+  color: var(--text-success);
+}
+
+.sync-status-icon.disconnected svg {
+  color: var(--text-warning);
+}
+
+.sync-status-text {
+  font-weight: 500;
+}
+
+.sync-last-time {
+  width: 100%;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* =========================================================================
+   Settings Tab Icon
+   ========================================================================= */
+
+.settings-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+}
+
+.settings-tab-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* =========================================================================
+   Fullscreen Mode - Hide Obsidian UI
+   ========================================================================= */
+
+/* When fullscreen mode is active, hide Obsidian chrome */
+body.amnesia-fullscreen-mode .workspace-tab-header-container {
+  display: none !important;
+}
+
+body.amnesia-fullscreen-mode .status-bar {
+  display: none !important;
+}
+
+body.amnesia-fullscreen-mode .mod-left-split,
+body.amnesia-fullscreen-mode .mod-right-split {
+  display: none !important;
+}
+
+body.amnesia-fullscreen-mode .side-dock-ribbon {
+  display: none !important;
+}
+
+body.amnesia-fullscreen-mode .titlebar {
+  display: none !important;
+}
+
+body.amnesia-fullscreen-mode .workspace-split.mod-root {
+  height: 100vh !important;
+}
+
+body.amnesia-fullscreen-mode .workspace-leaf-content {
+  height: 100% !important;
+}
+
+/* Fullscreen reader specific styles */
+.amnesia-reader.fullscreen {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 9999 !important;
+  background: var(--background-primary) !important;
+}
+
+/* Ensure bottom nav is clickable in fullscreen */
+.amnesia-reader.fullscreen .progress-slider-container {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+}
+
+/* Ensure toolbar is clickable in fullscreen */
+.amnesia-reader.fullscreen .amnesia-reader-toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  background: var(--background-primary);
+}
+
+/* Adjust content area in fullscreen */
+.amnesia-reader.fullscreen .amnesia-reader-content {
+  position: fixed;
+  top: 48px;
+  left: 0;
+  right: 0;
+  bottom: 60px;
+  height: auto !important;
+}
+
+/* Sidebars in fullscreen */
+.amnesia-reader.fullscreen .amnesia-sidebar {
+  position: fixed;
+  top: 48px;
+  bottom: 60px;
+  z-index: 10001;
+}
+
+/* Backdrop in fullscreen */
+.amnesia-reader.fullscreen .amnesia-backdrop {
+  position: fixed;
+  z-index: 10000;
+}
+
+/* Settings panel in fullscreen */
+.amnesia-reader.fullscreen :global(.settings-panel) {
+  position: fixed;
+  top: 48px;
+  bottom: 60px;
+  z-index: 10001;
+}
+
+/* Highlight popup in fullscreen */
+.amnesia-reader.fullscreen :global(.highlight-popup) {
+  z-index: 10002;
+}
+
+/* Quick color palette in fullscreen */
+.amnesia-reader.fullscreen .amnesia-quick-palette {
+  z-index: 10002;
+}
+
+/* ============================================
+   SIDEBAR BOOK TITLE SLIDE-OUT
+   ============================================ */
+
+/* Book title container - fills remaining space */
+.book-sidebar .book-title-inline {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  transition: flex 150ms ease-out, opacity 150ms ease-out, max-width 150ms ease-out;
+  max-width: 100%;
+}
+
+.book-sidebar .book-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* When ViewModeSwitcher is hovered/expanded, slide book title out of view */
+.book-sidebar .sidebar-header:has(.view-mode-switcher:hover) .book-title-inline,
+.book-sidebar .sidebar-header:has(.view-mode-switcher:focus-within) .book-title-inline {
+  flex: 0 0 0;
+  max-width: 0;
+  opacity: 0;
+}

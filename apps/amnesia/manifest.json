@@ -1,0 +1,10 @@
+{
+  "id": "amnesia",
+  "name": "Amnesia",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Ebook reader for Obsidian with OPDS support, highlights, and Doc Doctor integration",
+  "author": "",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
