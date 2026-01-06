@@ -1,11 +1,14 @@
 {
   "name": "amnesia",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Ebook reader for Obsidian with OPDS support and Doc Doctor integration",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
+    "dev:no-server": "node esbuild.config.mjs --skip-server",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "build:no-server": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production --skip-server",
+    "build:server-only": "cd ../amnesia-server && cargo build --release",
     "test": "vitest run",
     "test:watch": "vitest"
   },

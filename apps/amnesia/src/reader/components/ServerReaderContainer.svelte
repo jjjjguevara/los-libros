@@ -6,15 +6,16 @@
    * instead of epub.js. Requires amnesia-server to be running.
    */
   import { onMount, onDestroy, tick, createEventDispatcher } from 'svelte';
-  import { Platform } from 'obsidian';
+  import { Platform, setIcon } from 'obsidian';
   import type AmnesiaPlugin from '../../main';
   import type { HighlightColor, Highlight } from '../../library/types';
   import type { PendingSelection } from '../../highlights/highlight-store';
   import type { CalibreBookFull } from '../../calibre/calibre-types';
-  import { loadBook, isAbsolutePath, getCalibreBookNotePath } from '../book-loader';
+  import { loadBook, isAbsolutePath, getCalibreBookNotePath, type LoadedBook, type BookFormat } from '../book-loader';
   import HighlightPopup from '../../highlights/components/HighlightPopup.svelte';
   import Portal from '../../components/Portal.svelte';
   import SettingsPanel from './SettingsPanel.svelte';
+  import PdfSettingsPanel from './PdfSettingsPanel.svelte';
   import ProgressSlider from './ProgressSlider.svelte';
   import NotebookSidebar from './NotebookSidebar.svelte';
   import ImageLightbox, { type LightboxImage } from './ImageLightbox.svelte';
@@ -39,6 +40,11 @@
   function getMarginValue(margins: number | { left: number; right: number; top: number; bottom: number }): number {
     return typeof margins === 'number' ? margins : margins.left;
   }
+
+  // Svelte action to set Obsidian icons
+  function setIconEl(node: HTMLElement, icon: string) {
+    setIcon(node, icon);
+  }
   import { HapticFeedback } from '../../utils';
   import {
     Settings,
@@ -58,6 +64,20 @@
     StickyNote,
     Columns,
     AlignJustify,
+    // PDF-specific icons
+    ZoomIn,
+    ZoomOut,
+    // Scroll direction icons
+    ArrowDownUp,
+    ArrowLeftRight,
+    BookOpen,
+    Scroll,
+    // Display mode icons
+    Grid,
+    Move,
+    LayoutGrid,
+    Maximize,
+    ChevronDown,
   } from 'lucide-svelte';
 
   // Import the new renderer
@@ -80,6 +100,15 @@
     type ProviderMode,
     type ContentProvider,
   } from '../renderer';
+
+  // Import PDF renderer for PDF file support
+  import {
+    PdfRenderer,
+    HybridPdfProvider,
+    createHybridPdfProvider,
+    type PdfRendererConfig,
+    type HybridPdfProviderStatus,
+  } from '../renderer/pdf';
 
   // Import the new Shadow DOM renderer (V2)
   import { ShadowDOMRenderer } from '../shadow-dom-renderer';
@@ -901,12 +930,18 @@
   let rendererContainer: HTMLElement;
 
   // Renderer instances
-  let renderer: EpubRenderer | null = null;
+  let renderer: EpubRenderer | PdfRenderer | null = null;
   let apiClient: ApiClient | null = null;
   let syncManager: SyncManager | null = null;
   let bookProvider: HybridBookProvider | null = null;
+  let pdfProvider: HybridPdfProvider | null = null;
   let providerAdapter: ProviderAdapter | null = null;
   let providerStatus: ProviderStatus | null = null;
+
+  // Format detection - determined after loading book via book-loader
+  let detectedFormat: BookFormat = 'epub';
+  let loadedBookData: LoadedBook | null = null;
+  $: isPdf = detectedFormat === 'pdf';
 
   // Book state
   let book: ParsedBook | null = null;
@@ -927,6 +962,14 @@
   let showBookInfo = false;
   let showNotebook = false;
   let notebookTab: 'highlights' | 'bookmarks' | 'notes' | 'images' = 'highlights';
+  let showDisplayModeDropdown = false;
+
+  // PDF-specific settings (derived from plugin settings)
+  $: pdfSettings = plugin.settings.pdf;
+
+  // PDF state tracking
+  let pdfCurrentPage = 1;
+  let pdfTotalPages = 0;
 
   // Image lightbox state
   let lightboxOpen = false;
@@ -939,6 +982,9 @@
   // Auto-save interval
   let autoSaveInterval: ReturnType<typeof setInterval> | null = null;
   const AUTO_SAVE_INTERVAL_MS = 30000; // 30 seconds
+
+  // Wheel debounce timer for PDF navigation
+  let wheelDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Highlight state
   let showHighlightPopup = false;
@@ -1149,14 +1195,175 @@
         return;
       }
 
-      // Load book data
+      // =========================================================================
+      // EARLY BOOK LOADING - Detect format before branching
+      // =========================================================================
+      // Load book data early to detect format (PDF vs EPUB)
+      // This handles Calibre directories that contain PDF files
       const calibreBooks = plugin.calibreService?.getStore().getValue().books;
       const vaultBooks = plugin.libraryStore.getValue().books;
-      const loadedBook = await loadBook(plugin.app, bookPath, vaultBooks, calibreBooks);
+
+      try {
+        loadedBookData = await loadBook(plugin.app, bookPath, vaultBooks, calibreBooks);
+        detectedFormat = loadedBookData.format;
+        console.log('[ServerReader] Book loaded, format detected:', detectedFormat, 'path:', loadedBookData.metadata.filePath);
+      } catch (e) {
+        error = `Failed to load book: ${e instanceof Error ? e.message : String(e)}`;
+        loading = false;
+        return;
+      }
+
+      // =========================================================================
+      // PDF PATH - Separate initialization for PDF files
+      // =========================================================================
+      // Check detectedFormat directly (not isPdf) since Svelte reactivity is async
+      if (detectedFormat === 'pdf') {
+        console.log('[ServerReader] Detected PDF file, using PDF renderer');
+
+        // Create PDF provider
+        pdfProvider = createHybridPdfProvider({
+          serverBaseUrl: plugin.settings.serverEnabled ? plugin.settings.serverUrl : undefined,
+          preferMode: plugin.settings.pdf?.preferMode ?? 'auto',
+          deviceId: getDeviceId(),
+        });
+
+        // Initialize provider (check server health)
+        await pdfProvider.initialize();
+
+        // Use already loaded book data (from early loading above)
+        const pdfData = loadedBookData!.arrayBuffer;
+        const filename = loadedBookData!.metadata.filePath.split('/').pop() || 'document.pdf';
+
+        // Load document into provider first
+        let parsedPdf;
+        try {
+          parsedPdf = await pdfProvider.loadDocument(pdfData, filename);
+          console.log('[ServerReader] PDF loaded into provider:', { id: parsedPdf.id, pageCount: parsedPdf.pageCount });
+        } catch (e) {
+          error = `Failed to parse PDF: ${e instanceof Error ? e.message : String(e)}`;
+          loading = false;
+          return;
+        }
+
+        // Create adapter that implements PdfContentProvider interface
+        const pdfContentProvider = {
+          async getPdf(id: string) {
+            return pdfProvider!.getParsedPdf()!;
+          },
+          async uploadPdf(data: ArrayBuffer, fname?: string) {
+            return pdfProvider!.loadDocument(data, fname);
+          },
+          async getPdfPage(id: string, page: number, options?: any) {
+            return pdfProvider!.renderPage(page, options);
+          },
+          async getPdfTextLayer(id: string, page: number) {
+            return pdfProvider!.getTextLayer(page);
+          },
+          async searchPdf(id: string, query: string, limit?: number) {
+            return pdfProvider!.search(query, limit);
+          },
+        };
+
+        // Create PDF renderer config with all optimization settings
+        const pdfRendererConfig: PdfRendererConfig = {
+          mode: plugin.settings.pdf?.displayMode ?? 'paginated',
+          theme: plugin.settings.defaultTheme as 'light' | 'dark' | 'sepia' | 'system',
+          scale: plugin.settings.pdf?.scale ?? 1.5,
+          rotation: plugin.settings.pdf?.rotation ?? 0,
+          scrollDirection: plugin.settings.pdf?.scrollDirection ?? 'vertical',
+          // Optimization settings
+          renderDpi: plugin.settings.pdf?.renderDpi ?? 150,
+          enableHardwareAcceleration: plugin.settings.pdf?.enableHardwareAcceleration ?? true,
+          enableCanvasAcceleration: plugin.settings.pdf?.enableCanvasAcceleration ?? true,
+          pagePreloadCount: plugin.settings.pdf?.pagePreloadCount ?? 2,
+          enablePageCache: plugin.settings.pdf?.enablePageCache ?? true,
+          pageCacheSize: plugin.settings.pdf?.pageCacheSize ?? 10,
+          imageFormat: plugin.settings.pdf?.imageFormat ?? 'png',
+          imageQuality: plugin.settings.pdf?.imageQuality ?? 85,
+          enableProgressiveRendering: plugin.settings.pdf?.enableProgressiveRendering ?? true,
+          previewScale: plugin.settings.pdf?.previewScale ?? 0.25,
+          enableTextAntialiasing: plugin.settings.pdf?.enableTextAntialiasing ?? true,
+          enableImageSmoothing: plugin.settings.pdf?.enableImageSmoothing ?? true,
+        };
+
+        // Create PDF renderer with the adapter
+        renderer = new PdfRenderer(rendererContainer, pdfContentProvider, pdfRendererConfig);
+
+        // Set up PDF event handlers
+        renderer.on('error', handleError);
+        renderer.on('loading', (isLoading: boolean) => { loading = isLoading; });
+        renderer.on('relocated', (location: any) => {
+          if (location.position !== undefined && location.totalPositions !== undefined) {
+            currentPage = location.position;
+            totalPages = location.totalPositions;
+            progress = Math.round((location.position / location.totalPositions) * 100);
+            currentChapter = `Page ${location.position} of ${location.totalPositions}`;
+            // Update PDF-specific state for settings panel
+            pdfCurrentPage = location.position;
+            pdfTotalPages = location.totalPositions;
+          }
+        });
+        renderer.on('selected', handleSelected);
+        renderer.on('highlightClicked', handleHighlightClicked);
+
+        // Load PDF document into renderer (document already loaded in provider)
+        try {
+          await (renderer as PdfRenderer).load(parsedPdf.id);
+
+          // Get ToC from PDF outline
+          toc = parsedPdf.toc || [];
+          totalPages = parsedPdf.pageCount;
+
+          // Set book title from PDF metadata or filename
+          if (!bookTitle) {
+            bookTitle = parsedPdf.metadata?.title || filename.replace('.pdf', '');
+            dispatch('titleResolved', { title: bookTitle });
+          }
+
+          // Set bookId for highlights
+          bookId = parsedPdf.id;
+          highlightBookId = bookId;
+
+          // Load existing highlights for this PDF
+          bookHighlights = plugin.highlightService.getHighlights(highlightBookId);
+
+          // Update PDF page tracking
+          pdfTotalPages = totalPages;
+          pdfCurrentPage = 1;
+
+          // Update sidebar store with current book info (same as EPUB path)
+          sidebarStore.setActiveBook(highlightBookId, bookPath, bookTitle);
+
+          // Update sidebar with ToC (call after setting toc variable)
+          updateSidebarToc();
+
+          // Apply initial reading mode (theme)
+          if (plugin.settings.pdf.readingMode) {
+            // Use tick to ensure DOM is ready
+            tick().then(() => applyPdfReadingMode(plugin.settings.pdf.readingMode));
+          }
+
+          loading = false;
+          console.log('[ServerReader] PDF loaded successfully:', { bookId, pageCount: totalPages });
+        } catch (e) {
+          error = `Failed to render PDF: ${e instanceof Error ? e.message : String(e)}`;
+          loading = false;
+        }
+
+        return; // Exit early - PDF initialization complete
+      }
+
+      // =========================================================================
+      // EPUB PATH - Existing EPUB initialization (below)
+      // =========================================================================
+
+      // Book data already loaded in early loading section above
+      // Use loadedBookData instead of calling loadBook again
+      const loadedBook = loadedBookData!;
 
       // Resolve book metadata
       if (isCalibreBook) {
-        calibreBook = calibreBooks?.find(b => b.epubPath === bookPath);
+        calibreBook = calibreBooks?.find(b => b.epubPath === bookPath || b.calibrePath === bookPath);
         if (calibreBook && !bookTitle) {
           bookTitle = calibreBook.title;
           dispatch('titleResolved', { title: bookTitle });
@@ -1226,11 +1433,21 @@
       }
 
       // Update highlightBookId to use book's actual ID for correct highlight lookup
-      // The book's internal ID (from EPUB metadata) may differ from the file path
-      const bookMetadataId = book.metadata?.id || book.metadata?.identifier || book.id;
-      if (bookMetadataId && bookMetadataId !== highlightBookId) {
-        console.log('[ServerReader] Updating highlightBookId from', highlightBookId, 'to', bookMetadataId);
-        highlightBookId = bookMetadataId;
+      // BUT for Calibre books, keep the Calibre UUID since highlights are stored under it
+      // The EPUB's internal ID (like urn:uuid:...) differs from the Calibre UUID
+      if (!isCalibreBook) {
+        const bookMetadataId = book.metadata?.id || book.metadata?.identifier || book.id;
+        if (bookMetadataId && bookMetadataId !== highlightBookId) {
+          console.log('[ServerReader] Updating highlightBookId from', highlightBookId, 'to', bookMetadataId);
+          highlightBookId = bookMetadataId;
+        }
+      } else {
+        // For Calibre books, use the Calibre UUID consistently
+        // This ensures highlights are looked up and stored under the same ID
+        if (calibreBook?.uuid && calibreBook.uuid !== highlightBookId) {
+          console.log('[ServerReader] Using Calibre UUID for highlightBookId:', calibreBook.uuid);
+          highlightBookId = calibreBook.uuid;
+        }
       }
 
       // Load book in renderer
@@ -1303,6 +1520,14 @@
 
       // Load highlights, bookmarks, and notes
       if (highlightBookId) {
+        // First, scan vault for any atomic highlights not yet in the store
+        if (bookTitle && plugin.loadAtomicHighlightsFromVault) {
+          const loaded = await plugin.loadAtomicHighlightsFromVault(highlightBookId, bookTitle);
+          if (loaded > 0) {
+            console.log(`[ServerReader] Loaded ${loaded} highlights from vault`);
+          }
+        }
+
         // Load highlights and bookmarks data
         if (plugin.highlightService) {
           bookHighlights = plugin.highlightService.getHighlights(highlightBookId);
@@ -1391,12 +1616,19 @@
     // Clean up auto-scroll
     stopAutoScroll();
 
+    // Clean up wheel debounce timer
+    if (wheelDebounceTimer) {
+      clearTimeout(wheelDebounceTimer);
+      wheelDebounceTimer = null;
+    }
+
     // Clean up Calibre store subscription
     calibreStoreUnsubscribe?.();
 
     // Clean up
     syncManager?.stop();
     renderer?.destroy();
+    pdfProvider?.destroy?.(); // PDF provider cleanup if available
   });
 
   // Event handlers
@@ -1437,10 +1669,11 @@
   function handleSelected(data: {
     text: string;
     cfi: string;
-    range: Range;
+    range?: Range;
     position: { x: number; y: number };
     spineIndex?: number;
     selector?: { textQuote?: { exact: string; prefix?: string; suffix?: string }; textPosition?: { start: number; end: number } };
+    rects?: Array<{ x: number; y: number; width: number; height: number }>;
   }) {
     console.log('[ServerReader] handleSelected called', { textLength: data.text?.length, position: data.position });
     // Use highlightBookId which is set consistently for both Calibre and vault books
@@ -1451,13 +1684,24 @@
     }
 
     // Capture selection rects for immediate highlight rendering
-    const selectionRects = HighlightOverlay.getRectsFromRange(data.range);
-    const rectsJson = selectionRects.map(r => ({
-      x: r.x,
-      y: r.y,
-      width: r.width,
-      height: r.height,
-    }));
+    // PDF provides pre-computed rects, EPUB provides a Range object
+    let rectsJson: Array<{ x: number; y: number; width: number; height: number }>;
+    if (data.rects) {
+      // PDF: use pre-computed rects directly
+      rectsJson = data.rects;
+    } else if (data.range) {
+      // EPUB: compute rects from Range
+      const selectionRects = HighlightOverlay.getRectsFromRange(data.range);
+      rectsJson = selectionRects.map(r => ({
+        x: r.x,
+        y: r.y,
+        width: r.width,
+        height: r.height,
+      }));
+    } else {
+      // No rects available - use empty array
+      rectsJson = [];
+    }
 
     // Set up pending selection for highlight popup with robust anchoring data
     pendingSelection = {
@@ -2156,6 +2400,149 @@
     if (readerSettings.hapticFeedback) HapticFeedback.medium();
   }
 
+  // ==========================================================================
+  // PDF-specific handlers
+  // ==========================================================================
+
+  function handlePdfSettingsChange(event: CustomEvent<{ settings: Partial<import('../../settings/settings').PdfSettings> }>) {
+    const changes = event.detail.settings;
+    plugin.settings.pdf = { ...plugin.settings.pdf, ...changes };
+    plugin.saveSettings();
+
+    // Update local reactive state
+    pdfSettings = { ...pdfSettings, ...changes };
+
+    // Apply changes to the PDF renderer
+    if (isPdf && renderer) {
+      const pdfRenderer = renderer as PdfRenderer;
+      if (changes.scale !== undefined) {
+        pdfRenderer.setScale(changes.scale);
+      }
+      if (changes.rotation !== undefined) {
+        pdfRenderer.setRotation(changes.rotation);
+      }
+      if (changes.displayMode !== undefined) {
+        pdfRenderer.setDisplayMode(changes.displayMode);
+      }
+      if (changes.readingMode !== undefined) {
+        // Map PdfReadingMode to theme and apply CSS styling
+        applyPdfReadingMode(changes.readingMode);
+      }
+    }
+  }
+
+  function applyPdfReadingMode(mode: import('../../settings/settings').PdfReadingMode) {
+    if (!isPdf || !renderer) return;
+
+    const pdfRenderer = renderer as PdfRenderer;
+    pdfRenderer.setReadingMode(mode);
+
+    // Also add class to container for additional styling hooks
+    const pdfContainer = rendererContainer?.querySelector('.pdf-page-container');
+    if (pdfContainer) {
+      pdfContainer.classList.remove('reading-mode-device', 'reading-mode-light', 'reading-mode-sepia', 'reading-mode-dark', 'reading-mode-night');
+      pdfContainer.classList.add(`reading-mode-${mode}`);
+    }
+  }
+
+  function handlePdfZoomIn() {
+    if (!isPdf || !renderer) return;
+    const newScale = Math.min(plugin.settings.pdf.scale + 0.25, 4);
+    handlePdfSettingsChange({ detail: { settings: { scale: newScale } } } as CustomEvent);
+  }
+
+  function handlePdfZoomOut() {
+    if (!isPdf || !renderer) return;
+    const newScale = Math.max(plugin.settings.pdf.scale - 0.25, 0.25);
+    handlePdfSettingsChange({ detail: { settings: { scale: newScale } } } as CustomEvent);
+  }
+
+  function handlePdfFitWidth() {
+    if (!isPdf || !renderer) return;
+    const pdfRenderer = renderer as PdfRenderer;
+    pdfRenderer.fitToWidth();
+  }
+
+  function handlePdfFitPage() {
+    if (!isPdf || !renderer) return;
+    const pdfRenderer = renderer as PdfRenderer;
+    pdfRenderer.fitToPage();
+  }
+
+  function handlePdfRotateCw() {
+    if (!isPdf || !renderer) return;
+    const pdfRenderer = renderer as PdfRenderer;
+    pdfRenderer.rotateClockwise();
+    // Get the new rotation from the renderer (it's the source of truth)
+    const newRotation = (pdfRenderer.getConfig().rotation ?? 0) as 0 | 90 | 180 | 270;
+    plugin.settings.pdf.rotation = newRotation;
+    plugin.saveSettings();
+  }
+
+  function handlePdfRotateCcw() {
+    if (!isPdf || !renderer) return;
+    const pdfRenderer = renderer as PdfRenderer;
+    pdfRenderer.rotateCounterClockwise();
+    // Get the new rotation from the renderer (it's the source of truth)
+    const newRotation = (pdfRenderer.getConfig().rotation ?? 0) as 0 | 90 | 180 | 270;
+    plugin.settings.pdf.rotation = newRotation;
+    plugin.saveSettings();
+  }
+
+  /**
+   * Set PDF display mode (5 modes)
+   */
+  function handlePdfDisplayModeChange(mode: import('../../settings/settings').PdfDisplayMode) {
+    if (!isPdf || !renderer) return;
+    const pdfRenderer = renderer as PdfRenderer;
+
+    pdfSettings = { ...pdfSettings, displayMode: mode };
+    plugin.settings.pdf.displayMode = mode;
+    plugin.saveSettings();
+
+    // Update renderer display mode
+    pdfRenderer.setDisplayMode(mode);
+  }
+
+  /**
+   * Cycle through display modes: paginated -> vertical-scroll -> horizontal-scroll -> auto-grid -> canvas -> paginated
+   */
+  function handlePdfModeToggle() {
+    if (!isPdf || !renderer) return;
+
+    const modes: import('../../settings/settings').PdfDisplayMode[] = [
+      'paginated',
+      'vertical-scroll',
+      'horizontal-scroll',
+      'auto-grid',
+      'canvas',
+    ];
+    const currentIndex = modes.indexOf(pdfSettings.displayMode);
+    const nextIndex = (currentIndex + 1) % modes.length;
+    handlePdfDisplayModeChange(modes[nextIndex]);
+  }
+
+  /** @deprecated Use handlePdfDisplayModeChange instead */
+  function handlePdfScrollDirectionToggle() {
+    if (!isPdf || !renderer) return;
+    // Convert scroll direction toggle to display mode change
+    if (pdfSettings.displayMode === 'vertical-scroll') {
+      handlePdfDisplayModeChange('horizontal-scroll');
+    } else if (pdfSettings.displayMode === 'horizontal-scroll') {
+      handlePdfDisplayModeChange('vertical-scroll');
+    } else {
+      // Default to vertical-scroll if not in a scroll mode
+      handlePdfDisplayModeChange('vertical-scroll');
+    }
+  }
+
+  function handlePdfPrint() {
+    if (!isPdf) return;
+    // Open print dialog for the PDF
+    // This is a best-effort approach - actual printing depends on browser support
+    window.print();
+  }
+
   function handleSpeedChange(event: CustomEvent<{ speed: number }>) {
     readerSettings = {
       ...readerSettings,
@@ -2224,6 +2611,42 @@
     }
   }
 
+  // Wheel/trackpad scroll handling for PDF navigation
+  // Debounce to prevent multiple page turns from single scroll gesture
+  const WHEEL_DEBOUNCE_MS = 150;
+
+  function handleWheel(event: WheelEvent) {
+    // Only handle wheel events for PDFs in paginated mode
+    if (!isPdf || !renderer) return;
+
+    const pdfRenderer = renderer as PdfRenderer;
+    const displayMode = pdfRenderer.getDisplayMode();
+
+    // Only intercept wheel events for paginated mode
+    // All scroll-based modes should let the infinite canvas handle wheel events natively
+    if (displayMode !== 'paginated') return;
+
+    // Paginated mode: prevent default and navigate pages
+    event.preventDefault();
+
+    // Debounce to prevent multiple rapid page turns
+    if (wheelDebounceTimer) return;
+
+    // Determine scroll direction (both deltaY for vertical scroll and deltaX for horizontal)
+    const delta = Math.abs(event.deltaY) > Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+
+    if (delta > 0) {
+      nextPage();
+    } else if (delta < 0) {
+      prevPage();
+    }
+
+    // Set debounce timer
+    wheelDebounceTimer = setTimeout(() => {
+      wheelDebounceTimer = null;
+    }, WHEEL_DEBOUNCE_MS);
+  }
+
   // Pointer tracking for popup positioning (works with both mouse and touch)
   function handlePointerMove(event: MouseEvent) {
     lastPointerPosition = { x: event.clientX, y: event.clientY };
@@ -2280,11 +2703,12 @@
     }
 
     // Close any open menus/panels
-    if (showSettings || showMoreMenu || showBookInfo || showNotebook) {
+    if (showSettings || showMoreMenu || showBookInfo || showNotebook || showDisplayModeDropdown) {
       showSettings = false;
       showMoreMenu = false;
       showBookInfo = false;
       showNotebook = false;
+      showDisplayModeDropdown = false;
       return;
     }
 
@@ -2322,6 +2746,7 @@
   class="amnesia-reader server-reader"
   bind:this={container}
   on:click={handleContainerClick}
+  on:wheel={handleWheel}
 >
   <!-- Renderer container - always rendered and visible so paginator can calculate dimensions -->
   <div class="renderer-container" bind:this={rendererContainer}></div>
@@ -2352,27 +2777,114 @@
         <span class="chapter-title">{currentChapter || bookTitle}</span>
       </div>
       <div class="topbar-center">
-        <!-- Quick font controls -->
-        <button class="icon-button font-btn" on:click|stopPropagation={() => { readerSettings = {...readerSettings, fontSize: Math.max(10, readerSettings.fontSize - 2)}; renderer?.updateConfig({ fontSize: readerSettings.fontSize }); debouncedSaveSettings(); }} title="Decrease font size">
-          A-
-        </button>
-        <span class="font-size-display">{readerSettings.fontSize}</span>
-        <button class="icon-button font-btn" on:click|stopPropagation={() => { readerSettings = {...readerSettings, fontSize: Math.min(40, readerSettings.fontSize + 2)}; renderer?.updateConfig({ fontSize: readerSettings.fontSize }); debouncedSaveSettings(); }} title="Increase font size">
-          A+
-        </button>
-        <!-- Mode toggle -->
-        <button
-          class="icon-button mode-toggle"
-          on:click|stopPropagation={toggleReadingMode}
-          title={readerSettings.flow === 'paginated' ? 'Switch to Scrolled mode (M)' : 'Switch to Paginated mode (M)'}
-          disabled={loading}
-        >
-          {#if readerSettings.flow === 'paginated'}
-            <Columns size={18} />
-          {:else}
-            <AlignJustify size={18} />
-          {/if}
-        </button>
+        {#if isPdf}
+          <!-- PDF-specific controls: Zoom and Rotate -->
+          <button class="icon-button" on:click|stopPropagation={handlePdfZoomOut} title="Zoom out (-)">
+            <ZoomOut size={18} />
+          </button>
+          <span class="zoom-display">{Math.round(pdfSettings.scale * 100)}%</span>
+          <button class="icon-button" on:click|stopPropagation={handlePdfZoomIn} title="Zoom in (+)">
+            <ZoomIn size={18} />
+          </button>
+          <button class="icon-button" on:click|stopPropagation={handlePdfRotateCw} title="Rotate clockwise (R)">
+            <span use:setIconEl={'rotate-cw'}></span>
+          </button>
+          <!-- Separator between zoom/rotate and mode controls -->
+          <span class="toolbar-separator"></span>
+          <!-- Fit to page button -->
+          <button class="icon-button" on:click|stopPropagation={handlePdfFitPage} title="Fit to page">
+            <Maximize size={18} />
+          </button>
+          <!-- Display mode dropdown -->
+          <div class="display-mode-dropdown-container">
+            <button
+              class="icon-button mode-toggle"
+              on:click|stopPropagation={() => { showDisplayModeDropdown = !showDisplayModeDropdown; showMoreMenu = false; }}
+              title="Display mode: {pdfSettings.displayMode}"
+            >
+              {#if pdfSettings.displayMode === 'paginated'}
+                <BookOpen size={18} />
+              {:else if pdfSettings.displayMode === 'horizontal-scroll'}
+                <ArrowLeftRight size={18} />
+              {:else if pdfSettings.displayMode === 'vertical-scroll'}
+                <ArrowDownUp size={18} />
+              {:else if pdfSettings.displayMode === 'auto-grid'}
+                <LayoutGrid size={18} />
+              {:else if pdfSettings.displayMode === 'canvas'}
+                <Move size={18} />
+              {:else}
+                <LayoutGrid size={18} />
+              {/if}
+              <ChevronDown size={12} class="dropdown-chevron" />
+            </button>
+            {#if showDisplayModeDropdown}
+              <div class="display-mode-dropdown" on:click|stopPropagation>
+                <button
+                  class="dropdown-item"
+                  class:active={pdfSettings.displayMode === 'paginated'}
+                  on:click={() => { handlePdfDisplayModeChange('paginated'); showDisplayModeDropdown = false; }}
+                >
+                  <BookOpen size={16} />
+                  <span>Paginated</span>
+                </button>
+                <button
+                  class="dropdown-item"
+                  class:active={pdfSettings.displayMode === 'vertical-scroll'}
+                  on:click={() => { handlePdfDisplayModeChange('vertical-scroll'); showDisplayModeDropdown = false; }}
+                >
+                  <ArrowDownUp size={16} />
+                  <span>Vertical Scroll</span>
+                </button>
+                <button
+                  class="dropdown-item"
+                  class:active={pdfSettings.displayMode === 'horizontal-scroll'}
+                  on:click={() => { handlePdfDisplayModeChange('horizontal-scroll'); showDisplayModeDropdown = false; }}
+                >
+                  <ArrowLeftRight size={16} />
+                  <span>Horizontal Scroll</span>
+                </button>
+                <button
+                  class="dropdown-item"
+                  class:active={pdfSettings.displayMode === 'auto-grid'}
+                  on:click={() => { handlePdfDisplayModeChange('auto-grid'); showDisplayModeDropdown = false; }}
+                >
+                  <LayoutGrid size={16} />
+                  <span>Auto Grid</span>
+                </button>
+                <button
+                  class="dropdown-item"
+                  class:active={pdfSettings.displayMode === 'canvas'}
+                  on:click={() => { handlePdfDisplayModeChange('canvas'); showDisplayModeDropdown = false; }}
+                >
+                  <Move size={16} />
+                  <span>Free Canvas</span>
+                </button>
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <!-- EPUB-specific controls: Font size and Mode toggle -->
+          <button class="icon-button font-btn" on:click|stopPropagation={() => { readerSettings = {...readerSettings, fontSize: Math.max(10, readerSettings.fontSize - 2)}; renderer?.updateConfig({ fontSize: readerSettings.fontSize }); debouncedSaveSettings(); }} title="Decrease font size">
+            A-
+          </button>
+          <span class="font-size-display">{readerSettings.fontSize}</span>
+          <button class="icon-button font-btn" on:click|stopPropagation={() => { readerSettings = {...readerSettings, fontSize: Math.min(40, readerSettings.fontSize + 2)}; renderer?.updateConfig({ fontSize: readerSettings.fontSize }); debouncedSaveSettings(); }} title="Increase font size">
+            A+
+          </button>
+          <!-- Mode toggle -->
+          <button
+            class="icon-button mode-toggle"
+            on:click|stopPropagation={toggleReadingMode}
+            title={readerSettings.flow === 'paginated' ? 'Switch to Scrolled mode (M)' : 'Switch to Paginated mode (M)'}
+            disabled={loading}
+          >
+            {#if readerSettings.flow === 'paginated'}
+              <Columns size={18} />
+            {:else}
+              <AlignJustify size={18} />
+            {/if}
+          </button>
+        {/if}
       </div>
       <div class="topbar-right">
         <button class="icon-button" on:click|stopPropagation={toggleBookmark} title="Bookmark" class:active={hasBookmarkAtCurrentPosition}>
@@ -2482,17 +2994,35 @@
       />
     {/if}
 
-    <!-- Settings Panel -->
+    <!-- Settings Panel (conditional: PDF vs EPUB) -->
     {#if showSettings}
       <div class="sidebar settings-sidebar" on:click|stopPropagation>
-        <SettingsPanel
-          settings={readerSettings}
-          visible={true}
-          {isFullScreen}
-          on:change={handleSettingsChange}
-          on:close={() => showSettings = false}
-          on:fullscreenToggle={toggleFullScreen}
-        />
+        {#if isPdf}
+          <PdfSettingsPanel
+            settings={pdfSettings}
+            visible={true}
+            currentPage={pdfCurrentPage}
+            totalPages={pdfTotalPages}
+            on:change={handlePdfSettingsChange}
+            on:zoomIn={handlePdfZoomIn}
+            on:zoomOut={handlePdfZoomOut}
+            on:fitWidth={handlePdfFitWidth}
+            on:fitPage={handlePdfFitPage}
+            on:rotateCw={handlePdfRotateCw}
+            on:rotateCcw={handlePdfRotateCcw}
+            on:print={handlePdfPrint}
+            on:close={() => showSettings = false}
+          />
+        {:else}
+          <SettingsPanel
+            settings={readerSettings}
+            visible={true}
+            {isFullScreen}
+            on:change={handleSettingsChange}
+            on:close={() => showSettings = false}
+            on:fullscreenToggle={toggleFullScreen}
+          />
+        {/if}
       </div>
     {/if}
 
@@ -2720,10 +3250,11 @@
     background: var(--background-modifier-hover);
   }
 
-  .font-size-display {
+  .font-size-display,
+  .zoom-display {
     font-size: 0.75rem;
     color: var(--text-muted);
-    min-width: 24px;
+    min-width: 36px;
     text-align: center;
   }
 
@@ -2887,6 +3418,80 @@
   .icon-button.active {
     background: var(--interactive-accent);
     color: var(--text-on-accent);
+  }
+
+  .toolbar-separator {
+    width: 1px;
+    height: 20px;
+    background: var(--background-modifier-border);
+    margin: 0 8px;
+  }
+
+  /* Display mode dropdown */
+  .display-mode-dropdown-container {
+    position: relative;
+  }
+
+  .display-mode-dropdown-container .mode-toggle {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .display-mode-dropdown-container :global(.dropdown-chevron) {
+    opacity: 0.6;
+    margin-left: 2px;
+  }
+
+  .display-mode-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-top: 4px;
+    min-width: 160px;
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 200;
+    animation: fadeIn 0.15s ease-out;
+  }
+
+  .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-normal);
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .dropdown-item:hover {
+    background: var(--background-modifier-hover);
+  }
+
+  .dropdown-item.active {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateX(-50%) translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
   }
 
   .renderer-container {
