@@ -286,6 +286,7 @@ export class ReaderVaultSyncOrchestrator {
       atomicNotePath: filePath,
       spineIndex: (frontmatter.spineIndex as number) || 0,
       selector: {
+        format: 'epub',
         primary: {
           type: 'CfiSelector',
           cfi: (frontmatter.cfi as string) || '',

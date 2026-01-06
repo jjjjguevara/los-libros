@@ -269,6 +269,58 @@ export class PdfTextLayer {
   }
 
   /**
+   * Get all selection rects relative to container (for highlight rendering)
+   */
+  getSelectionRects(): DOMRect[] {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return [];
+    }
+
+    const range = selection.getRangeAt(0);
+    const clientRects = range.getClientRects();
+    if (clientRects.length === 0) {
+      return [];
+    }
+
+    const containerRect = this.container.getBoundingClientRect();
+    const result: DOMRect[] = [];
+
+    // Merge adjacent rects on same line and convert to container coordinates
+    let currentRect: DOMRect | null = null;
+
+    for (let i = 0; i < clientRects.length; i++) {
+      const rect = clientRects[i];
+
+      // Skip empty rects
+      if (rect.width < 1 || rect.height < 1) continue;
+
+      // Convert to container coordinates
+      const relX = rect.left - containerRect.left;
+      const relY = rect.top - containerRect.top;
+
+      if (currentRect && Math.abs(currentRect.y - relY) < 2) {
+        // Same line - extend current rect
+        const newRight = Math.max(currentRect.x + currentRect.width, relX + rect.width);
+        const newLeft = Math.min(currentRect.x, relX);
+        currentRect = new DOMRect(newLeft, currentRect.y, newRight - newLeft, currentRect.height);
+      } else {
+        // New line
+        if (currentRect) {
+          result.push(currentRect);
+        }
+        currentRect = new DOMRect(relX, relY, rect.width, rect.height);
+      }
+    }
+
+    if (currentRect) {
+      result.push(currentRect);
+    }
+
+    return result;
+  }
+
+  /**
    * Clear text layer
    */
   clear(): void {

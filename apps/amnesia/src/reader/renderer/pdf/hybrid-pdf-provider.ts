@@ -1,9 +1,13 @@
 /**
- * Hybrid PDF Provider
+ * Server PDF Provider
  *
- * Switches between server-based rendering and PDF.js fallback.
- * Uses server when available for better performance, falls back to
- * PDF.js for offline use or when server is unavailable.
+ * Server-based PDF rendering provider with intelligent caching and prefetching.
+ * Uses the Amnesia server for all PDF operations (parsing, rendering, text extraction).
+ *
+ * Features:
+ * - Two-tier caching (Memory + IndexedDB)
+ * - Sequential prefetching of adjacent pages
+ * - Automatic cache eviction
  *
  * @example
  * ```typescript
@@ -11,65 +15,80 @@
  *
  * const provider = new HybridPdfProvider({
  *   serverBaseUrl: 'http://localhost:3000',
- *   preferServer: true,
  * });
  *
+ * await provider.initialize();
  * await provider.loadDocument(pdfData);
  * const pageImage = await provider.renderPage(1, { scale: 1.5 });
  * ```
  */
 
 import { ApiClient, getApiClient } from '../api-client';
-import { PdfJsProvider } from './pdfjs-provider';
 import type {
   ParsedPdf,
   PdfTextLayerData,
   PdfRenderOptions,
   PdfSearchResult,
 } from '../types';
+import { PdfPageCache } from './pdf-cache';
 
-export type PdfProviderMode = 'server' | 'pdfjs' | 'auto';
+export type PdfProviderMode = 'server' | 'auto';
 
 export interface HybridPdfProviderConfig {
   /** Server base URL */
   serverBaseUrl?: string;
-  /** Preferred provider mode */
+  /** Preferred provider mode (server or auto - both use server) */
   preferMode?: PdfProviderMode;
   /** Timeout for server health check in ms */
   healthCheckTimeout?: number;
   /** Device ID for server requests */
   deviceId?: string;
+  /** Enable page caching (default: true) */
+  enableCache?: boolean;
+  /** Enable prefetching of adjacent pages (default: true) */
+  enablePrefetch?: boolean;
+  /** Number of pages to prefetch ahead/behind (default: 2) */
+  prefetchCount?: number;
 }
 
 export interface HybridPdfProviderStatus {
-  activeMode: 'server' | 'pdfjs';
+  activeMode: 'server';
   serverAvailable: boolean;
   documentId: string | null;
   pageCount: number;
 }
 
 /**
- * Hybrid PDF provider that uses server when available, PDF.js as fallback
+ * Server-based PDF provider with caching and prefetching
  */
 export class HybridPdfProvider {
   private config: Required<HybridPdfProviderConfig>;
   private apiClient: ApiClient | null = null;
-  private pdfjsProvider: PdfJsProvider;
-  private activeMode: 'server' | 'pdfjs' = 'pdfjs';
   private serverAvailable: boolean = false;
   private documentId: string | null = null;
   private parsedPdf: ParsedPdf | null = null;
   private pdfData: ArrayBuffer | null = null;
+
+  // Caching
+  private pageCache: PdfPageCache;
+
+  // Prefetching
+  private prefetchQueue: number[] = [];
+  private isPrefetching: boolean = false;
+  private prefetchTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: HybridPdfProviderConfig = {}) {
     this.config = {
       serverBaseUrl: config.serverBaseUrl ?? '',
       preferMode: config.preferMode ?? 'auto',
       healthCheckTimeout: config.healthCheckTimeout ?? 5000,
-      deviceId: config.deviceId ?? 'hybrid-provider',
+      deviceId: config.deviceId ?? 'server-provider',
+      enableCache: config.enableCache ?? true,
+      enablePrefetch: config.enablePrefetch ?? true,
+      prefetchCount: config.prefetchCount ?? 2,
     };
 
-    this.pdfjsProvider = new PdfJsProvider();
+    this.pageCache = new PdfPageCache();
   }
 
   /**
@@ -77,7 +96,7 @@ export class HybridPdfProvider {
    */
   getStatus(): HybridPdfProviderStatus {
     return {
-      activeMode: this.activeMode,
+      activeMode: 'server',
       serverAvailable: this.serverAvailable,
       documentId: this.documentId,
       pageCount: this.parsedPdf?.pageCount ?? 0,
@@ -113,84 +132,109 @@ export class HybridPdfProvider {
   }
 
   /**
-   * Initialize the appropriate provider based on configuration and availability
+   * Initialize the provider - checks server availability and initializes cache
    */
   async initialize(): Promise<void> {
-    if (this.config.preferMode === 'pdfjs') {
-      this.activeMode = 'pdfjs';
-      return;
+    // Initialize cache if enabled
+    if (this.config.enableCache) {
+      await this.pageCache.initialize();
     }
 
-    if (this.config.preferMode === 'server') {
-      if (await this.checkServerHealth()) {
-        this.activeMode = 'server';
-        this.apiClient = getApiClient();
-      } else {
-        console.warn('Server not available, falling back to PDF.js');
-        this.activeMode = 'pdfjs';
-      }
-      return;
-    }
-
-    // Auto mode: try server first, fall back to PDF.js
-    if (this.config.serverBaseUrl && await this.checkServerHealth()) {
-      this.activeMode = 'server';
+    if (await this.checkServerHealth()) {
       this.apiClient = getApiClient();
     } else {
-      this.activeMode = 'pdfjs';
+      throw new Error('Amnesia server is not available. PDF rendering requires a running server.');
     }
   }
 
   /**
    * Load a PDF document from ArrayBuffer
+   * First checks if the PDF already exists on the server, if so uses it.
+   * Otherwise uploads the PDF.
    */
   async loadDocument(data: ArrayBuffer, documentId?: string): Promise<ParsedPdf> {
+    if (!this.apiClient) {
+      throw new Error('Provider not initialized. Call initialize() first.');
+    }
+
     this.pdfData = data;
 
-    if (this.activeMode === 'server' && this.apiClient) {
+    // Try to get existing PDF first (by ID derived from filename)
+    if (documentId) {
+      const pdfId = documentId.replace(/\.pdf$/i, '');
       try {
-        this.parsedPdf = await this.apiClient.uploadPdf(data, documentId);
+        this.parsedPdf = await this.apiClient.getPdf(pdfId);
         this.documentId = this.parsedPdf.id;
+        console.log('[HybridPdfProvider] Using existing PDF from server:', pdfId);
         return this.parsedPdf;
-      } catch (error) {
-        console.warn('Server upload failed, falling back to PDF.js:', error);
-        this.activeMode = 'pdfjs';
+      } catch {
+        // PDF doesn't exist, fall through to upload
+        console.log('[HybridPdfProvider] PDF not found on server, uploading:', pdfId);
       }
     }
 
-    // Use PDF.js
-    this.parsedPdf = await this.pdfjsProvider.loadDocument(data, documentId);
+    // Upload the PDF
+    this.parsedPdf = await this.apiClient.uploadPdf(data, documentId);
     this.documentId = this.parsedPdf.id;
     return this.parsedPdf;
   }
 
   /**
-   * Load a PDF document from URL (server mode only)
+   * Load a PDF document from server by ID
    */
   async loadDocumentFromId(pdfId: string): Promise<ParsedPdf> {
-    if (this.activeMode === 'server' && this.apiClient) {
-      this.parsedPdf = await this.apiClient.getPdf(pdfId);
-      this.documentId = pdfId;
-      return this.parsedPdf;
+    if (!this.apiClient) {
+      throw new Error('Provider not initialized. Call initialize() first.');
     }
 
-    throw new Error('loadDocumentFromId requires server mode');
+    this.parsedPdf = await this.apiClient.getPdf(pdfId);
+    this.documentId = pdfId;
+    return this.parsedPdf;
   }
 
   /**
-   * Render a page to a blob
+   * Render a page to a blob (with caching)
    */
   async renderPage(pageNumber: number, options?: PdfRenderOptions): Promise<Blob> {
-    if (this.activeMode === 'server' && this.apiClient && this.documentId) {
-      try {
-        return await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
-      } catch (error) {
-        console.warn('Server render failed, falling back to PDF.js:', error);
-        await this.switchToPdfJs();
+    if (!this.apiClient || !this.documentId) {
+      throw new Error('No document loaded');
+    }
+
+    const scale = options?.scale ?? 1.5;
+
+    // Check cache first
+    if (this.config.enableCache) {
+      const cached = await this.pageCache.get(this.documentId, pageNumber, scale);
+      if (cached) {
+        // Trigger prefetch in background
+        if (this.config.enablePrefetch) {
+          this.prefetchAdjacentPages(pageNumber, scale);
+        }
+        return cached;
       }
     }
 
-    return this.pdfjsProvider.renderPage(pageNumber, options);
+    // Fetch from server
+    const blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
+
+    // Cache for later
+    if (this.config.enableCache) {
+      await this.pageCache.set(this.documentId, pageNumber, scale, blob);
+    }
+
+    // Trigger prefetch in background
+    if (this.config.enablePrefetch) {
+      this.prefetchAdjacentPages(pageNumber, scale);
+    }
+
+    return blob;
+  }
+
+  /**
+   * Alias for renderPage - used by multi-page container
+   */
+  async getPageImage(pageNumber: number, options?: PdfRenderOptions): Promise<Blob> {
+    return this.renderPage(pageNumber, options);
   }
 
   /**
@@ -201,72 +245,54 @@ export class HybridPdfProvider {
     canvas: HTMLCanvasElement,
     options?: PdfRenderOptions
   ): Promise<void> {
-    if (this.activeMode === 'server' && this.apiClient && this.documentId) {
-      try {
-        const blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
-        const img = await this.blobToImage(blob);
-
-        const ctx = canvas.getContext('2d')!;
-        canvas.width = img.width;
-        canvas.height = img.height;
-        ctx.drawImage(img, 0, 0);
-        return;
-      } catch (error) {
-        console.warn('Server render failed, falling back to PDF.js:', error);
-        await this.switchToPdfJs();
-      }
+    if (!this.apiClient || !this.documentId) {
+      throw new Error('No document loaded');
     }
 
-    return this.pdfjsProvider.renderPageToCanvas(pageNumber, canvas, options);
+    const blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
+    const img = await this.blobToImage(blob);
+
+    const ctx = canvas.getContext('2d')!;
+    canvas.width = img.width;
+    canvas.height = img.height;
+    ctx.drawImage(img, 0, 0);
   }
 
   /**
    * Get text layer for a page
    */
   async getTextLayer(pageNumber: number): Promise<PdfTextLayerData> {
-    if (this.activeMode === 'server' && this.apiClient && this.documentId) {
-      try {
-        return await this.apiClient.getPdfTextLayer(this.documentId, pageNumber);
-      } catch (error) {
-        console.warn('Server text layer failed, falling back to PDF.js:', error);
-        await this.switchToPdfJs();
-      }
+    if (!this.apiClient || !this.documentId) {
+      throw new Error('No document loaded');
     }
 
-    return this.pdfjsProvider.getTextLayer(pageNumber);
+    return this.apiClient.getPdfTextLayer(this.documentId, pageNumber);
   }
 
   /**
    * Get page dimensions
+   * Note: Server should provide page dimensions in a future API endpoint.
+   * For now, returns standard US Letter dimensions at 72 DPI.
    */
-  async getPageDimensions(pageNumber: number): Promise<{ width: number; height: number }> {
-    if (this.activeMode === 'pdfjs') {
-      return this.pdfjsProvider.getPageDimensions(pageNumber);
+  async getPageDimensions(_pageNumber: number): Promise<{ width: number; height: number }> {
+    if (!this.parsedPdf) {
+      throw new Error('No document loaded');
     }
 
-    // For server mode, we'd need to extract this from the page render
-    // For now, use PDF.js if available
-    if (this.pdfData) {
-      return this.pdfjsProvider.getPageDimensions(pageNumber);
-    }
-
-    throw new Error('Cannot get page dimensions without document data');
+    // TODO: Add server API endpoint to get per-page dimensions
+    // For now, return standard US Letter size
+    return { width: 612, height: 792 }; // US Letter at 72 DPI
   }
 
   /**
    * Search for text
    */
   async search(query: string, limit: number = 50): Promise<PdfSearchResult[]> {
-    if (this.activeMode === 'server' && this.apiClient && this.documentId) {
-      try {
-        return await this.apiClient.searchPdf(this.documentId, query, limit);
-      } catch (error) {
-        console.warn('Server search failed, falling back to PDF.js:', error);
-        await this.switchToPdfJs();
-      }
+    if (!this.apiClient || !this.documentId) {
+      throw new Error('No document loaded');
     }
 
-    return this.pdfjsProvider.search(query, limit);
+    return this.apiClient.searchPdf(this.documentId, query, limit);
   }
 
   /**
@@ -284,38 +310,14 @@ export class HybridPdfProvider {
   }
 
   /**
-   * Force switch to a specific mode
-   */
-  async switchMode(mode: 'server' | 'pdfjs'): Promise<void> {
-    if (mode === 'server') {
-      if (!await this.checkServerHealth()) {
-        throw new Error('Server is not available');
-      }
-      this.activeMode = 'server';
-      this.apiClient = getApiClient();
-
-      // Re-upload document if we have it
-      if (this.pdfData && this.documentId) {
-        await this.loadDocument(this.pdfData, this.documentId);
-      }
-    } else {
-      await this.switchToPdfJs();
-    }
-  }
-
-  /**
    * Destroy the provider and release resources
    */
   async destroy(): Promise<void> {
-    await this.pdfjsProvider.destroy();
+    // Cancel pending prefetch
+    this.cancelPrefetch();
 
-    if (this.activeMode === 'server' && this.apiClient && this.documentId) {
-      try {
-        await this.apiClient.deletePdf(this.documentId);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+    // Destroy page cache
+    this.pageCache.destroy();
 
     this.documentId = null;
     this.parsedPdf = null;
@@ -323,17 +325,101 @@ export class HybridPdfProvider {
     this.apiClient = null;
   }
 
+  /**
+   * Clear cached pages for the current document
+   */
+  async clearCache(): Promise<void> {
+    if (this.documentId) {
+      await this.pageCache.clearPdf(this.documentId);
+    }
+  }
+
+  /**
+   * Get cache statistics
+   */
+  getCacheStats(): { memorySize: number; maxMemory: number } {
+    return this.pageCache.getStats();
+  }
+
   // Private methods
 
-  private async switchToPdfJs(): Promise<void> {
-    if (this.activeMode === 'pdfjs') return;
+  /**
+   * Prefetch adjacent pages in the background
+   */
+  private prefetchAdjacentPages(currentPage: number, scale: number): void {
+    if (!this.documentId || !this.config.enablePrefetch) return;
 
-    this.activeMode = 'pdfjs';
+    const pageCount = this.getPageCount();
+    const pagesToPrefetch: number[] = [];
 
-    // Load document into PDF.js if we have the data
-    if (this.pdfData && !this.pdfjsProvider.getStatus().isLoaded) {
-      await this.pdfjsProvider.loadDocument(this.pdfData, this.documentId ?? undefined);
+    // Add adjacent pages (forward bias - more ahead than behind)
+    for (let i = 1; i <= this.config.prefetchCount; i++) {
+      // Forward pages (higher priority)
+      if (currentPage + i <= pageCount) {
+        pagesToPrefetch.push(currentPage + i);
+      }
+      // Backward pages
+      if (currentPage - i >= 1) {
+        pagesToPrefetch.push(currentPage - i);
+      }
     }
+
+    // Add to queue if not already cached or queued
+    for (const page of pagesToPrefetch) {
+      if (!this.prefetchQueue.includes(page)) {
+        // Check if already cached (sync check of memory cache)
+        this.pageCache.has(this.documentId, page, scale).then((isCached) => {
+          if (!isCached && !this.prefetchQueue.includes(page)) {
+            this.prefetchQueue.push(page);
+            this.processPrefetchQueue(scale);
+          }
+        });
+      }
+    }
+  }
+
+  /**
+   * Process the prefetch queue sequentially
+   */
+  private async processPrefetchQueue(scale: number): Promise<void> {
+    if (this.isPrefetching || this.prefetchQueue.length === 0) return;
+    if (!this.apiClient || !this.documentId) return;
+
+    this.isPrefetching = true;
+    const page = this.prefetchQueue.shift()!;
+
+    try {
+      // Check if already cached (might have been loaded by user navigation)
+      const isCached = await this.pageCache.has(this.documentId, page, scale);
+      if (!isCached) {
+        const blob = await this.apiClient.getPdfPage(this.documentId, page, { scale });
+        await this.pageCache.set(this.documentId, page, scale, blob);
+        console.log(`[PDF] Prefetched page ${page}`);
+      }
+    } catch (error) {
+      console.warn(`[PDF] Prefetch failed for page ${page}:`, error);
+    }
+
+    this.isPrefetching = false;
+
+    // Process next with delay to avoid overwhelming server
+    if (this.prefetchQueue.length > 0) {
+      this.prefetchTimeoutId = setTimeout(() => {
+        this.processPrefetchQueue(scale);
+      }, 200);
+    }
+  }
+
+  /**
+   * Cancel pending prefetch operations
+   */
+  private cancelPrefetch(): void {
+    if (this.prefetchTimeoutId) {
+      clearTimeout(this.prefetchTimeoutId);
+      this.prefetchTimeoutId = null;
+    }
+    this.prefetchQueue = [];
+    this.isPrefetching = false;
   }
 
   private blobToImage(blob: Blob): Promise<HTMLImageElement> {
@@ -350,7 +436,7 @@ export class HybridPdfProvider {
 }
 
 /**
- * Create a hybrid provider with default configuration
+ * Create a server PDF provider with default configuration
  */
 export function createHybridPdfProvider(
   config?: HybridPdfProviderConfig

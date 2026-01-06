@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "obsidian-devtools": {
+      "command": "node",
+      "args": ["/Users/josueguevara/Documents/Builds/obsidian-devtools-mcp/dist/index.js"]
+    }
+  }
+}

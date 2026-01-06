@@ -33,6 +33,8 @@ const DEFAULT_OPTIONS: HighlightGeneratorOptions = {
 export interface HighlightGenerationResult {
   hubFile?: TFile;
   atomicFiles: TFile[];
+  /** Map of highlight ID to its generated atomic note path */
+  atomicPathMap: Map<string, string>;
   errors: string[];
 }
 
@@ -70,6 +72,7 @@ export class HighlightGenerator {
     const settings = this.getSettings();
     const result: HighlightGenerationResult = {
       atomicFiles: [],
+      atomicPathMap: new Map(),
       errors: [],
     };
 
@@ -100,6 +103,8 @@ export class HighlightGenerator {
             const file = this.app.vault.getAbstractFileByPath(atomicResult.filePath) as TFile;
             if (file) {
               result.atomicFiles.push(file);
+              // Track the mapping of highlight ID to its atomic note path
+              result.atomicPathMap.set(highlight.id, atomicResult.filePath);
             }
           } else if (atomicResult.error) {
             result.errors.push(atomicResult.error);
@@ -125,6 +130,7 @@ export class HighlightGenerator {
     const settings = this.getSettings();
     const result: HighlightGenerationResult = {
       atomicFiles: [],
+      atomicPathMap: new Map(),
       errors: [],
     };
 
@@ -242,6 +248,7 @@ export class HighlightGenerator {
     const settings = this.getSettings();
     const result: HighlightGenerationResult = {
       atomicFiles: [],
+      atomicPathMap: new Map(),
       errors: [],
     };
 

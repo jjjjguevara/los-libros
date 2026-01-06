@@ -40,8 +40,15 @@ export type BookFormat = 'epub' | 'pdf' | 'mobi';
 
 /**
  * W3C-aligned selector for robust highlight anchoring
+ * Supports both EPUB (CFI-based) and PDF (page-based) selectors
  */
-export interface HighlightSelector {
+export type HighlightSelector = EpubHighlightSelector | PdfHighlightSelector;
+
+/**
+ * EPUB-specific selector using CFI
+ */
+export interface EpubHighlightSelector {
+  format: 'epub';
   primary: {
     type: 'CfiSelector';
     cfi: string;
@@ -57,6 +64,61 @@ export interface HighlightSelector {
     start: number;
     end: number;
   };
+}
+
+/**
+ * PDF-specific selector using page numbers and regions
+ */
+export interface PdfHighlightSelector {
+  format: 'pdf';
+  primary: {
+    type: 'PdfPageSelector';
+    page: number;
+    /** Optional position on page (normalized 0-1) */
+    position?: { x: number; y: number };
+  };
+  fallback: {
+    type: 'PdfTextQuoteSelector';
+    page: number;
+    exact: string;
+    prefix?: string;
+    suffix?: string;
+  };
+  /** Region on the page (normalized 0-1 coordinates) */
+  region?: {
+    type: 'PdfRegionSelector';
+    page: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  /** Multiple rects for multi-line selections */
+  rects?: PdfHighlightRect[];
+}
+
+/**
+ * Normalized rectangle for PDF highlight (0-1 coordinates)
+ */
+export interface PdfHighlightRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Type guard to check if selector is for PDF
+ */
+export function isPdfSelector(selector: HighlightSelector): selector is PdfHighlightSelector {
+  return selector.format === 'pdf';
+}
+
+/**
+ * Type guard to check if selector is for EPUB
+ */
+export function isEpubSelector(selector: HighlightSelector): selector is EpubHighlightSelector {
+  return selector.format === 'epub';
 }
 
 /**

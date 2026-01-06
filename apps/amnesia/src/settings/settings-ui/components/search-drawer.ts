@@ -26,6 +26,7 @@ export interface SearchDrawerOptions {
 const TAB_INFO: Record<TabId, { label: string; icon: string }> = {
     library: { label: 'Library', icon: 'library' },
     reading: { label: 'Reading', icon: 'book-open' },
+    pdf: { label: 'PDF', icon: 'file-type' },
     sync: { label: 'Sync', icon: 'refresh-cw' },
     notes: { label: 'Notes', icon: 'file-text' },
     advanced: { label: 'Advanced', icon: 'settings' },

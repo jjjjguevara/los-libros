@@ -101,6 +101,154 @@ export function NotesSettings({ plugin, containerEl }: NotesSettingsProps): void
             }));
 
     // ==========================================================================
+    // INLINE MODE
+    // ==========================================================================
+
+    const inlineSection = createSection(containerEl, 'layout', 'Inline Mode');
+
+    createExplainerBox(inlineSection,
+        'Inline mode embeds highlights and notes directly in the book note instead of creating separate files. ' +
+        'Content is placed in managed sections (marked with HTML comments) that are updated during sync without touching your custom content.'
+    );
+
+    new Setting(inlineSection)
+        .setName('Inline Highlights')
+        .setDesc('Embed highlights in the book note instead of creating separate files')
+        .addToggle(toggle => toggle
+            .setValue(settings.inlineMode?.inlineHighlights ?? false)
+            .onChange(async (value) => {
+                if (!settings.inlineMode) {
+                    settings.inlineMode = {
+                        inlineHighlights: false,
+                        inlineNotes: false,
+                        highlightsSectionId: 'HIGHLIGHTS',
+                        notesSectionId: 'NOTES',
+                    };
+                }
+                settings.inlineMode.inlineHighlights = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(inlineSection)
+        .setName('Inline Notes')
+        .setDesc('Embed notes in the book note instead of creating separate files')
+        .addToggle(toggle => toggle
+            .setValue(settings.inlineMode?.inlineNotes ?? false)
+            .onChange(async (value) => {
+                if (!settings.inlineMode) {
+                    settings.inlineMode = {
+                        inlineHighlights: false,
+                        inlineNotes: false,
+                        highlightsSectionId: 'HIGHLIGHTS',
+                        notesSectionId: 'NOTES',
+                    };
+                }
+                settings.inlineMode.inlineNotes = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(inlineSection)
+        .setName('Highlights Section ID')
+        .setDesc('HTML comment marker ID for highlights section (e.g., HIGHLIGHTS → <!-- AMNESIA:HIGHLIGHTS:START -->)')
+        .addText(text => text
+            .setPlaceholder('HIGHLIGHTS')
+            .setValue(settings.inlineMode?.highlightsSectionId ?? 'HIGHLIGHTS')
+            .onChange(async (value) => {
+                if (!settings.inlineMode) {
+                    settings.inlineMode = {
+                        inlineHighlights: false,
+                        inlineNotes: false,
+                        highlightsSectionId: 'HIGHLIGHTS',
+                        notesSectionId: 'NOTES',
+                    };
+                }
+                settings.inlineMode.highlightsSectionId = value || 'HIGHLIGHTS';
+                await plugin.saveSettings();
+            }));
+
+    new Setting(inlineSection)
+        .setName('Notes Section ID')
+        .setDesc('HTML comment marker ID for notes section (e.g., NOTES → <!-- AMNESIA:NOTES:START -->)')
+        .addText(text => text
+            .setPlaceholder('NOTES')
+            .setValue(settings.inlineMode?.notesSectionId ?? 'NOTES')
+            .onChange(async (value) => {
+                if (!settings.inlineMode) {
+                    settings.inlineMode = {
+                        inlineHighlights: false,
+                        inlineNotes: false,
+                        highlightsSectionId: 'HIGHLIGHTS',
+                        notesSectionId: 'NOTES',
+                    };
+                }
+                settings.inlineMode.notesSectionId = value || 'NOTES';
+                await plugin.saveSettings();
+            }));
+
+    // ==========================================================================
+    // PER-BOOK TEMPLATE OVERRIDES
+    // ==========================================================================
+
+    const perBookSection = createSection(containerEl, 'file-code', 'Per-Book Templates');
+
+    createExplainerBox(perBookSection,
+        'Allow individual books to use custom templates by setting a frontmatter flag. ' +
+        'When enabled, notes with the flag will preserve their existing structure during sync.'
+    );
+
+    new Setting(perBookSection)
+        .setName('Enable Per-Book Templates')
+        .setDesc('Allow books to override global templates via frontmatter')
+        .addToggle(toggle => toggle
+            .setValue(settings.perBookTemplates?.enabled ?? true)
+            .onChange(async (value) => {
+                if (!settings.perBookTemplates) {
+                    settings.perBookTemplates = {
+                        enabled: true,
+                        frontmatterFlag: 'customTemplate',
+                        respectStructure: true,
+                    };
+                }
+                settings.perBookTemplates.enabled = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(perBookSection)
+        .setName('Frontmatter Flag')
+        .setDesc('Frontmatter key that marks a note as using custom template (set to true)')
+        .addText(text => text
+            .setPlaceholder('customTemplate')
+            .setValue(settings.perBookTemplates?.frontmatterFlag ?? 'customTemplate')
+            .onChange(async (value) => {
+                if (!settings.perBookTemplates) {
+                    settings.perBookTemplates = {
+                        enabled: true,
+                        frontmatterFlag: 'customTemplate',
+                        respectStructure: true,
+                    };
+                }
+                settings.perBookTemplates.frontmatterFlag = value || 'customTemplate';
+                await plugin.saveSettings();
+            }));
+
+    new Setting(perBookSection)
+        .setName('Respect Note Structure')
+        .setDesc('When flag is set, sync only updates frontmatter and doesn\'t regenerate body')
+        .addToggle(toggle => toggle
+            .setValue(settings.perBookTemplates?.respectStructure ?? true)
+            .onChange(async (value) => {
+                if (!settings.perBookTemplates) {
+                    settings.perBookTemplates = {
+                        enabled: true,
+                        frontmatterFlag: 'customTemplate',
+                        respectStructure: true,
+                    };
+                }
+                settings.perBookTemplates.respectStructure = value;
+                await plugin.saveSettings();
+            }));
+
+    // ==========================================================================
     // TEMPLATES SECTION
     // ==========================================================================
 

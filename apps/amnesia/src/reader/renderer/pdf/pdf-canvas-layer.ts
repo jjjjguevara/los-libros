@@ -64,11 +64,16 @@ export class PdfCanvasLayer {
 
   /**
    * Render page image from blob
+   *
+   * @param imageBlob - The page image blob from the server
+   * @param maxWidth - Maximum width available for display (container width minus margins)
+   * @param maxHeight - Maximum height available for display (container height minus margins)
+   * @param rotation - Rotation in degrees (0, 90, 180, 270)
    */
   async renderPage(
     imageBlob: Blob,
-    pageWidth: number,
-    pageHeight: number,
+    maxWidth: number,
+    maxHeight: number,
     rotation: number = 0
   ): Promise<void> {
     this.currentRotation = rotation;
@@ -80,29 +85,38 @@ export class PdfCanvasLayer {
     return new Promise((resolve, reject) => {
       image.onload = () => {
         try {
-          // Calculate dimensions based on rotation
-          const isRotated = rotation === 90 || rotation === 270;
-          const displayWidth = isRotated ? pageHeight : pageWidth;
-          const displayHeight = isRotated ? pageWidth : pageHeight;
+          // Get the actual image dimensions from the server-rendered image
+          // Note: The server already applies rotation, so the image dimensions
+          // reflect the rotated page (e.g., portrait becomes landscape at 90°)
+          const imageWidth = image.naturalWidth;
+          const imageHeight = image.naturalHeight;
 
-          // Resize canvas to match page dimensions
+          // Calculate aspect-ratio-preserving display dimensions
+          // The image should fit within maxWidth x maxHeight while preserving aspect ratio
+          const imageAspect = imageWidth / imageHeight;
+          const containerAspect = maxWidth / maxHeight;
+
+          let displayWidth: number;
+          let displayHeight: number;
+
+          if (imageAspect > containerAspect) {
+            // Image is wider than container - fit to width
+            displayWidth = maxWidth;
+            displayHeight = maxWidth / imageAspect;
+          } else {
+            // Image is taller than container - fit to height
+            displayHeight = maxHeight;
+            displayWidth = maxHeight * imageAspect;
+          }
+
+          // Resize canvas to match calculated dimensions
           this.resize(displayWidth, displayHeight);
 
           // Clear canvas
           this.ctx.clearRect(0, 0, displayWidth, displayHeight);
 
-          // Apply rotation transform
-          this.ctx.save();
-          if (rotation !== 0) {
-            this.ctx.translate(displayWidth / 2, displayHeight / 2);
-            this.ctx.rotate((rotation * Math.PI) / 180);
-            this.ctx.translate(-pageWidth / 2, -pageHeight / 2);
-          }
-
-          // Draw image
-          this.ctx.drawImage(image, 0, 0, pageWidth, pageHeight);
-
-          this.ctx.restore();
+          // Draw image directly - server already applied rotation
+          this.ctx.drawImage(image, 0, 0, displayWidth, displayHeight);
 
           URL.revokeObjectURL(imageUrl);
           resolve();

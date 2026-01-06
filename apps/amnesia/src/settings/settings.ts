@@ -119,6 +119,96 @@ export interface AssetSettings {
 }
 
 // ==========================================================================
+// Field Alias System Types
+// ==========================================================================
+
+/**
+ * Field alias configuration for mapping multiple frontmatter keys to a single Calibre field
+ */
+export interface FieldAlias {
+  /** The canonical Calibre field name (e.g., 'title', 'authors', 'rating') */
+  canonicalField: string;
+  /** Alternative frontmatter keys that map to this field */
+  aliases: string[];
+  /** Primary key to use when writing to frontmatter (default: first alias) */
+  primaryObsidianKey?: string;
+}
+
+/**
+ * Per-book template settings for custom note structures
+ */
+export interface PerBookTemplateSettings {
+  /** Enable per-book template overrides via frontmatter flag */
+  enabled: boolean;
+  /** Frontmatter key that marks a note as using custom template */
+  frontmatterFlag: string;
+  /** Whether to respect existing note structure when syncing */
+  respectStructure: boolean;
+}
+
+/**
+ * Inline mode settings for embedding highlights/notes in book notes
+ */
+export interface InlineModeSettings {
+  /** Enable inline highlights (embed in book note instead of separate files) */
+  inlineHighlights: boolean;
+  /** Enable inline notes (embed in book note instead of separate files) */
+  inlineNotes: boolean;
+  /** Section ID for inline highlights */
+  highlightsSectionId: string;
+  /** Section ID for inline notes */
+  notesSectionId: string;
+}
+
+// ==========================================================================
+// Reader ↔ Vault Sync Settings Types
+// ==========================================================================
+
+/**
+ * Sync mode for Reader ↔ Vault synchronization
+ */
+export type ReaderVaultSyncMode =
+  | 'bidirectional'      // Changes sync both directions
+  | 'reader-to-vault'    // Reader changes → vault only
+  | 'vault-to-reader'    // Vault changes → reader only
+  | 'manual';            // User triggers sync explicitly
+
+/**
+ * Conflict resolution strategy for Reader ↔ Vault sync
+ */
+export type ReaderVaultConflictStrategy =
+  | 'reader-wins'        // Always prefer reader version
+  | 'vault-wins'         // Always prefer vault version
+  | 'last-write-wins'    // Prefer most recently modified
+  | 'ask-user';          // Show modal for each conflict
+
+/**
+ * Reader ↔ Vault sync settings
+ */
+export interface ReaderVaultSyncSettings {
+  /** Enable Reader ↔ Vault sync */
+  enabled: boolean;
+  /** Sync mode for highlights */
+  highlightSyncMode: ReaderVaultSyncMode;
+  /** Sync mode for notes/annotations */
+  noteSyncMode: ReaderVaultSyncMode;
+  /** Default conflict resolution strategy */
+  conflictStrategy: ReaderVaultConflictStrategy;
+  /** Append-only vault: deletions in reader don't delete vault notes */
+  appendOnlyVault: boolean;
+  /** Preserve reader highlights: deletions in vault don't delete reader highlights */
+  preserveReaderHighlights: boolean;
+  /** Debounce delay for vault changes (ms) */
+  debounceDelay: number;
+  /** Auto-sync on highlight create/update/delete */
+  autoSync: boolean;
+  /** Auto-regenerate hub files when highlights change */
+  autoRegenerateHub: boolean;
+  /** Debounce delay for hub regeneration (ms) - to batch multiple rapid changes */
+  hubRegenerateDelay: number;
+}
+
+// ==========================================================================
 // Unified Sync Architecture Settings Types
 // ==========================================================================
 
@@ -183,6 +273,139 @@ export interface UnifiedSyncSettings {
 
   /** Note generation batch size. Default: 50 */
   noteGenerationBatchSize: number;
+}
+
+// ==========================================================================
+// Server Management Settings Types
+// ==========================================================================
+
+/**
+ * Server management settings for bundled amnesia-server
+ */
+export interface ServerManagementSettings {
+  /** Port for the server to listen on. Default: 3000 */
+  port: number;
+  /** Auto-start server when plugin loads. Default: true */
+  autoStart: boolean;
+  /** Maximum restart attempts before giving up. Default: 3 */
+  maxRestartAttempts: number;
+  /** Delay between restart attempts in ms. Default: 2000 */
+  restartDelay: number;
+  /** Health check interval in ms. Default: 30000 */
+  healthCheckInterval: number;
+  /** Health check timeout in ms. Default: 5000 */
+  healthCheckTimeout: number;
+  /** Show notices for server events. Default: true */
+  showNotices: boolean;
+  /** Use external server instead of bundled. Default: false */
+  useExternalServer: boolean;
+  /** External server URL (when useExternalServer is true) */
+  externalServerUrl: string;
+}
+
+// ==========================================================================
+// PDF Renderer Settings Types
+// ==========================================================================
+
+/**
+ * PDF rendering mode preference
+ * Note: 'pdfjs' has been deprecated. All modes now use server-based rendering.
+ */
+export type PdfProviderMode = 'auto' | 'server';
+
+/**
+ * PDF page layout options
+ */
+export type PdfPageLayout = 'single' | 'dual' | 'book';
+
+/**
+ * OCR provider options for scanned PDFs
+ */
+export type PdfOcrProvider = 'tesseract' | 'ollama';
+
+/**
+ * PDF reading mode themes (like Google Scholar PDF Reader)
+ * - device: Match Obsidian's theme
+ * - light: White background
+ * - sepia: Warm yellowish tint (easy on eyes)
+ * - dark: Inverted colors for dark mode
+ * - night: Dark with warm tint (reduced blue light)
+ */
+export type PdfReadingMode = 'device' | 'light' | 'sepia' | 'dark' | 'night';
+
+/**
+ * PDF display mode:
+ * - paginated: Fit multiple pages in view, no pan, keyboard navigation
+ * - horizontal-scroll: Single row, fixed height, horizontal pan only
+ * - vertical-scroll: Single column, fixed width, vertical pan only
+ * - auto-grid: Dynamic columns based on zoom, always fits viewport width (default)
+ * - canvas: Free pan/zoom, fixed columns (8-12)
+ */
+export type PdfDisplayMode = 'paginated' | 'horizontal-scroll' | 'vertical-scroll' | 'auto-grid' | 'canvas';
+
+/**
+ * PDF scroll direction for scrolled mode (legacy, use displayMode instead)
+ * @deprecated Use displayMode: 'horizontal-scroll' or 'vertical-scroll' instead
+ */
+export type PdfScrollDirection = 'vertical' | 'horizontal';
+
+/**
+ * PDF render DPI options for server-side rendering
+ */
+export type PdfRenderDpi = 72 | 96 | 150 | 200 | 300;
+
+/**
+ * PDF image output format
+ */
+export type PdfImageFormat = 'png' | 'jpeg' | 'webp';
+
+/**
+ * PDF renderer settings
+ */
+export interface PdfSettings {
+  /** Default zoom scale (1.0 = 100%). Default: 1.5 */
+  scale: number;
+  /** Page rotation in degrees. Default: 0 */
+  rotation: 0 | 90 | 180 | 270;
+  /** Preferred rendering mode. Default: 'auto' */
+  preferMode: PdfProviderMode;
+  /** Page layout mode. Default: 'single' */
+  pageLayout: PdfPageLayout;
+  /** Display mode for viewing PDFs. Default: 'auto-grid' */
+  displayMode: PdfDisplayMode;
+  /** @deprecated Scroll direction for scrolled mode. Use displayMode instead. */
+  scrollDirection: PdfScrollDirection;
+  /** Enable OCR for scanned PDFs. Default: false */
+  enableOcr: boolean;
+  /** OCR provider to use. Default: 'tesseract' */
+  ocrProvider: PdfOcrProvider;
+  /** Show text layer for selection. Default: true */
+  showTextLayer: boolean;
+  /** Enable region selection for OCR. Default: true */
+  enableRegionSelection: boolean;
+  /** Reading mode theme. Default: 'device' */
+  readingMode: PdfReadingMode;
+
+  // ==========================================================================
+  // PDF Optimization Settings
+  // ==========================================================================
+
+  /** Render DPI for server-side rendering. Higher = sharper but slower. Default: 150 */
+  renderDpi: PdfRenderDpi;
+  /** Number of pages to preload ahead of current page. Default: 2 */
+  pagePreloadCount: number;
+  /** Enable rendered page caching. Default: true */
+  enablePageCache: boolean;
+  /** Maximum number of pages to keep in cache. Default: 10 */
+  pageCacheSize: number;
+  /** Image format for rendered pages. Default: 'png' */
+  imageFormat: PdfImageFormat;
+  /** Image quality for lossy formats (jpeg/webp). 1-100. Default: 85 */
+  imageQuality: number;
+  /** Enable text layer anti-aliasing. Default: true */
+  enableTextAntialiasing: boolean;
+  /** Enable image smoothing/interpolation. Default: true */
+  enableImageSmoothing: boolean;
 }
 
 export interface LibrosSettings {
@@ -302,6 +525,36 @@ export interface LibrosSettings {
 
   /** Unified sync engine configuration */
   unifiedSync: UnifiedSyncSettings;
+
+  // ==========================================================================
+  // Field Alias & Template Override Settings
+  // ==========================================================================
+
+  /** Field alias mappings for frontmatter flexibility */
+  fieldAliases: FieldAlias[];
+
+  /** Per-book template override settings */
+  perBookTemplates: PerBookTemplateSettings;
+
+  /** Inline mode settings for embedding in book notes */
+  inlineMode: InlineModeSettings;
+
+  /** Reader ↔ Vault sync settings */
+  readerVaultSync: ReaderVaultSyncSettings;
+
+  // ==========================================================================
+  // PDF Renderer Settings
+  // ==========================================================================
+
+  /** PDF rendering configuration */
+  pdf: PdfSettings;
+
+  // ==========================================================================
+  // Server Management Settings
+  // ==========================================================================
+
+  /** Server management configuration */
+  serverManagement: ServerManagementSettings;
 }
 
 export const DEFAULT_SETTINGS: LibrosSettings = {
@@ -349,13 +602,13 @@ export const DEFAULT_SETTINGS: LibrosSettings = {
   calibreConflictResolution: 'last-write',
   calibreSyncableFields: ['status', 'rating', 'tags', 'progress'],
 
-  // Folders (vault paths matching BookFusion pattern)
-  calibreBookNotesFolder: 'Florilegios',
-  calibreAuthorIndexFolder: 'Autores',
-  calibreSeriesIndexFolder: 'Series',
-  calibreShelfIndexFolder: 'Estanterias',
-  calibreHighlightsFolder: 'Subrayados',
-  calibreBaseFilesFolder: 'Indices',
+  // Folders (vault paths for generated notes)
+  calibreBookNotesFolder: 'Library/Books',
+  calibreAuthorIndexFolder: 'Library/Authors',
+  calibreSeriesIndexFolder: 'Library/Series',
+  calibreShelfIndexFolder: 'Library/Shelves',
+  calibreHighlightsFolder: 'Library/Highlights',
+  calibreBaseFilesFolder: 'Library/Indices',
   calibreCoversFolder: 'Attachments/covers',
 
   // Template Settings
@@ -455,5 +708,93 @@ export const DEFAULT_SETTINGS: LibrosSettings = {
     coverDownloadConcurrency: 5,
     batchNoteGeneration: true,
     noteGenerationBatchSize: 50,
+  },
+
+  // ==========================================================================
+  // Field Alias & Template Override Settings Defaults
+  // ==========================================================================
+
+  // Field Aliases
+  fieldAliases: [
+    { canonicalField: 'title', aliases: ['title', 'título', 'book_name', 'book'] },
+    { canonicalField: 'authors', aliases: ['authors', 'author', 'creator', 'escritor'] },
+    { canonicalField: 'tags', aliases: ['tags', 'keywords', 'keyterms', 'bookshelves'] },
+    { canonicalField: 'rating', aliases: ['rating', 'stars', 'score', 'valoración'] },
+    { canonicalField: 'series', aliases: ['series', 'serie', 'saga'] },
+    { canonicalField: 'publisher', aliases: ['publisher', 'editorial'] },
+    { canonicalField: 'progress', aliases: ['progress', 'percent', 'reading_progress'] },
+  ],
+
+  // Per-Book Template Overrides
+  perBookTemplates: {
+    enabled: true,
+    frontmatterFlag: 'customTemplate',
+    respectStructure: true,
+  },
+
+  // Inline Mode
+  inlineMode: {
+    inlineHighlights: false,
+    inlineNotes: false,
+    highlightsSectionId: 'HIGHLIGHTS',
+    notesSectionId: 'NOTES',
+  },
+
+  // Reader ↔ Vault Sync
+  readerVaultSync: {
+    enabled: false,
+    highlightSyncMode: 'bidirectional',
+    noteSyncMode: 'bidirectional',
+    conflictStrategy: 'last-write-wins',
+    appendOnlyVault: false,
+    preserveReaderHighlights: false,
+    debounceDelay: 2000,
+    autoSync: true,
+    autoRegenerateHub: false, // Off by default - can cause extra file writes
+    hubRegenerateDelay: 5000, // 5 seconds to batch rapid highlight changes
+  },
+
+  // ==========================================================================
+  // PDF Renderer Settings Defaults
+  // ==========================================================================
+
+  pdf: {
+    scale: 1.5,              // 150% zoom for comfortable reading
+    rotation: 0,             // No rotation
+    preferMode: 'auto',      // Server-based rendering (PDF.js deprecated)
+    pageLayout: 'single',    // Single page view
+    displayMode: 'auto-grid', // auto-grid, paginated, horizontal-scroll, vertical-scroll, canvas
+    scrollDirection: 'vertical', // @deprecated - use displayMode instead
+    enableOcr: false,        // OCR disabled by default
+    ocrProvider: 'tesseract', // Default OCR provider
+    showTextLayer: true,     // Enable text selection
+    enableRegionSelection: true, // Enable manual region selection for OCR
+    readingMode: 'device',   // Follow system/device theme
+
+    // PDF Optimization Settings
+    renderDpi: 150,          // Good balance of quality and performance
+    pagePreloadCount: 2,     // Preload 2 pages ahead
+    enablePageCache: true,   // Cache rendered pages
+    pageCacheSize: 10,       // Keep 10 pages in cache
+    imageFormat: 'png',      // Lossless format for crisp text
+    imageQuality: 85,        // Quality for jpeg/webp (if used)
+    enableTextAntialiasing: true,     // Smooth text edges
+    enableImageSmoothing: true,       // Smooth image interpolation
+  },
+
+  // ==========================================================================
+  // Server Management Settings Defaults
+  // ==========================================================================
+
+  serverManagement: {
+    port: 3000,                   // Default port
+    autoStart: true,              // Auto-start when plugin loads
+    maxRestartAttempts: 3,        // Max restart attempts
+    restartDelay: 2000,           // 2 seconds between restarts
+    healthCheckInterval: 30000,   // Check health every 30 seconds
+    healthCheckTimeout: 5000,     // 5 second timeout for health checks
+    showNotices: true,            // Show UI notices for server events
+    useExternalServer: false,     // Use bundled server by default
+    externalServerUrl: '',        // External server URL (when useExternalServer)
   },
 };

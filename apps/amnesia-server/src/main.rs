@@ -31,10 +31,12 @@ mod routes;
 mod state;
 mod storage;
 mod sync;
+mod upload;
 
 use config::Config;
 use library::LibraryScanner;
 use routes::opds::LibraryCache;
+use routes::upload::create_upload_state;
 use state::AppState;
 use storage::S3Client;
 
@@ -102,12 +104,24 @@ async fn main() {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // Create upload state with local chunk storage
+    let chunk_base_path = std::env::var("CHUNK_STORAGE_PATH")
+        .unwrap_or_else(|_| "/tmp/amnesia-chunks".to_string());
+    let upload_state = create_upload_state(
+        app_state.clone(),
+        std::path::PathBuf::from(chunk_base_path),
+    );
+
+    // Start upload session cleanup task
+    upload_state.session_manager.clone().start_cleanup_task();
+
     // Build router
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/api/v1/health", get(health_check))
         .nest("/api/v1/books", routes::books::router())
         .nest("/api/v1/pdf", routes::pdf::router())
+        .nest("/api/v1/upload", routes::upload::router(upload_state))
         .nest("/opds", routes::opds::router(library_cache))
         .nest("/files", routes::files::router())
         .nest("/api/v1/progress", routes::progress::router(db_pool.clone()))

@@ -47,14 +47,43 @@ export type {
   PdfScrollerConfig,
 } from './pdf-scroller';
 
-// PDF.js fallback provider
-export { PdfJsProvider, getPdfJsProvider, resetPdfJsProvider } from './pdfjs-provider';
-export type { PdfJsProviderStatus } from './pdfjs-provider';
-
-// Hybrid provider (server + PDF.js fallback)
+// Server-based PDF provider (PDF.js deprecated)
 export { HybridPdfProvider, createHybridPdfProvider } from './hybrid-pdf-provider';
 export type {
   HybridPdfProviderConfig,
   HybridPdfProviderStatus,
   PdfProviderMode,
 } from './hybrid-pdf-provider';
+
+// Multi-page container
+export { PdfMultiPageContainer } from './pdf-multi-page-container';
+export type {
+  MultiPageConfig,
+  DisplayMode,
+  ScrollDirection,
+} from './pdf-multi-page-container';
+
+// Page element
+export { PdfPageElement } from './pdf-page-element';
+export type { ReadingMode, PageHighlight, PageRenderData } from './pdf-page-element';
+
+// Infinite canvas (new pan-zoom system)
+export { PdfInfiniteCanvas } from './pdf-infinite-canvas';
+export type { InfiniteCanvasConfig, PageLayout, DisplayMode as InfiniteCanvasDisplayMode } from './pdf-infinite-canvas';
+
+// Camera system
+export {
+  createCamera,
+  panCamera,
+  zoomCameraToPoint,
+  zoomCamera,
+  setCameraZoom,
+  centerOnPoint,
+  fitBoxInView,
+  getCameraTransform,
+  getVisibleBounds,
+  lerpCamera,
+  screenToCanvas,
+  canvasToScreen,
+} from './pdf-canvas-camera';
+export type { Camera, Point, CameraConstraints } from './pdf-canvas-camera';

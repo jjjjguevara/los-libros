@@ -123,8 +123,9 @@ export class HighlightService {
   ): Promise<Highlight> {
     const now = new Date();
 
-    // Build the W3C-aligned selector for robust re-anchoring
+    // Build the W3C-aligned selector for robust re-anchoring (EPUB format)
     const selector: HighlightSelector = {
+      format: 'epub',
       primary: { type: 'CfiSelector', cfi },
       fallback: {
         type: 'TextQuoteSelector',

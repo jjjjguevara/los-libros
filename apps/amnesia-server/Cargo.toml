@@ -49,6 +49,10 @@ anyhow = "1"
 # URL encoding
 urlencoding = "2"
 
+# Hashing (for chunked upload deduplication)
+sha2 = "0.10"
+hex = "0.4"
+
 # Streaming
 futures = "0.3"
 
@@ -73,3 +77,4 @@ ocr-tesseract = ["tesseract"]
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
 axum-test = "14"
+tempfile = "3.24.0"

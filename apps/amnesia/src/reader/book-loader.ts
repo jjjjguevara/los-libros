@@ -1,7 +1,7 @@
 /**
  * BookLoader
  *
- * Handles loading EPUB files from either:
+ * Handles loading EPUB and PDF files from either:
  * 1. Obsidian vault (relative paths)
  * 2. Calibre library (absolute filesystem paths)
  */
@@ -18,16 +18,24 @@ import type { CalibreBookFull } from '../calibre/calibre-types';
 export type BookSource = 'vault' | 'calibre' | 'unknown';
 
 /**
+ * Format of the book being loaded
+ */
+export type BookFormat = 'epub' | 'pdf';
+
+/**
  * Loaded book data
  */
 export interface LoadedBook {
   source: BookSource;
+  format: BookFormat;
   arrayBuffer: ArrayBuffer;
   metadata: {
     title: string;
     author?: string;
     calibreId?: number;
     bookId: string;
+    filePath: string;
+    /** @deprecated Use filePath instead */
     epubPath: string;
     currentCfi?: string;
     progress?: number;
@@ -45,6 +53,17 @@ export function isAbsolutePath(bookPath: string): boolean {
     // Unix: Check for leading slash
     return bookPath.startsWith('/');
   }
+}
+
+/**
+ * Detect book format from file path
+ */
+export function detectBookFormat(filePath: string): BookFormat {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.pdf')) {
+    return 'pdf';
+  }
+  return 'epub';
 }
 
 /**
@@ -82,17 +101,23 @@ async function loadVaultBook(
     throw new Error(`Book not found in vault: ${bookPath}`);
   }
 
+  // Detect format
+  const format = detectBookFormat(bookPath);
+  const ext = format === 'pdf' ? '.pdf' : '.epub';
+
   // Read binary data
   const arrayBuffer = await app.vault.adapter.readBinary(bookPath);
 
   return {
     source: 'vault',
+    format,
     arrayBuffer,
     metadata: {
-      title: book?.title ?? path.basename(bookPath, '.epub'),
+      title: book?.title ?? path.basename(bookPath, ext),
       author: book?.author,
       bookId: book?.id ?? bookPath,
-      epubPath: bookPath,
+      filePath: bookPath,
+      epubPath: bookPath, // Deprecated, kept for backwards compatibility
       currentCfi: book?.currentCfi,
       progress: book?.progress,
     },
@@ -100,25 +125,42 @@ async function loadVaultBook(
 }
 
 /**
- * Find EPUB file in a Calibre book directory
+ * Find supported book file in a Calibre book directory
  * Calibre stores books in directories like: Author/Title (id)/book.epub
+ * Supports EPUB (preferred) and PDF formats
  */
-function findEpubInDirectory(dirPath: string): { epub: string | null; otherFormats: string[] } {
+function findBookInDirectory(dirPath: string): {
+  filePath: string | null;
+  format: BookFormat | null;
+  otherFormats: string[]
+} {
   const otherFormats: string[] = [];
+  let pdfPath: string | null = null;
+
   try {
     const files = fs.readdirSync(dirPath);
     for (const file of files) {
       const lower = file.toLowerCase();
       if (lower.endsWith('.epub')) {
-        return { epub: path.join(dirPath, file), otherFormats: [] };
-      } else if (lower.endsWith('.pdf') || lower.endsWith('.mobi') || lower.endsWith('.azw3')) {
+        // EPUB is preferred, return immediately
+        return { filePath: path.join(dirPath, file), format: 'epub', otherFormats: [] };
+      } else if (lower.endsWith('.pdf')) {
+        // Store PDF path in case no EPUB is found
+        pdfPath = path.join(dirPath, file);
+      } else if (lower.endsWith('.mobi') || lower.endsWith('.azw3')) {
         otherFormats.push(file);
       }
     }
   } catch (e) {
     console.warn('[BookLoader] Failed to read directory:', dirPath, e);
   }
-  return { epub: null, otherFormats };
+
+  // If no EPUB found, use PDF
+  if (pdfPath) {
+    return { filePath: pdfPath, format: 'pdf', otherFormats };
+  }
+
+  return { filePath: null, format: null, otherFormats };
 }
 
 /**
@@ -130,50 +172,55 @@ async function loadCalibreBook(
 ): Promise<LoadedBook> {
   // Check if path exists
   if (!fs.existsSync(bookPath)) {
-    throw new Error(`EPUB file not found: ${bookPath}`);
+    throw new Error(`Book file not found: ${bookPath}`);
   }
 
-  let epubPath = bookPath;
+  let filePath = bookPath;
+  let format = detectBookFormat(bookPath);
 
-  // If it's a directory (Calibre book folder), find the EPUB file inside
+  // If it's a directory (Calibre book folder), find a supported book file inside
   const stats = fs.statSync(bookPath);
   if (stats.isDirectory()) {
-    const result = findEpubInDirectory(bookPath);
-    if (!result.epub) {
+    const result = findBookInDirectory(bookPath);
+    if (!result.filePath || !result.format) {
       const formatMsg = result.otherFormats.length > 0
         ? ` Available formats: ${result.otherFormats.join(', ')}`
         : '';
-      throw new Error(`No EPUB format available for this book.${formatMsg} Only EPUB files are supported.`);
+      throw new Error(`No supported format available for this book.${formatMsg} Only EPUB and PDF files are supported.`);
     }
-    epubPath = result.epub;
-    console.log('[BookLoader] Resolved EPUB from directory:', epubPath);
+    filePath = result.filePath;
+    format = result.format;
+    console.log(`[BookLoader] Resolved ${format.toUpperCase()} from directory:`, filePath);
   }
 
   // Read binary data
-  const buffer = fs.readFileSync(epubPath);
-  const arrayBuffer = buffer.buffer.slice(
-    buffer.byteOffset,
-    buffer.byteOffset + buffer.byteLength
-  ) as ArrayBuffer;
+  // Note: Node's Buffer.buffer returns a shared ArrayBuffer pool which can cause
+  // issues with XHR/fetch uploads in Electron. We need to copy to a fresh ArrayBuffer.
+  const buffer = fs.readFileSync(filePath);
+  const arrayBuffer = new Uint8Array(buffer).buffer;
 
   // Find Calibre book metadata if available
-  // Match by either the exact epub path or the directory path
+  // Match by either the exact file path or the directory path
   const calibreBook = calibreBooks?.find((b) =>
-    b.epubPath === epubPath ||
+    b.epubPath === filePath ||
     b.epubPath === bookPath ||
     (b.epubPath && path.dirname(b.epubPath) === bookPath)
   );
 
+  const ext = format === 'pdf' ? '.pdf' : '.epub';
+
   if (calibreBook) {
     return {
       source: 'calibre',
+      format,
       arrayBuffer,
       metadata: {
         title: calibreBook.title,
         author: calibreBook.authors[0]?.name,
         calibreId: calibreBook.id,
         bookId: calibreBook.uuid,
-        epubPath,
+        filePath,
+        epubPath: filePath, // Deprecated, kept for backwards compatibility
         // Progress is loaded from frontmatter in ReaderContainer
         currentCfi: undefined,
         progress: undefined,
@@ -182,15 +229,17 @@ async function loadCalibreBook(
   }
 
   // No Calibre metadata found, extract from path
-  const filename = path.basename(epubPath, '.epub');
+  const filename = path.basename(filePath, ext);
 
   return {
     source: 'calibre',
+    format,
     arrayBuffer,
     metadata: {
       title: filename,
-      bookId: epubPath,
-      epubPath,
+      bookId: filePath,
+      filePath,
+      epubPath: filePath, // Deprecated, kept for backwards compatibility
     },
   };
 }

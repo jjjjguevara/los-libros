@@ -10,6 +10,7 @@ import { App, PluginSettingTab, setIcon, Scope } from 'obsidian';
 import type AmnesiaPlugin from '../../main';
 import { LibrarySettings } from './library-settings';
 import { ReaderSettings } from './reader-settings';
+import { PdfSettings } from './pdf-settings';
 import { SyncSettings } from './sync-settings';
 import { NotesSettings } from './notes-settings';
 import { AdvancedSettings } from './advanced-settings';
@@ -26,6 +27,7 @@ interface TabDefinition {
 const TABS: TabDefinition[] = [
     { id: 'library', name: 'Library', icon: 'library' },
     { id: 'reading', name: 'Reading', icon: 'book-open' },
+    { id: 'pdf', name: 'PDF', icon: 'file-type' },
     { id: 'sync', name: 'Sync', icon: 'refresh-cw' },
     { id: 'notes', name: 'Notes', icon: 'file-text' },
     { id: 'advanced', name: 'Advanced', icon: 'settings' },
@@ -117,6 +119,20 @@ export class AmnesiaSettingTab extends PluginSettingTab {
         ReaderSettings({
             plugin: this.plugin,
             containerEl: readingContent,
+        });
+
+        // =========================================================================
+        // PDF TAB - PDF rendering, scale, layout, OCR
+        // =========================================================================
+        const pdfContent = this.contentWrapper.createEl('div', {
+            cls: `amnesia-tab-content ${this.activeTab === 'pdf' ? 'is-active' : ''}`,
+            attr: { 'data-tab-content': 'pdf' },
+        });
+        this.contentContainers.set('pdf', pdfContent);
+
+        PdfSettings({
+            plugin: this.plugin,
+            containerEl: pdfContent,
         });
 
         // =========================================================================

@@ -353,6 +353,59 @@ export class PdfAnnotationLayer {
   }
 
   /**
+   * Load highlights from PdfHighlightService for a specific book
+   * This integrates the annotation layer with the highlight system
+   */
+  loadFromHighlightService(
+    pdfHighlights: PdfHighlight[],
+    currentPage?: number
+  ): void {
+    this.setHighlights(pdfHighlights);
+    if (currentPage !== undefined) {
+      this.setPage(currentPage);
+    }
+  }
+
+  /**
+   * Add a highlight and immediately render if on current page
+   */
+  addAndRender(highlight: PdfHighlight): void {
+    this.highlights.set(highlight.id, highlight);
+    if (highlight.page === this.currentPage) {
+      this.renderHighlight(highlight);
+    }
+  }
+
+  /**
+   * Update highlight from service (after color/annotation change)
+   */
+  updateFromService(highlight: PdfHighlight): void {
+    this.removeHighlight(highlight.id);
+    this.addHighlight(highlight);
+  }
+
+  /**
+   * Check if a highlight exists
+   */
+  hasHighlight(highlightId: string): boolean {
+    return this.highlights.has(highlightId);
+  }
+
+  /**
+   * Get all highlights for all pages
+   */
+  getAllHighlights(): PdfHighlight[] {
+    return Array.from(this.highlights.values());
+  }
+
+  /**
+   * Get highlight count
+   */
+  getHighlightCount(): number {
+    return this.highlights.size;
+  }
+
+  /**
    * Destroy the layer
    */
   destroy(): void {

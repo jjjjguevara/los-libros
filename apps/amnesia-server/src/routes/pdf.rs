@@ -128,6 +128,38 @@ fn default_thumbnail_size() -> u32 {
     200
 }
 
+/// Validate page number is within PDF bounds
+/// Returns the PDF if valid, or an error response if invalid
+async fn validate_page_range(
+    state: &AppState,
+    id: &str,
+    page: usize,
+) -> Result<ParsedPdf, (StatusCode, Json<ErrorResponse>)> {
+    // First check PDF exists
+    let pdf = state.pdf_cache().get_pdf(id).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        )
+    })?;
+
+    // Validate page range (pages are 1-indexed)
+    if page < 1 || page > pdf.page_count {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_details(
+                "Invalid page number",
+                format!(
+                    "Page {} is out of range. PDF '{}' has {} pages (valid range: 1-{})",
+                    page, id, pdf.page_count, pdf.page_count
+                ),
+            )),
+        ));
+    }
+
+    Ok(pdf)
+}
+
 /// Create the PDF router
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -226,6 +258,25 @@ async fn upload_pdf(
                 })?;
 
             tracing::info!("PDF uploaded: '{}' with {} pages", pdf.id, pdf.page_count);
+
+            // Background pre-render first page at common scales for faster initial load
+            let cache_clone = state.pdf_cache().clone();
+            let pdf_id_clone = pdf.id.clone();
+            tokio::spawn(async move {
+                for scale in [1.0, 1.5, 2.0] {
+                    let request = PageRenderRequest {
+                        page: 1,
+                        scale,
+                        format: ImageFormat::Png,
+                        rotation: 0,
+                    };
+                    match cache_clone.render_page(&pdf_id_clone, &request).await {
+                        Ok(_) => tracing::debug!("Pre-rendered page 1 at scale {} for '{}'", scale, pdf_id_clone),
+                        Err(e) => tracing::debug!("Pre-render skipped for '{}' at scale {}: {}", pdf_id_clone, scale, e),
+                    }
+                }
+            });
+
             return Ok(Json(UploadResponse {
                 id: pdf.id.clone(),
                 title: pdf.metadata.title.clone(),
@@ -289,6 +340,9 @@ async fn render_page(
     Path((id, page)): Path<(String, usize)>,
     Query(query): Query<PageRenderQuery>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // Validate page exists before rendering
+    validate_page_range(&state, &id, page).await?;
+
     // Parse format
     let format = match query.format.to_lowercase().as_str() {
         "jpeg" | "jpg" => ImageFormat::Jpeg,
@@ -309,7 +363,7 @@ async fn render_page(
         .await
         .map_err(|e| {
             (
-                StatusCode::NOT_FOUND,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::with_details(
                     format!("Failed to render page {} of PDF '{}'", page, id),
                     e.to_string(),
@@ -334,13 +388,16 @@ async fn render_thumbnail(
     Path((id, page)): Path<(String, usize)>,
     Query(query): Query<ThumbnailQuery>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // Validate page exists before rendering
+    validate_page_range(&state, &id, page).await?;
+
     let data = state
         .pdf_cache()
         .render_thumbnail(&id, page, query.size)
         .await
         .map_err(|e| {
             (
-                StatusCode::NOT_FOUND,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::with_details(
                     format!("Failed to render thumbnail for page {} of PDF '{}'", page, id),
                     e.to_string(),
@@ -364,13 +421,16 @@ async fn get_text_layer(
     State(state): State<AppState>,
     Path((id, page)): Path<(String, usize)>,
 ) -> Result<Json<TextLayer>, (StatusCode, Json<ErrorResponse>)> {
+    // Validate page exists before extracting text
+    validate_page_range(&state, &id, page).await?;
+
     let layer = state
         .pdf_cache()
         .get_text_layer(&id, page)
         .await
         .map_err(|e| {
             (
-                StatusCode::NOT_FOUND,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::with_details(
                     format!("Failed to get text layer for page {} of PDF '{}'", page, id),
                     e.to_string(),

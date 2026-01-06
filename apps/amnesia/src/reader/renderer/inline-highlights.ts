@@ -137,7 +137,8 @@ export class InlineHighlightManager {
         continue; // Already rendered
       }
 
-      const selector = highlight.selector ?? {
+      const selector: HighlightSelector = highlight.selector ?? {
+        format: 'epub' as const,
         primary: { type: 'CfiSelector' as const, cfi: highlight.cfi },
         fallback: {
           type: 'TextQuoteSelector' as const,

@@ -7,7 +7,13 @@
 import { Setting } from 'obsidian';
 import type AmnesiaPlugin from '../../main';
 import type { SyncDirection, ConflictResolution, SyncableField } from '../../calibre/calibre-types';
-import type { UnifiedConflictStrategy, UnifiedSyncMode } from '../settings';
+import type {
+    UnifiedConflictStrategy,
+    UnifiedSyncMode,
+    FieldAlias,
+    ReaderVaultSyncMode,
+    ReaderVaultConflictStrategy,
+} from '../settings';
 import {
     createTabHeader,
     createSection,
@@ -191,6 +197,224 @@ export function SyncSettings({ plugin, containerEl }: SyncSettingsProps): void {
     }
 
     // ==========================================================================
+    // READER ↔ VAULT SYNC
+    // ==========================================================================
+
+    const readerVaultSection = createSection(containerEl, 'refresh-cw', 'Reader ↔ Vault Sync');
+
+    createExplainerBox(readerVaultSection,
+        'Synchronize highlights and annotations between the in-app reader and your vault notes. ' +
+        'Changes made in the reader can be reflected in your vault, and vice versa.'
+    );
+
+    new Setting(readerVaultSection)
+        .setName('Enable Reader ↔ Vault Sync')
+        .setDesc('Automatically sync highlights and annotations with vault notes')
+        .addToggle(toggle => toggle
+            .setValue(settings.readerVaultSync.enabled)
+            .onChange(async (value) => {
+                settings.readerVaultSync.enabled = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(readerVaultSection)
+        .setName('Auto-Sync')
+        .setDesc('Automatically sync on highlight create/update/delete')
+        .addToggle(toggle => toggle
+            .setValue(settings.readerVaultSync.autoSync)
+            .onChange(async (value) => {
+                settings.readerVaultSync.autoSync = value;
+                await plugin.saveSettings();
+            }));
+
+    createSubsectionHeader(readerVaultSection, 'Sync Direction');
+
+    new Setting(readerVaultSection)
+        .setName('Highlight Sync Mode')
+        .setDesc('Direction for highlight synchronization')
+        .addDropdown(dropdown => dropdown
+            .addOption('bidirectional', 'Bidirectional (both ways)')
+            .addOption('reader-to-vault', 'Reader → Vault only')
+            .addOption('vault-to-reader', 'Vault → Reader only')
+            .addOption('manual', 'Manual (trigger explicitly)')
+            .setValue(settings.readerVaultSync.highlightSyncMode)
+            .onChange(async (value) => {
+                settings.readerVaultSync.highlightSyncMode = value as ReaderVaultSyncMode;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(readerVaultSection)
+        .setName('Note Sync Mode')
+        .setDesc('Direction for annotation/note synchronization')
+        .addDropdown(dropdown => dropdown
+            .addOption('bidirectional', 'Bidirectional (both ways)')
+            .addOption('reader-to-vault', 'Reader → Vault only')
+            .addOption('vault-to-reader', 'Vault → Reader only')
+            .addOption('manual', 'Manual (trigger explicitly)')
+            .setValue(settings.readerVaultSync.noteSyncMode)
+            .onChange(async (value) => {
+                settings.readerVaultSync.noteSyncMode = value as ReaderVaultSyncMode;
+                await plugin.saveSettings();
+            }));
+
+    createSubsectionHeader(readerVaultSection, 'Conflict & Deletion Handling');
+
+    new Setting(readerVaultSection)
+        .setName('Conflict Strategy')
+        .setDesc('How to resolve conflicts when both reader and vault have changes')
+        .addDropdown(dropdown => dropdown
+            .addOption('last-write-wins', 'Last Write Wins')
+            .addOption('reader-wins', 'Reader Wins (prefer reader)')
+            .addOption('vault-wins', 'Vault Wins (prefer vault)')
+            .addOption('ask-user', 'Ask User (show modal)')
+            .setValue(settings.readerVaultSync.conflictStrategy)
+            .onChange(async (value) => {
+                settings.readerVaultSync.conflictStrategy = value as ReaderVaultConflictStrategy;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(readerVaultSection)
+        .setName('Append-Only Vault')
+        .setDesc('Deletions in reader won\'t delete vault notes (preserves your work)')
+        .addToggle(toggle => toggle
+            .setValue(settings.readerVaultSync.appendOnlyVault)
+            .onChange(async (value) => {
+                settings.readerVaultSync.appendOnlyVault = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(readerVaultSection)
+        .setName('Preserve Reader Highlights')
+        .setDesc('Deletions in vault won\'t delete reader highlights')
+        .addToggle(toggle => toggle
+            .setValue(settings.readerVaultSync.preserveReaderHighlights)
+            .onChange(async (value) => {
+                settings.readerVaultSync.preserveReaderHighlights = value;
+                await plugin.saveSettings();
+            }));
+
+    createSubsectionHeader(readerVaultSection, 'Performance');
+
+    new Setting(readerVaultSection)
+        .setName('Debounce Delay')
+        .setDesc('Wait time before syncing vault changes (ms)')
+        .addSlider(slider => slider
+            .setLimits(500, 10000, 500)
+            .setValue(settings.readerVaultSync.debounceDelay)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.readerVaultSync.debounceDelay = value;
+                await plugin.saveSettings();
+            }));
+
+    createSubsectionHeader(readerVaultSection, 'Hub File Regeneration');
+
+    new Setting(readerVaultSection)
+        .setName('Auto-Regenerate Hub Files')
+        .setDesc('Automatically regenerate hub highlight files when highlights change')
+        .addToggle(toggle => toggle
+            .setValue(settings.readerVaultSync.autoRegenerateHub)
+            .onChange(async (value) => {
+                settings.readerVaultSync.autoRegenerateHub = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(readerVaultSection)
+        .setName('Hub Regeneration Delay')
+        .setDesc('Wait time before regenerating hub files (ms) - batches rapid changes')
+        .addSlider(slider => slider
+            .setLimits(1000, 30000, 1000)
+            .setValue(settings.readerVaultSync.hubRegenerateDelay)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.readerVaultSync.hubRegenerateDelay = value;
+                await plugin.saveSettings();
+            }));
+
+    // ==========================================================================
+    // FIELD ALIASES
+    // ==========================================================================
+
+    const aliasSection = createSection(containerEl, 'repeat', 'Field Aliases');
+
+    createExplainerBox(aliasSection,
+        'Field aliases allow multiple frontmatter keys to map to the same Calibre field. ' +
+        'This is useful when migrating from other plugins or when different notes use different key names. ' +
+        'The first alias in each list is used when writing to frontmatter.'
+    );
+
+    // Render alias list
+    const aliasListEl = aliasSection.createDiv({ cls: 'amnesia-alias-list' });
+    renderAliasListUI(aliasListEl, plugin);
+
+    // Add new alias button
+    new Setting(aliasSection)
+        .setName('Add New Alias')
+        .setDesc('Create a mapping for a new field')
+        .addButton(button => button
+            .setButtonText('Add Alias')
+            .onClick(async () => {
+                // Add a new empty alias
+                settings.fieldAliases.push({
+                    canonicalField: 'new_field',
+                    aliases: ['new_field'],
+                });
+                await plugin.saveSettings();
+                // Re-render the list
+                aliasListEl.empty();
+                renderAliasListUI(aliasListEl, plugin);
+            }));
+
+    // Export/Import
+    createSubsectionHeader(aliasSection, 'Export/Import');
+
+    new Setting(aliasSection)
+        .setName('Export Aliases')
+        .setDesc('Export field aliases as YAML for backup or sharing')
+        .addButton(button => button
+            .setButtonText('Copy to Clipboard')
+            .onClick(async () => {
+                const yaml = generateAliasYaml(settings.fieldAliases);
+                await navigator.clipboard.writeText(yaml);
+                // Show notification
+                const notice = document.body.createDiv({
+                    cls: 'notice',
+                    text: 'Aliases copied to clipboard!',
+                });
+                setTimeout(() => notice.remove(), 2000);
+            }));
+
+    new Setting(aliasSection)
+        .setName('Import Aliases')
+        .setDesc('Import field aliases from YAML')
+        .addTextArea(text => text
+            .setPlaceholder('Paste YAML here...\n\ntitle:\n  - title\n  - book_name')
+            .onChange(async () => {
+                // Only parse when button is clicked
+            }))
+        .addButton(button => button
+            .setButtonText('Import')
+            .onClick(async () => {
+                const textarea = aliasSection.querySelector('textarea');
+                if (!textarea) return;
+
+                const yaml = textarea.value;
+                try {
+                    const parsed = parseAliasYaml(yaml);
+                    if (parsed.length > 0) {
+                        settings.fieldAliases = parsed;
+                        await plugin.saveSettings();
+                        // Re-render the list
+                        aliasListEl.empty();
+                        renderAliasListUI(aliasListEl, plugin);
+                        textarea.value = '';
+                    }
+                } catch (e) {
+                    console.error('Failed to parse alias YAML:', e);
+                }
+            }));
+
+    // ==========================================================================
     // RESUME & RECOVERY
     // ==========================================================================
 
@@ -309,4 +533,247 @@ export function SyncSettings({ plugin, containerEl }: SyncSettingsProps): void {
                 settings.unifiedSync.noteGenerationBatchSize = value;
                 await plugin.saveSettings();
             }));
+}
+
+// ============================================================================
+// Alias Management Helper Functions
+// ============================================================================
+
+/**
+ * Render the alias list UI
+ */
+function renderAliasListUI(containerEl: HTMLElement, plugin: AmnesiaPlugin): void {
+    const { settings } = plugin;
+
+    // Add styles if not already added
+    addAliasStyles(containerEl);
+
+    if (!settings.fieldAliases || settings.fieldAliases.length === 0) {
+        containerEl.createEl('p', {
+            text: 'No field aliases configured. Click "Add Alias" to create one.',
+            cls: 'amnesia-alias-empty',
+        });
+        return;
+    }
+
+    for (let i = 0; i < settings.fieldAliases.length; i++) {
+        const alias = settings.fieldAliases[i];
+        renderAliasItem(containerEl, alias, i, plugin);
+    }
+}
+
+/**
+ * Render a single alias item
+ */
+function renderAliasItem(
+    containerEl: HTMLElement,
+    alias: FieldAlias,
+    index: number,
+    plugin: AmnesiaPlugin
+): void {
+    const { settings } = plugin;
+
+    const itemEl = containerEl.createDiv({ cls: 'amnesia-alias-item' });
+
+    // Canonical field (left side)
+    const canonicalEl = itemEl.createDiv({ cls: 'amnesia-alias-canonical' });
+    const canonicalInput = canonicalEl.createEl('input', {
+        type: 'text',
+        value: alias.canonicalField,
+        placeholder: 'Calibre field',
+    });
+    canonicalInput.addClass('amnesia-alias-input');
+    canonicalInput.addEventListener('change', async () => {
+        settings.fieldAliases[index].canonicalField = canonicalInput.value;
+        await plugin.saveSettings();
+    });
+
+    // Arrow
+    itemEl.createSpan({ cls: 'amnesia-alias-arrow', text: '→' });
+
+    // Aliases (right side)
+    const aliasesEl = itemEl.createDiv({ cls: 'amnesia-alias-list-values' });
+    const aliasesInput = aliasesEl.createEl('input', {
+        type: 'text',
+        value: alias.aliases.join(', '),
+        placeholder: 'frontmatter keys (comma-separated)',
+    });
+    aliasesInput.addClass('amnesia-alias-input', 'amnesia-alias-values-input');
+    aliasesInput.addEventListener('change', async () => {
+        const aliases = aliasesInput.value
+            .split(',')
+            .map(a => a.trim())
+            .filter(a => a.length > 0);
+        if (aliases.length > 0) {
+            settings.fieldAliases[index].aliases = aliases;
+            await plugin.saveSettings();
+        }
+    });
+
+    // Delete button
+    const deleteBtn = itemEl.createEl('button', {
+        cls: 'amnesia-alias-delete',
+        text: '×',
+    });
+    deleteBtn.addEventListener('click', async () => {
+        settings.fieldAliases.splice(index, 1);
+        await plugin.saveSettings();
+        // Re-render
+        const parentEl = containerEl;
+        parentEl.empty();
+        renderAliasListUI(parentEl, plugin);
+    });
+}
+
+/**
+ * Generate YAML from field aliases
+ */
+function generateAliasYaml(aliases: FieldAlias[]): string {
+    const lines: string[] = ['# Field Aliases for Amnesia', ''];
+
+    for (const alias of aliases) {
+        lines.push(`${alias.canonicalField}:`);
+        for (const a of alias.aliases) {
+            lines.push(`  - ${a}`);
+        }
+        lines.push('');
+    }
+
+    return lines.join('\n');
+}
+
+/**
+ * Parse YAML to field aliases
+ */
+function parseAliasYaml(yaml: string): FieldAlias[] {
+    const aliases: FieldAlias[] = [];
+    const lines = yaml.split('\n');
+
+    let currentField: string | null = null;
+    let currentAliases: string[] = [];
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+
+        // Skip comments and empty lines
+        if (trimmed.startsWith('#') || trimmed === '') {
+            // Save previous field if exists
+            if (currentField && currentAliases.length > 0) {
+                aliases.push({
+                    canonicalField: currentField,
+                    aliases: currentAliases,
+                });
+                currentField = null;
+                currentAliases = [];
+            }
+            continue;
+        }
+
+        // Check for field definition (ends with :)
+        const fieldMatch = trimmed.match(/^([a-zA-Z0-9_]+):$/);
+        if (fieldMatch) {
+            // Save previous field if exists
+            if (currentField && currentAliases.length > 0) {
+                aliases.push({
+                    canonicalField: currentField,
+                    aliases: currentAliases,
+                });
+            }
+            currentField = fieldMatch[1];
+            currentAliases = [];
+            continue;
+        }
+
+        // Check for alias item (starts with -)
+        const aliasMatch = trimmed.match(/^-\s*(.+)$/);
+        if (aliasMatch && currentField) {
+            currentAliases.push(aliasMatch[1].trim());
+        }
+    }
+
+    // Don't forget the last field
+    if (currentField && currentAliases.length > 0) {
+        aliases.push({
+            canonicalField: currentField,
+            aliases: currentAliases,
+        });
+    }
+
+    return aliases;
+}
+
+/**
+ * Add alias UI styles
+ */
+function addAliasStyles(containerEl: HTMLElement): void {
+    const doc = containerEl.doc;
+    const styleId = 'amnesia-alias-styles';
+    if (doc.getElementById(styleId)) return;
+
+    const style = doc.createElement('style');
+    style.id = styleId;
+    style.textContent = `
+        .amnesia-alias-list {
+            margin-bottom: 16px;
+        }
+
+        .amnesia-alias-empty {
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .amnesia-alias-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            padding: 8px;
+            background: var(--background-secondary);
+            border-radius: 6px;
+        }
+
+        .amnesia-alias-canonical {
+            flex: 0 0 150px;
+        }
+
+        .amnesia-alias-arrow {
+            color: var(--text-muted);
+            font-weight: bold;
+        }
+
+        .amnesia-alias-list-values {
+            flex: 1;
+        }
+
+        .amnesia-alias-input {
+            width: 100%;
+            padding: 4px 8px;
+            border: 1px solid var(--background-modifier-border);
+            border-radius: 4px;
+            background: var(--background-primary);
+        }
+
+        .amnesia-alias-values-input {
+            font-family: monospace;
+        }
+
+        .amnesia-alias-delete {
+            flex: 0 0 24px;
+            width: 24px;
+            height: 24px;
+            padding: 0;
+            border: none;
+            background: var(--background-modifier-error);
+            color: var(--text-on-accent);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+        }
+
+        .amnesia-alias-delete:hover {
+            filter: brightness(1.1);
+        }
+    `;
+    doc.head.appendChild(style);
 }

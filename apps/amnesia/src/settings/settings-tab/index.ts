@@ -7,6 +7,7 @@
 export { AmnesiaSettingTab } from './settings-tab';
 export { LibrarySettings } from './library-settings';
 export { ReaderSettings } from './reader-settings';
+export { PdfSettings } from './pdf-settings';
 export { SyncSettings } from './sync-settings';
 export { NotesSettings } from './notes-settings';
 export { AdvancedSettings } from './advanced-settings';

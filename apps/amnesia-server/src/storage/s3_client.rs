@@ -218,6 +218,61 @@ impl S3Client {
         }
     }
 
+    /// Put an object into the bucket
+    pub async fn put_object(&self, key: &str, data: Vec<u8>, content_type: &str) -> Result<()> {
+        let body = ByteStream::from(data);
+
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .content_type(content_type)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::Storage(StorageError::SdkError(format!(
+                    "Failed to put object {}: {}",
+                    key, e
+                )))
+            })?;
+
+        tracing::debug!("Uploaded object: {}", key);
+        Ok(())
+    }
+
+    /// Delete an object from the bucket
+    pub async fn delete_object(&self, key: &str) -> Result<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::Storage(StorageError::SdkError(format!(
+                    "Failed to delete object {}: {}",
+                    key, e
+                )))
+            })?;
+
+        tracing::debug!("Deleted object: {}", key);
+        Ok(())
+    }
+
+    /// Delete all objects with a given prefix
+    pub async fn delete_objects_with_prefix(&self, prefix: &str) -> Result<usize> {
+        let objects = self.list_all_objects(Some(prefix)).await?;
+        let count = objects.len();
+
+        for obj in objects {
+            self.delete_object(&obj.key).await?;
+        }
+
+        tracing::debug!("Deleted {} objects with prefix: {}", count, prefix);
+        Ok(count)
+    }
+
     /// List all objects with a given prefix (handles pagination)
     pub async fn list_all_objects(&self, prefix: Option<&str>) -> Result<Vec<ObjectMetadata>> {
         let mut all_objects = Vec::new();

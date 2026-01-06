@@ -90,9 +90,24 @@ export function renderTemplatesSettings(
   // Header
   containerEl.createEl('h1', { text: 'Templates' });
   containerEl.createEl('p', {
-    text: 'Customize the Liquid templates used for generating notes. Click on a template to expand and edit.',
+    text: 'Customize the Nunjucks templates used for generating notes. Click on a template to expand and edit.',
     cls: 'setting-item-description',
   });
+
+  // Nunjucks syntax help
+  const syntaxHelpEl = containerEl.createDiv({ cls: 'll-template-syntax-help' });
+  syntaxHelpEl.createEl('h3', { text: 'Nunjucks Syntax Quick Reference' });
+
+  const syntaxList = syntaxHelpEl.createEl('ul', { cls: 'll-syntax-list' });
+  syntaxList.createEl('li').innerHTML = '<code>{{ variable }}</code> — Output a variable';
+  syntaxList.createEl('li').innerHTML = '<code>{{ value | filter(arg) }}</code> — Apply a filter';
+  syntaxList.createEl('li').innerHTML = '<code>{% if condition %} ... {% endif %}</code> — Conditional';
+  syntaxList.createEl('li').innerHTML = '<code>{% for item in array %} ... {% endfor %}</code> — Loop';
+  syntaxList.createEl('li').innerHTML = '<code>{%- -%}</code> — Whitespace control (trim)';
+  syntaxList.createEl('li').innerHTML = '<code>{% persist "key" %} ... {% endpersist %}</code> — <strong>User content preserved during sync</strong>';
+
+  const filtersEl = syntaxHelpEl.createEl('p');
+  filtersEl.innerHTML = '<strong>Built-in filters:</strong> <code>default()</code>, <code>join()</code>, <code>date()</code>, <code>truncate()</code>, <code>wikilink()</code>, <code>slugify()</code>, <code>stars()</code>, <code>mdEscape()</code>';
 
   // Templates folder setting
   let templatesFolderInput: HTMLInputElement;
@@ -264,7 +279,7 @@ function renderTemplateSection(
   // Template textarea
   new Setting(contentEl)
     .setName('Template')
-    .setDesc('Liquid template content')
+    .setDesc('Nunjucks template (use {% persist %} blocks for user content)')
     .addTextArea(textarea => {
       textarea.inputEl.rows = 12;
       textarea.inputEl.style.width = '100%';

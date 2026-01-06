@@ -31,6 +31,8 @@ pub enum PdfParseError {
     IoError(#[from] std::io::Error),
     #[error("Image encoding error: {0}")]
     ImageError(String),
+    #[error("Operation timed out after {0} seconds")]
+    Timeout(u64),
 }
 
 /// PDF parser using pdfium-render
@@ -98,37 +100,55 @@ impl PdfParser {
     }
 
     /// Create parser from bytes
+    ///
+    /// Takes ownership of a single clone of the data. The previous implementation
+    /// made an unnecessary extra clone - now pdfium takes the only copy directly.
     pub fn from_bytes(data: &[u8], book_id: String) -> Result<Self, PdfParseError> {
-        // Copy the data to an owned Vec so we control its lifetime
-        let owned_data = data.to_vec();
-
         let pdfium = Arc::new(Self::init_pdfium()?);
 
-        // Load from the owned data
+        // Single clone from slice to owned Vec, passed directly to pdfium
+        // pdfium takes ownership internally, managing the lifetime
+        let owned_data = data.to_vec();
         let document = pdfium
-            .load_pdf_from_byte_vec(owned_data.clone(), None)
+            .load_pdf_from_byte_vec(owned_data, None)
             .map_err(|e| PdfParseError::LoadError(e.to_string()))?;
 
         // SAFETY: load_pdf_from_byte_vec takes ownership of the Vec internally,
-        // so the document lifetime is managed by pdfium. We keep a copy in _data
-        // for safety but pdfium owns the actual data used by the document.
+        // so the document lifetime is managed entirely by pdfium. We use Bytes(vec![])
+        // as a placeholder since pdfium owns the actual data.
         let document: PdfDocument<'static> = unsafe { std::mem::transmute(document) };
 
         Ok(Self {
             pdfium,
-            _data: PdfData::Bytes(owned_data),
+            _data: PdfData::Bytes(vec![]), // Placeholder - pdfium owns the data
             document,
             book_id,
         })
     }
 
     /// Parse PDF and extract metadata
+    ///
+    /// Fast path: Only extracts essential metadata (title, page count, TOC).
+    /// Expensive operations like text layer detection are skipped for faster initial load.
     pub fn parse(&self) -> Result<ParsedPdf, PdfParseError> {
         let metadata = self.extract_metadata();
         let toc = self.extract_outline();
         let page_count = self.document.pages().len() as usize;
-        let has_text_layer = self.check_text_layer();
-        let orientation = self.determine_orientation();
+
+        // Skip expensive operations for faster initial load:
+        // - check_text_layer(): Iterates through pages and extracts text (slow for large/scanned PDFs)
+        // - determine_orientation(): Iterates through pages to check dimensions
+        // These can be done lazily on first page render instead
+
+        // Fast orientation check - just check first page
+        let orientation = self.quick_orientation_check();
+
+        // Assume text layer exists if metadata suggests it's not a scanned PDF
+        // Actual text layer availability will be discovered during rendering
+        let has_text_layer = metadata.producer.as_ref()
+            .map(|p| !p.to_lowercase().contains("scan") && !p.to_lowercase().contains("abbyy"))
+            .unwrap_or(true);
+
         let page_labels = self.extract_page_labels();
 
         Ok(ParsedPdf {
@@ -140,6 +160,21 @@ impl PdfParser {
             has_text_layer,
             orientation,
         })
+    }
+
+    /// Quick orientation check - only looks at first page
+    fn quick_orientation_check(&self) -> PageOrientation {
+        if let Some(page) = self.document.pages().iter().next() {
+            let width = page.width().value;
+            let height = page.height().value;
+            if width > height {
+                PageOrientation::Landscape
+            } else {
+                PageOrientation::Portrait
+            }
+        } else {
+            PageOrientation::Portrait
+        }
     }
 
     /// Extract metadata from PDF info dictionary
@@ -442,36 +477,64 @@ impl PdfParser {
                 let full_text = text_page.all();
                 let full_text_lower = full_text.to_lowercase();
 
-                let mut start = 0;
-                while let Some(pos) = full_text_lower[start..].find(&query_lower) {
+                let mut start_byte = 0;
+                while let Some(pos) = full_text_lower[start_byte..].find(&query_lower) {
                     if results.len() >= limit {
                         break;
                     }
 
-                    let actual_pos = start + pos;
-                    let matched_text = &full_text[actual_pos..actual_pos + query.len()];
+                    let match_start = start_byte + pos;
+                    // The query_lower may have different byte length than original query
+                    // so we need to find the end by matching characters
+                    let query_char_len = query.chars().count();
 
-                    // Extract context
-                    let prefix_start = actual_pos.saturating_sub(32);
-                    let suffix_end = (actual_pos + query.len() + 32).min(full_text.len());
+                    // Find the byte position after match_start that corresponds to query_char_len chars
+                    let match_end = full_text
+                        .char_indices()
+                        .skip_while(|(i, _)| *i < match_start)
+                        .skip(query_char_len)
+                        .next()
+                        .map(|(i, _)| i)
+                        .unwrap_or(full_text.len());
+
+                    let matched_text = &full_text[match_start..match_end];
+
+                    // Extract context - find character boundaries for prefix/suffix
+                    // Go back ~32 chars for prefix
+                    let prefix_start = {
+                        let chars_before: Vec<_> = full_text[..match_start].char_indices().collect();
+                        let skip_count = chars_before.len().saturating_sub(32);
+                        chars_before.get(skip_count).map(|(i, _)| *i).unwrap_or(0)
+                    };
+
+                    // Go forward ~32 chars for suffix
+                    let suffix_end = {
+                        full_text
+                            .char_indices()
+                            .skip_while(|(i, _)| *i < match_end)
+                            .skip(32)
+                            .next()
+                            .map(|(i, _)| i)
+                            .unwrap_or(full_text.len())
+                    };
 
                     results.push(PdfSearchResult {
                         page: page_idx + 1,
                         text: matched_text.to_string(),
-                        prefix: if prefix_start < actual_pos {
-                            Some(full_text[prefix_start..actual_pos].to_string())
+                        prefix: if prefix_start < match_start {
+                            Some(full_text[prefix_start..match_start].to_string())
                         } else {
                             None
                         },
-                        suffix: if actual_pos + query.len() < suffix_end {
-                            Some(full_text[actual_pos + query.len()..suffix_end].to_string())
+                        suffix: if match_end < suffix_end {
+                            Some(full_text[match_end..suffix_end].to_string())
                         } else {
                             None
                         },
                         position: None, // TODO: Calculate normalized position
                     });
 
-                    start = actual_pos + query.len();
+                    start_byte = match_end;
                 }
             }
         }

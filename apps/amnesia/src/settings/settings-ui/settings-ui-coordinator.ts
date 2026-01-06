@@ -16,7 +16,7 @@ import { FloatingOutline } from './components/floating-outline';
 import { KeyboardHandler, highlightElement, addHighlightStyles } from './components/keyboard-handler';
 
 // Tab order for navigation (matches amnesia settings tabs)
-const TAB_ORDER: TabId[] = ['library', 'reading', 'sync', 'notes', 'advanced'];
+const TAB_ORDER: TabId[] = ['library', 'reading', 'pdf', 'sync', 'notes', 'advanced'];
 
 // =============================================================================
 // TYPES

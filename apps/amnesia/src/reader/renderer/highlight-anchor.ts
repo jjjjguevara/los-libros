@@ -8,13 +8,15 @@
  * 3. TextPosition (last resort)
  */
 
-import type { HighlightSelector, AnchorResult } from './types';
+import type { HighlightSelector, AnchorResult, EpubHighlightSelector } from './types';
+import { isEpubSelector } from './types';
 
 /**
- * Text quote selector for anchoring
+ * Text quote selector for anchoring (EPUB format)
+ * Both EPUB and PDF fallback selectors share this structure
  */
 interface TextQuoteSelector {
-  type: 'TextQuoteSelector';
+  type: 'TextQuoteSelector' | 'PdfTextQuoteSelector';
   exact: string;
   prefix?: string;
   suffix?: string;
@@ -51,10 +53,23 @@ export class HighlightAnchor {
    * Anchor a selector to a DOM Range
    * Strategy: CFI first → TextQuote fallback → Position last resort
    *
+   * NOTE: This class is designed for EPUB/HTML content with DOM-based anchoring.
+   * PDF highlights use PdfAnnotationLayer with coordinate-based rendering.
+   *
    * @param selector - The selector to anchor
    * @param scopeElement - Optional element to restrict search to (e.g., chapter)
    */
   anchor(selector: HighlightSelector, scopeElement?: Element): AnchorResult {
+    // PDF selectors use a different rendering path (PdfAnnotationLayer with rect coords)
+    // They shouldn't be anchored to DOM ranges
+    if (!isEpubSelector(selector)) {
+      console.debug('[HighlightAnchor] PDF selector cannot be anchored to DOM');
+      return { range: null, status: 'orphaned', confidence: 0 };
+    }
+
+    // From here, TypeScript knows selector is EpubHighlightSelector
+    const epubSelector = selector;
+
     // Temporarily set scope if provided
     const previousScope = this.searchScope;
     if (scopeElement) {
@@ -64,18 +79,18 @@ export class HighlightAnchor {
     try {
       // 1. Try TextQuote first (most robust for reflow scenarios)
       // CFI can break if content changes, but TextQuote with context is resilient
-      if (selector.fallback) {
-        const textResult = this.anchorByTextQuote(selector.fallback);
+      if (epubSelector.fallback) {
+        const textResult = this.anchorByTextQuote(epubSelector.fallback);
         if (textResult.range) {
           return textResult;
         }
       }
 
-      // 2. Try position fallback (character offsets)
-      if (selector.position) {
+      // 2. Try position fallback (character offsets) - only available on EPUB selectors
+      if (epubSelector.position) {
         const posResult = this.anchorByPosition(
-          selector.position.start,
-          selector.position.end
+          epubSelector.position.start,
+          epubSelector.position.end
         );
         if (posResult.range) {
           return posResult;

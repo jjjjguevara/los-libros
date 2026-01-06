@@ -359,6 +359,177 @@ export function AdvancedSettings({ plugin, containerEl }: AdvancedSettingsProps)
     feedNote.style.fontStyle = 'italic';
 
     // ==========================================================================
+    // SERVER MANAGEMENT
+    // ==========================================================================
+
+    const serverSection = createSection(containerEl, 'server', 'Server Management');
+
+    createExplainerBox(serverSection,
+        'Amnesia includes a local server for advanced PDF rendering and processing. The server runs automatically in the background.'
+    );
+
+    // Server status display
+    const serverStatusEl = serverSection.createDiv({ cls: 'amnesia-server-status' });
+    const updateServerStatus = () => {
+        const state = plugin.serverManager?.getState();
+        const statusText = state ? `Status: ${state.status}${state.pid ? ` (PID: ${state.pid})` : ''}` : 'Server not initialized';
+        serverStatusEl.setText(statusText);
+        serverStatusEl.style.padding = '8px 12px';
+        serverStatusEl.style.background = 'var(--background-secondary)';
+        serverStatusEl.style.borderRadius = '4px';
+        serverStatusEl.style.marginBottom = '12px';
+        serverStatusEl.style.fontFamily = 'var(--font-monospace)';
+        serverStatusEl.style.fontSize = '12px';
+    };
+    updateServerStatus();
+
+    // Server control buttons
+    new Setting(serverSection)
+        .setName('Server Controls')
+        .setDesc('Start, stop, or restart the local server')
+        .addButton(btn => btn
+            .setButtonText('Start')
+            .onClick(async () => {
+                if (plugin.serverManager) {
+                    await plugin.serverManager.start();
+                    updateServerStatus();
+                }
+            }))
+        .addButton(btn => btn
+            .setButtonText('Stop')
+            .onClick(async () => {
+                if (plugin.serverManager) {
+                    await plugin.serverManager.stop();
+                    updateServerStatus();
+                }
+            }))
+        .addButton(btn => btn
+            .setButtonText('Restart')
+            .onClick(async () => {
+                if (plugin.serverManager) {
+                    await plugin.serverManager.restart();
+                    updateServerStatus();
+                }
+            }));
+
+    new Setting(serverSection)
+        .setName('Auto-start Server')
+        .setDesc('Automatically start the server when the plugin loads')
+        .addToggle(toggle => toggle
+            .setValue(settings.serverManagement.autoStart)
+            .onChange(async (value) => {
+                settings.serverManagement.autoStart = value;
+                await plugin.saveSettings();
+                plugin.serverManager?.updateConfig({ autoStart: value });
+            }));
+
+    new Setting(serverSection)
+        .setName('Server Port')
+        .setDesc('Port for the local server to listen on')
+        .addText(text => text
+            .setPlaceholder('3000')
+            .setValue(String(settings.serverManagement.port))
+            .onChange(async (value) => {
+                const port = parseInt(value, 10);
+                if (!isNaN(port) && port > 0 && port < 65536) {
+                    settings.serverManagement.port = port;
+                    await plugin.saveSettings();
+                    plugin.serverManager?.updateConfig({ port });
+                }
+            }));
+
+    new Setting(serverSection)
+        .setName('Show Server Notices')
+        .setDesc('Show notifications for server start/stop/restart events')
+        .addToggle(toggle => toggle
+            .setValue(settings.serverManagement.showNotices)
+            .onChange(async (value) => {
+                settings.serverManagement.showNotices = value;
+                await plugin.saveSettings();
+                plugin.serverManager?.updateConfig({ showNotices: value });
+            }));
+
+    // Advanced server settings accordion
+    const serverAccordion = new AdvancedAccordion(containerEl, {
+        title: 'Advanced Server Configuration',
+        storageKey: 'amnesia-server-advanced',
+    });
+    const serverContent = serverAccordion.render();
+
+    new Setting(serverContent)
+        .setName('Use External Server')
+        .setDesc('Connect to an external server instead of the bundled one')
+        .addToggle(toggle => toggle
+            .setValue(settings.serverManagement.useExternalServer)
+            .onChange(async (value) => {
+                settings.serverManagement.useExternalServer = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(serverContent)
+        .setName('External Server URL')
+        .setDesc('URL of the external Amnesia server (when using external server)')
+        .addText(text => text
+            .setPlaceholder('http://localhost:3000')
+            .setValue(settings.serverManagement.externalServerUrl)
+            .onChange(async (value) => {
+                settings.serverManagement.externalServerUrl = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(serverContent)
+        .setName('Max Restart Attempts')
+        .setDesc('Maximum times to restart the server on crash')
+        .addSlider(slider => slider
+            .setLimits(0, 10, 1)
+            .setValue(settings.serverManagement.maxRestartAttempts)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.serverManagement.maxRestartAttempts = value;
+                await plugin.saveSettings();
+                plugin.serverManager?.updateConfig({ maxRestartAttempts: value });
+            }));
+
+    new Setting(serverContent)
+        .setName('Restart Delay')
+        .setDesc('Delay between restart attempts (in seconds)')
+        .addSlider(slider => slider
+            .setLimits(1, 30, 1)
+            .setValue(settings.serverManagement.restartDelay / 1000)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.serverManagement.restartDelay = value * 1000;
+                await plugin.saveSettings();
+                plugin.serverManager?.updateConfig({ restartDelay: value * 1000 });
+            }));
+
+    new Setting(serverContent)
+        .setName('Health Check Interval')
+        .setDesc('How often to check server health (in seconds)')
+        .addSlider(slider => slider
+            .setLimits(10, 120, 10)
+            .setValue(settings.serverManagement.healthCheckInterval / 1000)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.serverManagement.healthCheckInterval = value * 1000;
+                await plugin.saveSettings();
+                plugin.serverManager?.updateConfig({ healthCheckInterval: value * 1000 });
+            }));
+
+    new Setting(serverContent)
+        .setName('Health Check Timeout')
+        .setDesc('Timeout for health check requests (in seconds)')
+        .addSlider(slider => slider
+            .setLimits(1, 30, 1)
+            .setValue(settings.serverManagement.healthCheckTimeout / 1000)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.serverManagement.healthCheckTimeout = value * 1000;
+                await plugin.saveSettings();
+                plugin.serverManager?.updateConfig({ healthCheckTimeout: value * 1000 });
+            }));
+
+    // ==========================================================================
     // DEBUG & DEVELOPMENT
     // ==========================================================================
 
@@ -369,8 +540,8 @@ export function AdvancedSettings({ plugin, containerEl }: AdvancedSettingsProps)
     );
 
     new Setting(debugSection)
-        .setName('Remote Server')
-        .setDesc('Enable connection to Amnesia remote server')
+        .setName('Remote Server (Legacy)')
+        .setDesc('Enable connection to remote Amnesia server (deprecated, use Server Management above)')
         .addToggle(toggle => toggle
             .setValue(settings.serverEnabled)
             .onChange(async (value) => {
@@ -379,8 +550,8 @@ export function AdvancedSettings({ plugin, containerEl }: AdvancedSettingsProps)
             }));
 
     new Setting(debugSection)
-        .setName('Server URL')
-        .setDesc('URL of the Amnesia server')
+        .setName('Remote Server URL')
+        .setDesc('URL of the remote Amnesia server')
         .addText(text => text
             .setPlaceholder('https://amnesia.example.com')
             .setValue(settings.serverUrl)

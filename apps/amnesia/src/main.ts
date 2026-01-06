@@ -2,7 +2,8 @@ import { Plugin, WorkspaceLeaf, setIcon, Notice, TFile } from 'obsidian';
 import type { SyncProgress } from './calibre/calibre-types';
 import { AmnesiaSettingTab } from './settings/settings-tab/settings-tab';
 import { LibrosSettings, DEFAULT_SETTINGS } from './settings/settings';
-import { LibraryView, LIBRARY_VIEW_TYPE } from './library/library-view';
+// DEPRECATED: Library sidebar view - use book notes with 'Open Book in Reader' command instead
+// import { LibraryView, LIBRARY_VIEW_TYPE } from './library/library-view';
 import { ReaderView, READER_VIEW_TYPE } from './reader/reader-view';
 // REMOVED: Old HighlightsView - using in-reader NotebookSidebar instead
 // import { HighlightsView, HIGHLIGHTS_VIEW_TYPE } from './highlights/highlights-view';
@@ -50,6 +51,9 @@ import {
 	DEFAULT_READER_VAULT_SYNC_SETTINGS,
 } from './sync/reader-vault-sync';
 
+// Server Management
+import { ServerManager, type ServerState } from './server/server-manager';
+
 export default class AmnesiaPlugin extends Plugin {
 	settings: LibrosSettings;
 	libraryStore: Store<LibraryState, LibraryAction>;
@@ -91,6 +95,11 @@ export default class AmnesiaPlugin extends Plugin {
 	// Reader ↔ Vault Sync
 	readerVaultSync: ReaderVaultSyncOrchestrator | null = null;
 	private readerVaultSyncUnsubscribes: (() => void)[] = [];
+
+	// Server Management
+	serverManager: ServerManager | null = null;
+	private serverStatusBarItem: HTMLElement | null = null;
+	private serverEventUnsubscribe: (() => void) | null = null;
 
 	// Public API
 	api: AmnesiaAPIImpl;
@@ -316,6 +325,42 @@ export default class AmnesiaPlugin extends Plugin {
 			}
 		}
 
+		// 7. Server Manager (if not using external server)
+		if (!this.settings.serverManagement.useExternalServer) {
+			this.serverManager = new ServerManager({
+				port: this.settings.serverManagement.port,
+				autoStart: this.settings.serverManagement.autoStart,
+				maxRestartAttempts: this.settings.serverManagement.maxRestartAttempts,
+				restartDelay: this.settings.serverManagement.restartDelay,
+				healthCheckInterval: this.settings.serverManagement.healthCheckInterval,
+				healthCheckTimeout: this.settings.serverManagement.healthCheckTimeout,
+				showNotices: this.settings.serverManagement.showNotices,
+				pluginDir: this.manifest.dir || '',
+			});
+
+			// Add server status bar item
+			this.serverStatusBarItem = this.addStatusBarItem();
+			this.serverStatusBarItem.addClass('amnesia-server-status');
+
+			// Subscribe to server events
+			this.serverEventUnsubscribe = this.serverManager.on((event) => {
+				this.updateServerStatusBar();
+				if (event.type === 'error') {
+					console.error('[Amnesia] Server error:', event.message);
+				}
+			});
+
+			// Initialize server (will auto-start if enabled)
+			this.serverManager.initialize().catch((error) => {
+				console.error('[Amnesia] Failed to initialize server manager:', error);
+			});
+		} else {
+			// Using external server - update serverUrl for other services
+			if (this.settings.serverManagement.externalServerUrl) {
+				this.settings.serverUrl = this.settings.serverManagement.externalServerUrl;
+			}
+		}
+
 		// Initialize public API
 		this.api = createAPI({
 			libraryService: this.libraryService,
@@ -336,10 +381,11 @@ export default class AmnesiaPlugin extends Plugin {
 		(window as any).Amnesia = this.api;
 
 		// Register views
-		this.registerView(
-			LIBRARY_VIEW_TYPE,
-			(leaf) => new LibraryView(leaf, this)
-		);
+		// DEPRECATED: Library sidebar view - use book notes with 'Open Book in Reader' command instead
+		// this.registerView(
+		// 	LIBRARY_VIEW_TYPE,
+		// 	(leaf) => new LibraryView(leaf, this)
+		// );
 
 		this.registerView(
 			READER_VIEW_TYPE,
@@ -385,17 +431,33 @@ export default class AmnesiaPlugin extends Plugin {
 			(leaf) => new OfflineBooksView(leaf, this)
 		);
 
-		// Add ribbon icon
-		this.addRibbonIcon('book-open', 'Amnesia', () => {
-			this.activateLibraryView();
+		// Add ribbon icon - opens book from current note
+		this.addRibbonIcon('book-open', 'Amnesia: Open Book from Note', () => {
+			const activeFile = this.app.workspace.getActiveFile();
+			if (!activeFile) {
+				new Notice('No active file. Open a book note first.');
+				return;
+			}
+
+			// Check if it's a book note
+			const cache = this.app.metadataCache.getFileCache(activeFile);
+			const isBookNote = cache?.frontmatter?.type === 'book' &&
+				(cache?.frontmatter?.epubPath || cache?.frontmatter?.pdfPath || cache?.frontmatter?.calibreId || cache?.frontmatter?.calibrePath);
+
+			if (isBookNote) {
+				this.openBookFromNote(activeFile);
+			} else {
+				new Notice('Current file is not a book note.\n\nBook notes have type: "book" in frontmatter.');
+			}
 		});
 
 		// Add commands
+		// DEPRECATED: open-library command - use book notes with 'Open Book in Reader' command
 		this.addCommand({
 			id: 'open-library',
-			name: 'Open Library',
+			name: 'Open Library (Deprecated)',
 			callback: () => {
-				this.activateLibraryView();
+				new Notice('The Library sidebar has been deprecated.\n\nUse book notes with the "Open Book in Reader" command instead.');
 			}
 		});
 
@@ -477,6 +539,77 @@ export default class AmnesiaPlugin extends Plugin {
 					this.networkMonitor.setOfflineMode(true);
 					new Notice('Offline mode enabled');
 				}
+			}
+		});
+
+		// Server management commands
+		this.addCommand({
+			id: 'server-start',
+			name: 'Server: Start',
+			callback: async () => {
+				if (!this.serverManager) {
+					new Notice('Server management not available (using external server)');
+					return;
+				}
+				if (this.serverManager.isRunning()) {
+					new Notice('Server is already running');
+					return;
+				}
+				const success = await this.serverManager.start();
+				if (!success) {
+					new Notice('Failed to start server');
+				}
+			}
+		});
+
+		this.addCommand({
+			id: 'server-stop',
+			name: 'Server: Stop',
+			callback: async () => {
+				if (!this.serverManager) {
+					new Notice('Server management not available (using external server)');
+					return;
+				}
+				await this.serverManager.stop();
+				new Notice('Server stopped');
+			}
+		});
+
+		this.addCommand({
+			id: 'server-restart',
+			name: 'Server: Restart',
+			callback: async () => {
+				if (!this.serverManager) {
+					new Notice('Server management not available (using external server)');
+					return;
+				}
+				new Notice('Restarting server...');
+				const success = await this.serverManager.restart();
+				if (!success) {
+					new Notice('Failed to restart server');
+				}
+			}
+		});
+
+		this.addCommand({
+			id: 'server-status',
+			name: 'Server: Show Status',
+			callback: () => {
+				if (!this.serverManager) {
+					new Notice('Server management not available (using external server)');
+					return;
+				}
+				const state = this.serverManager.getState();
+				const uptimeStr = state.uptime
+					? `${Math.floor(state.uptime / 60)}m ${state.uptime % 60}s`
+					: 'N/A';
+				console.log('Server Status:', state);
+				new Notice(
+					`Server: ${state.status}\n` +
+					`Port: ${state.port}\n` +
+					`Uptime: ${uptimeStr}\n` +
+					`Restarts: ${state.restartCount}`
+				);
 			}
 		});
 
@@ -798,6 +931,7 @@ export default class AmnesiaPlugin extends Plugin {
 		});
 
 		// Register file extension handler for EPUB files
+		// Note: PDF uses Obsidian's built-in viewer by default, but can be opened with our reader via command
 		this.registerExtensions(['epub'], READER_VIEW_TYPE);
 
 
@@ -809,15 +943,40 @@ export default class AmnesiaPlugin extends Plugin {
 				const activeFile = this.app.workspace.getActiveFile();
 				if (!activeFile) return false;
 
-				// Check if it's a book note
+				// Check if it's a book note (supports EPUB, PDF, and Calibre paths)
 				const cache = this.app.metadataCache.getFileCache(activeFile);
 				const isBookNote = cache?.frontmatter?.type === 'book' &&
-					(cache?.frontmatter?.epubPath || cache?.frontmatter?.calibreId);
+					(cache?.frontmatter?.epubPath || cache?.frontmatter?.pdfPath || cache?.frontmatter?.calibreId);
 
 				if (checking) return isBookNote;
 
 				if (isBookNote) {
 					this.openBookFromNote(activeFile);
+				}
+				return true;
+			}
+		});
+
+		// Command to open PDF in Amnesia reader (instead of Obsidian's built-in viewer)
+		this.addCommand({
+			id: 'open-pdf-in-amnesia',
+			name: 'Open PDF in Amnesia Reader',
+			checkCallback: (checking: boolean) => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) return false;
+
+				// Check if it's a PDF file
+				const isPdf = activeFile.extension === 'pdf';
+
+				if (checking) return isPdf;
+
+				if (isPdf) {
+					// Open in Amnesia reader
+					const leaf = this.app.workspace.getLeaf();
+					leaf.setViewState({
+						type: READER_VIEW_TYPE,
+						state: { bookPath: activeFile.path },
+					});
 				}
 				return true;
 			}
@@ -831,10 +990,10 @@ export default class AmnesiaPlugin extends Plugin {
 				const activeFile = this.app.workspace.getActiveFile();
 				if (!activeFile) return false;
 
-				// Check if it's a book note
+				// Check if it's a book note (supports EPUB, PDF, and Calibre paths)
 				const cache = this.app.metadataCache.getFileCache(activeFile);
 				const isBookNote = cache?.frontmatter?.type === 'book' &&
-					(cache?.frontmatter?.epubPath || cache?.frontmatter?.calibreId);
+					(cache?.frontmatter?.epubPath || cache?.frontmatter?.pdfPath || cache?.frontmatter?.calibreId);
 
 				if (checking) return isBookNote;
 
@@ -853,10 +1012,10 @@ export default class AmnesiaPlugin extends Plugin {
 				const activeFile = this.app.workspace.getActiveFile();
 				if (!activeFile) return false;
 
-				// Check if it's a book note
+				// Check if it's a book note (supports EPUB, PDF, and Calibre paths)
 				const cache = this.app.metadataCache.getFileCache(activeFile);
 				const isBookNote = cache?.frontmatter?.type === 'book' &&
-					(cache?.frontmatter?.epubPath || cache?.frontmatter?.calibreId);
+					(cache?.frontmatter?.epubPath || cache?.frontmatter?.pdfPath || cache?.frontmatter?.calibreId);
 
 				if (checking) return isBookNote;
 
@@ -932,6 +1091,22 @@ export default class AmnesiaPlugin extends Plugin {
 
 	onunload() {
 		console.log('Unloading Amnesia plugin');
+
+		// ==========================================================================
+		// Cleanup Server Manager
+		// ==========================================================================
+		if (this.serverEventUnsubscribe) {
+			this.serverEventUnsubscribe();
+			this.serverEventUnsubscribe = null;
+		}
+
+		if (this.serverManager) {
+			// Stop server gracefully (async but we don't wait)
+			this.serverManager.destroy().catch((error) => {
+				console.error('[Amnesia] Error destroying server manager:', error);
+			});
+			this.serverManager = null;
+		}
 
 		// ==========================================================================
 		// Cleanup Unified Sync Architecture
@@ -1023,6 +1198,30 @@ export default class AmnesiaPlugin extends Plugin {
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+
+		// Migrate old PDF display mode settings to new format
+		this.migratePdfDisplayMode();
+	}
+
+	/**
+	 * Migrate old PDF display mode ('paginated' | 'scrolled') + scrollDirection
+	 * to new unified display mode format
+	 */
+	private migratePdfDisplayMode() {
+		const pdf = this.settings.pdf;
+		if (!pdf) return;
+
+		// Check if using old format (displayMode is 'scrolled')
+		if (pdf.displayMode === 'scrolled' as any) {
+			// Migrate to new format based on scrollDirection
+			if (pdf.scrollDirection === 'horizontal') {
+				pdf.displayMode = 'horizontal-scroll';
+			} else {
+				pdf.displayMode = 'vertical-scroll';
+			}
+			// Save the migrated settings
+			this.saveSettings();
+		}
 	}
 
 	async saveSettings() {
@@ -1043,23 +1242,24 @@ export default class AmnesiaPlugin extends Plugin {
 		}
 	}
 
-	async activateLibraryView() {
-		const { workspace } = this.app;
-
-		let leaf: WorkspaceLeaf | null = null;
-		const leaves = workspace.getLeavesOfType(LIBRARY_VIEW_TYPE);
-
-		if (leaves.length > 0) {
-			leaf = leaves[0];
-		} else {
-			leaf = workspace.getRightLeaf(false);
-			await leaf?.setViewState({ type: LIBRARY_VIEW_TYPE, active: true });
-		}
-
-		if (leaf) {
-			workspace.revealLeaf(leaf);
-		}
-	}
+	// DEPRECATED: Library sidebar has been removed
+	// async activateLibraryView() {
+	// 	const { workspace } = this.app;
+	//
+	// 	let leaf: WorkspaceLeaf | null = null;
+	// 	const leaves = workspace.getLeavesOfType(LIBRARY_VIEW_TYPE);
+	//
+	// 	if (leaves.length > 0) {
+	// 		leaf = leaves[0];
+	// 	} else {
+	// 		leaf = workspace.getRightLeaf(false);
+	// 		await leaf?.setViewState({ type: LIBRARY_VIEW_TYPE, active: true });
+	// 	}
+	//
+	// 	if (leaf) {
+	// 		workspace.revealLeaf(leaf);
+	// 	}
+	// }
 
 	async activateBookSidebar(bookId?: string, bookPath?: string, bookTitle?: string) {
 		const { workspace } = this.app;
@@ -1191,6 +1391,7 @@ export default class AmnesiaPlugin extends Plugin {
 	/**
 	 * Open a book from its note file
 	 * Reads the epubPath or calibrePath from frontmatter
+	 * Supports both EPUB and PDF formats
 	 */
 	async openBookFromNote(noteFile: TFile) {
 		const { workspace, metadataCache } = this.app;
@@ -1204,24 +1405,27 @@ export default class AmnesiaPlugin extends Plugin {
 			return;
 		}
 
-		// Try to find the EPUB path
-		let epubPath = frontmatter.epubPath || frontmatter.calibrePath;
+		// Try to find the book path (supports both EPUB and PDF)
+		// Priority: epubPath > pdfPath > calibrePath (directory - book-loader handles finding files inside)
+		let bookPath = frontmatter.epubPath || frontmatter.pdfPath || frontmatter.calibrePath;
 		let bookTitle = frontmatter.title;
 
-		if (!epubPath) {
+		if (!bookPath) {
 			// Try to find in Calibre store by calibreId
 			if (frontmatter.calibreId) {
 				const calibreBooks = this.calibreService.getStore().getValue().books;
 				const calibreBook = calibreBooks.find(b => b.id === frontmatter.calibreId);
 				if (calibreBook) {
-					epubPath = calibreBook.epubPath;
+					// Use epubPath if available, otherwise use calibrePath (directory)
+					// The book-loader will find the appropriate file (EPUB or PDF) in the directory
+					bookPath = calibreBook.epubPath || calibreBook.calibrePath;
 					bookTitle = bookTitle || calibreBook.title;
 				}
 			}
 		}
 
-		if (!epubPath) {
-			new Notice('No EPUB path found in book note');
+		if (!bookPath) {
+			new Notice('No book path found in book note');
 			return;
 		}
 
@@ -1229,7 +1433,7 @@ export default class AmnesiaPlugin extends Plugin {
 		const leaf = workspace.getLeaf('tab');
 		await leaf.setViewState({
 			type: READER_VIEW_TYPE,
-			state: { bookPath: epubPath, bookTitle }
+			state: { bookPath, bookTitle }
 		});
 
 		workspace.revealLeaf(leaf);
@@ -1566,6 +1770,79 @@ export default class AmnesiaPlugin extends Plugin {
 		}
 
 		this.networkStatusBarItem.show();
+	}
+
+	/**
+	 * Update the server status bar item
+	 */
+	private updateServerStatusBar(): void {
+		if (!this.serverStatusBarItem) return;
+
+		// Clear previous content
+		this.serverStatusBarItem.empty();
+
+		// Get server state
+		const state = this.serverManager?.getState();
+
+		if (!state) {
+			this.serverStatusBarItem.hide();
+			return;
+		}
+
+		// Create icon container
+		const iconEl = this.serverStatusBarItem.createSpan({ cls: 'status-bar-item-icon' });
+
+		// Remove all status classes
+		this.serverStatusBarItem.removeClass('running', 'stopped', 'error', 'starting');
+
+		// Determine icon and class based on status
+		switch (state.status) {
+			case 'running':
+				setIcon(iconEl, 'server');
+				this.serverStatusBarItem.addClass('running');
+				this.serverStatusBarItem.createSpan({
+					text: `Server :${state.port}`,
+					cls: 'status-bar-item-segment'
+				});
+				break;
+
+			case 'starting':
+			case 'restarting':
+				setIcon(iconEl, 'loader');
+				this.serverStatusBarItem.addClass('starting');
+				this.serverStatusBarItem.createSpan({
+					text: 'Starting...',
+					cls: 'status-bar-item-segment'
+				});
+				break;
+
+			case 'stopped':
+				setIcon(iconEl, 'server-off');
+				this.serverStatusBarItem.addClass('stopped');
+				this.serverStatusBarItem.createSpan({
+					text: 'Server stopped',
+					cls: 'status-bar-item-segment'
+				});
+				break;
+
+			case 'error':
+				setIcon(iconEl, 'alert-triangle');
+				this.serverStatusBarItem.addClass('error');
+				this.serverStatusBarItem.createSpan({
+					text: 'Server error',
+					cls: 'status-bar-item-segment'
+				});
+				break;
+
+			default:
+				setIcon(iconEl, 'server');
+				this.serverStatusBarItem.createSpan({
+					text: `Server: ${state.status}`,
+					cls: 'status-bar-item-segment'
+				});
+		}
+
+		this.serverStatusBarItem.show();
 	}
 
 	/**

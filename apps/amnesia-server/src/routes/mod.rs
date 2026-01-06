@@ -9,3 +9,4 @@ pub mod opds;
 pub mod pdf;
 pub mod progress;
 pub mod sync;
+pub mod upload;

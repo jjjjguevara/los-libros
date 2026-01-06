@@ -27,6 +27,8 @@ pub fn router(pool: SqlitePool) -> Router<AppState> {
         .route("/book/:book_id", get(list_book_highlights))
         .route("/book/:book_id", post(create_highlight))
         .route("/book/:book_id/count", get(count_highlights))
+        // PDF-specific: list highlights for a specific page
+        .route("/book/:book_id/page/:page", get(list_pdf_page_highlights))
         .route("/:id", get(get_highlight))
         .route("/:id", patch(update_highlight))
         .route("/:id", delete(delete_highlight))
@@ -50,6 +52,16 @@ async fn list_book_highlights(
 ) -> Result<Json<Vec<Highlight>>> {
     let repo = HighlightRepository::new(&state.pool);
     let highlights = repo.list_for_book(&book_id, None).await?;
+    Ok(Json(highlights))
+}
+
+/// List PDF highlights for a specific page
+async fn list_pdf_page_highlights(
+    axum::Extension(state): axum::Extension<HighlightsState>,
+    Path((book_id, page)): Path<(String, i32)>,
+) -> Result<Json<Vec<Highlight>>> {
+    let repo = HighlightRepository::new(&state.pool);
+    let highlights = repo.list_for_pdf_page(&book_id, page, None).await?;
     Ok(Json(highlights))
 }
 

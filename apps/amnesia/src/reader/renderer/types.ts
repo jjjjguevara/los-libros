@@ -261,27 +261,19 @@ export interface RenderedHighlight {
 /**
  * W3C-aligned selector for robust highlight anchoring
  * Used for storage and re-anchoring highlights across sessions
+ * Re-exported from library/types for consistency
  */
-export interface HighlightSelector {
-  /** Primary selector using EPUB CFI */
-  primary: {
-    type: 'CfiSelector';
-    cfi: string;
-  };
-  /** Fallback using text quote with context */
-  fallback: {
-    type: 'TextQuoteSelector';
-    exact: string;
-    prefix?: string;  // ~32 chars before for disambiguation
-    suffix?: string;  // ~32 chars after for disambiguation
-  };
-  /** Position fallback (character offsets in chapter) */
-  position?: {
-    type: 'TextPositionSelector';
-    start: number;
-    end: number;
-  };
-}
+export type {
+  HighlightSelector,
+  EpubHighlightSelector,
+  PdfHighlightSelector,
+  PdfHighlightRect,
+} from '../../library/types';
+
+export {
+  isPdfSelector,
+  isEpubSelector,
+} from '../../library/types';
 
 /**
  * Anchor result from re-anchoring a selector to DOM
@@ -526,6 +518,12 @@ export interface PdfRenderOptions {
   scale?: number;
   rotation?: number;
   format?: 'png' | 'jpeg' | 'webp';
+  /** DPI for server-side rendering. Default: 150 */
+  dpi?: number;
+  /** Image quality for lossy formats (1-100). Default: 85 */
+  quality?: number;
+  /** Enable hardware acceleration hints. Default: true */
+  hardwareAcceleration?: boolean;
 }
 
 /**

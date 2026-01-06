@@ -28,12 +28,15 @@ export interface PdfScrollerConfig {
   preloadCount?: number;
   /** Debounce time for scroll events (ms) */
   scrollDebounce?: number;
+  /** Maximum concurrent page render requests. Default: 2 */
+  maxConcurrentRenders?: number;
 }
 
 const DEFAULT_CONFIG: Required<PdfScrollerConfig> = {
   pageGap: 20,
-  preloadCount: 2,
+  preloadCount: 1, // Reduced: server can't handle many concurrent renders
   scrollDebounce: 100,
+  maxConcurrentRenders: 1, // Reduced: only one page at a time to prevent crashes
 };
 
 interface PageEntry {
@@ -67,6 +70,10 @@ export class PdfScroller {
 
   // Page heights (estimated initially, then actual after render)
   private estimatedPageHeight = 800;
+
+  // Concurrency control for page rendering
+  private activeRenders = 0;
+  private renderQueue: number[] = [];
 
   constructor(
     container: HTMLElement,
@@ -210,8 +217,41 @@ export class PdfScroller {
       this.unloadPage(pageNum);
     }
 
-    // Render pages in range (in parallel)
-    await Promise.all(pagesToRender.map((page) => this.loadPage(page)));
+    // Queue pages for rendering with concurrency limit
+    for (const page of pagesToRender) {
+      if (!this.renderQueue.includes(page)) {
+        this.renderQueue.push(page);
+      }
+    }
+
+    // Process the render queue with concurrency limit
+    this.processRenderQueue();
+  }
+
+  /**
+   * Process the render queue with concurrency limiting
+   */
+  private async processRenderQueue(): Promise<void> {
+    while (
+      this.renderQueue.length > 0 &&
+      this.activeRenders < this.config.maxConcurrentRenders
+    ) {
+      const page = this.renderQueue.shift();
+      if (page === undefined) break;
+
+      // Check if page is still needed (might have scrolled away)
+      const entry = this.pages[page - 1];
+      if (!entry || entry.element || entry.loading) continue;
+
+      this.activeRenders++;
+
+      // Start loading without awaiting, to allow concurrent processing
+      this.loadPage(page).finally(() => {
+        this.activeRenders--;
+        // Process more from queue when this one finishes
+        this.processRenderQueue();
+      });
+    }
   }
 
   /**

@@ -395,26 +395,122 @@ export class ApiClient {
 
   /**
    * Upload a PDF file to the server
+   * Uses XMLHttpRequest for reliable large file uploads in Electron
+   * (fetch has known issues with streaming large FormData)
    */
   async uploadPdf(data: ArrayBuffer, filename?: string): Promise<ParsedPdf> {
-    const formData = new FormData();
-    const blob = new Blob([data], { type: 'application/pdf' });
     const finalFilename = filename || 'document.pdf';
 
-    console.log('[ApiClient] Uploading PDF:', {
+    console.log('[ApiClient] Uploading PDF via XHR:', {
       size: data.byteLength,
       filename: finalFilename,
     });
 
-    formData.append('file', blob, finalFilename);
-
-    const uploadResponse = await this.request<{ id: string; message: string }>('/api/v1/pdf', {
-      method: 'POST',
-      body: formData,
-    });
+    // Use XHR instead of fetch for large file uploads
+    // Electron's fetch has known issues with streaming large FormData bodies
+    const uploadResponse = await this.uploadFileViaXhr<{ id: string; message: string }>(
+      '/api/v1/pdf',
+      data,
+      finalFilename,
+      'application/pdf',
+      300000 // 5 minute timeout for large/complex PDFs
+    );
 
     // Fetch full PDF metadata
     return this.getPdf(uploadResponse.id);
+  }
+
+  /**
+   * Upload a file using curl (most reliable method in Electron)
+   */
+  private uploadFileViaXhr<T>(
+    path: string,
+    data: ArrayBuffer,
+    filename: string,
+    mimeType: string,
+    timeoutMs: number
+  ): Promise<T> {
+    // Use curl via child_process for reliable uploads
+    // Electron's network stack has issues with large file uploads
+    const { execFile } = require('child_process');
+    const fs = require('fs');
+    const os = require('os');
+    const nodePath = require('path');
+
+    return new Promise((resolve, reject) => {
+      const url = `${this.config.baseUrl}${path}`;
+      const tempFile = nodePath.join(os.tmpdir(), `amnesia-upload-${Date.now()}.pdf`);
+
+      console.log('[ApiClient] Uploading via curl:', {
+        url,
+        filename,
+        dataSize: data.byteLength,
+        tempFile,
+      });
+
+      // Write data to temp file
+      const buffer = Buffer.from(data);
+      fs.writeFileSync(tempFile, buffer);
+
+      // Use curl to upload
+      // Note: filename must be quoted to handle spaces and special characters
+      // The double quotes inside the -F value are part of the curl syntax
+      const safeFilename = filename.replace(/"/g, '\\"'); // Escape any quotes in filename
+      const curlArgs = [
+        '-s', // Silent mode
+        '-X', 'POST',
+        '-F', `file=@${tempFile};filename="${safeFilename}";type=${mimeType}`,
+        '-H', `X-Device-ID: ${this.config.deviceId}`,
+        '--max-time', String(Math.ceil(timeoutMs / 1000)),
+        url,
+      ];
+
+      console.log('[ApiClient] Running curl...');
+
+      // Use async execFile to not block the event loop
+      execFile('curl', curlArgs, {
+        encoding: 'utf-8',
+        timeout: timeoutMs,
+        maxBuffer: 50 * 1024 * 1024, // 50MB for large responses
+      }, (error: any, stdout: string, stderr: string) => {
+        // Clean up temp file
+        try {
+          fs.unlinkSync(tempFile);
+        } catch (e) {
+          console.warn('[ApiClient] Failed to cleanup temp file:', e);
+        }
+
+        if (error) {
+          console.error('[ApiClient] curl error:', {
+            message: error.message,
+            code: error.code,
+            signal: error.signal,
+            stderr: stderr?.substring?.(0, 500),
+          });
+
+          if (error.signal === 'SIGTERM' || error.killed) {
+            reject(new Error(`Upload timed out after ${timeoutMs}ms`));
+          } else {
+            reject(new Error('Upload failed: ' + (stderr || error.message)));
+          }
+          return;
+        }
+
+        console.log('[ApiClient] curl response:', stdout?.substring?.(0, 500));
+
+        try {
+          const response = JSON.parse(stdout);
+          if (response.error) {
+            reject(new ApiError(response.error.message || 'Unknown error', 400, response.error.code));
+          } else {
+            resolve(response.data ?? response);
+          }
+        } catch (parseError) {
+          console.error('[ApiClient] Failed to parse response:', stdout);
+          reject(new Error('Failed to parse server response'));
+        }
+      });
+    });
   }
 
   /**
@@ -552,6 +648,34 @@ export class ApiClient {
   // Internal Methods
   // ============================================================================
 
+  /**
+   * Make a request with a custom timeout
+   */
+  private async requestWithTimeout<T>(
+    path: string,
+    init?: RequestInit & { requestKey?: string },
+    timeoutMs?: number
+  ): Promise<T> {
+    const response = await this.fetchWithTimeout(path, init, timeoutMs);
+
+    const contentType = response.headers.get('content-type');
+    if (!contentType?.includes('application/json')) {
+      return undefined as unknown as T;
+    }
+
+    const data = await response.json();
+
+    if (data.error) {
+      throw new ApiError(
+        data.error.message || 'Unknown error',
+        response.status,
+        data.error.code
+      );
+    }
+
+    return data.data ?? data;
+  }
+
   private async request<T>(
     path: string,
     init?: RequestInit & { requestKey?: string }
@@ -579,8 +703,17 @@ export class ApiClient {
   }
 
   private async fetch(path: string, init?: RequestInit & { requestKey?: string }): Promise<Response> {
+    return this.fetchWithTimeout(path, init, this.config.timeout);
+  }
+
+  private async fetchWithTimeout(
+    path: string,
+    init?: RequestInit & { requestKey?: string },
+    timeoutMs?: number
+  ): Promise<Response> {
     const url = `${this.config.baseUrl}${path}`;
     const { requestKey, ...fetchInit } = init || {};
+    const timeout = timeoutMs ?? this.config.timeout;
 
     // Create abort controller for timeout and cancellation
     const controller = new AbortController();
@@ -591,7 +724,7 @@ export class ApiClient {
     }
 
     // Set up timeout
-    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {
       const response = await fetch(url, {

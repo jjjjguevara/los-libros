@@ -318,6 +318,110 @@ export class ChunkedUploader {
     return Array.from(this.sessions.values());
   }
 
+  /**
+   * Resume an interrupted upload session
+   *
+   * Note: For now, this is a placeholder. Full resume requires persisting
+   * session state to IndexedDB and re-uploading missing chunks.
+   */
+  async resume(sessionId: string): Promise<UploadSession | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return null;
+    }
+
+    // For now, we can only resume if we still have the session in memory
+    // and it wasn't completed or failed
+    if (session.status === 'completed' || session.status === 'duplicate') {
+      return session;
+    }
+
+    // TODO: Implement full resume with persisted state
+    // This would require:
+    // 1. Persisting session state to IndexedDB
+    // 2. Re-reading the file
+    // 3. Re-uploading only the missing chunks
+    console.warn('[ChunkedUploader] Full resume not yet implemented');
+    return null;
+  }
+
+  /**
+   * Check if a file would be a duplicate before uploading
+   *
+   * This performs the hash computation and handshake without uploading.
+   */
+  async checkDuplicate(
+    file: File,
+    onProgress?: (progress: { phase: string; percentage: number }) => void
+  ): Promise<HandshakeResponse | null> {
+    // Initialize temporary session for hashing
+    const tempSession: UploadSession = {
+      sessionId: `check-${Date.now()}`,
+      fileName: file.name,
+      fileSize: file.size,
+      fileHash: '',
+      mimeType: file.type || 'application/epub+zip',
+      chunks: [],
+      status: 'initializing',
+      startedAt: Date.now(),
+    };
+
+    // Calculate chunk info
+    const chunkCount = Math.ceil(file.size / this.config.chunkSize);
+    for (let i = 0; i < chunkCount; i++) {
+      const start = i * this.config.chunkSize;
+      const end = Math.min(start + this.config.chunkSize, file.size);
+
+      tempSession.chunks.push({
+        index: i,
+        start,
+        end,
+        size: end - start,
+        hash: '',
+        status: 'pending',
+      });
+    }
+
+    try {
+      // Hash the file
+      onProgress?.({ phase: 'hashing', percentage: 0 });
+      let bytesHashed = 0;
+
+      for (const chunk of tempSession.chunks) {
+        const blob = file.slice(chunk.start, chunk.end);
+        const buffer = await blob.arrayBuffer();
+        chunk.hash = await this.hashBuffer(buffer);
+
+        bytesHashed += chunk.size;
+        onProgress?.({
+          phase: 'hashing',
+          percentage: (bytesHashed / file.size) * 100,
+        });
+      }
+
+      // Calculate full file hash
+      const combinedHashes = tempSession.chunks.map((c) => c.hash).join('');
+      tempSession.fileHash = await this.hashString(combinedHashes);
+
+      // Perform handshake to check for duplicate
+      onProgress?.({ phase: 'checking', percentage: 100 });
+      const chunkHashes = tempSession.chunks.map((c) => c.hash);
+
+      const response = await this.endpoint.handshake(
+        tempSession.fileName,
+        tempSession.fileSize,
+        tempSession.fileHash,
+        chunkHashes,
+        tempSession.mimeType
+      );
+
+      return response;
+    } catch (error) {
+      console.error('[ChunkedUploader] Duplicate check failed:', error);
+      return null;
+    }
+  }
+
   // ==========================================================================
   // Internal: Session Management
   // ==========================================================================

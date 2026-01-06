@@ -1,16 +1,95 @@
 //! PDF cache for parsed documents and rendered pages
 //!
 //! In-memory cache to avoid re-parsing PDFs and re-rendering pages.
+//!
+//! IMPORTANT: pdfium is NOT thread-safe. Each PdfParser is wrapped in a Mutex
+//! to serialize all operations on a given PDF document. This prevents crashes
+//! when multiple requests access the same document concurrently.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
 use tokio::sync::RwLock;
+use tokio::time::{timeout, Duration};
+
+/// Timeout for PDF parsing operations (loading a new PDF)
+/// Note: Some PDFs cause pdfium to hang indefinitely. This timeout ensures
+/// the client gets a response rather than waiting forever.
+/// The blocking thread may continue running, but at least the request completes.
+const PARSE_TIMEOUT_SECS: u64 = 30; // 30 seconds max - faster feedback on problematic PDFs
+/// Timeout for page rendering operations
+const RENDER_TIMEOUT_SECS: u64 = 30; // 30 seconds per page
+/// Timeout for text extraction operations
+const TEXT_TIMEOUT_SECS: u64 = 15; // 15 seconds per page
+/// Timeout for search operations (prevent DoS on large PDFs)
+const SEARCH_TIMEOUT_SECS: u64 = 30; // 30 seconds max for search
 
 use super::parser::{PdfParseError, PdfParser};
 use super::types::{ImageFormat, PageRenderRequest, ParsedPdf, TextLayer};
+
+/// Thread-safe wrapper for PdfParser that serializes all operations
+/// pdfium is NOT thread-safe, so we must use a Mutex to prevent concurrent access
+pub struct SafePdfParser {
+    inner: Mutex<PdfParser>,
+}
+
+impl SafePdfParser {
+    pub fn new(parser: PdfParser) -> Self {
+        Self {
+            inner: Mutex::new(parser),
+        }
+    }
+
+    /// Render a page with exclusive access to the parser
+    pub fn render_page(&self, request: &PageRenderRequest) -> Result<Vec<u8>, PdfParseError> {
+        let parser = self.inner.lock().map_err(|e| {
+            PdfParseError::RenderError(format!("Failed to acquire parser lock: {}", e))
+        })?;
+        parser.render_page(request)
+    }
+
+    /// Render a thumbnail with exclusive access
+    pub fn render_thumbnail(&self, page: usize, max_size: u32) -> Result<Vec<u8>, PdfParseError> {
+        let parser = self.inner.lock().map_err(|e| {
+            PdfParseError::RenderError(format!("Failed to acquire parser lock: {}", e))
+        })?;
+        parser.render_thumbnail(page, max_size)
+    }
+
+    /// Get text layer with exclusive access
+    pub fn get_text_layer(&self, page: usize) -> Result<TextLayer, PdfParseError> {
+        let parser = self.inner.lock().map_err(|e| {
+            PdfParseError::LoadError(format!("Failed to acquire parser lock: {}", e))
+        })?;
+        parser.get_text_layer(page)
+    }
+
+    /// Search with exclusive access
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<super::types::PdfSearchResult>, PdfParseError> {
+        let parser = self.inner.lock().map_err(|e| {
+            PdfParseError::LoadError(format!("Failed to acquire parser lock: {}", e))
+        })?;
+        parser.search(query, limit)
+    }
+
+    /// Get page text with exclusive access
+    pub fn get_page_text(&self, page: usize) -> Result<String, PdfParseError> {
+        let parser = self.inner.lock().map_err(|e| {
+            PdfParseError::LoadError(format!("Failed to acquire parser lock: {}", e))
+        })?;
+        parser.get_page_text(page)
+    }
+
+    /// Get page dimensions with exclusive access
+    pub fn get_page_dimensions(&self, page: usize) -> Result<super::types::PageDimensions, PdfParseError> {
+        let parser = self.inner.lock().map_err(|e| {
+            PdfParseError::LoadError(format!("Failed to acquire parser lock: {}", e))
+        })?;
+        parser.get_page_dimensions(page)
+    }
+}
 
 /// Cache key for rendered pages
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -59,12 +138,12 @@ impl std::hash::Hash for ImageFormat {
 pub struct PdfCache {
     /// Parsed PDF metadata cache
     pdfs: Arc<RwLock<HashMap<String, ParsedPdf>>>,
-    /// Active parser instances (for content retrieval)
-    parsers: Arc<RwLock<HashMap<String, Arc<PdfParser>>>>,
+    /// Active parser instances wrapped in SafePdfParser for thread-safety
+    parsers: Arc<RwLock<HashMap<String, Arc<SafePdfParser>>>>,
     /// LRU cache for rendered pages
     page_cache: Arc<RwLock<LruCache<PageCacheKey, Vec<u8>>>>,
-    /// Text layer cache
-    text_cache: Arc<RwLock<HashMap<(String, usize), TextLayer>>>,
+    /// LRU cache for text layers (bounded to prevent memory leaks)
+    text_cache: Arc<RwLock<LruCache<(String, usize), TextLayer>>>,
 }
 
 impl Default for PdfCache {
@@ -81,13 +160,15 @@ impl PdfCache {
 
     /// Create a cache with specified page cache capacity
     pub fn with_capacity(page_cache_size: usize) -> Self {
-        let size = NonZeroUsize::new(page_cache_size).unwrap_or(NonZeroUsize::new(100).unwrap());
+        let page_size = NonZeroUsize::new(page_cache_size).unwrap_or(NonZeroUsize::new(100).unwrap());
+        // Text cache is 2x page cache size (text layers are smaller than rendered pages)
+        let text_size = NonZeroUsize::new(page_cache_size * 2).unwrap_or(NonZeroUsize::new(200).unwrap());
 
         Self {
             pdfs: Arc::new(RwLock::new(HashMap::new())),
             parsers: Arc::new(RwLock::new(HashMap::new())),
-            page_cache: Arc::new(RwLock::new(LruCache::new(size))),
-            text_cache: Arc::new(RwLock::new(HashMap::new())),
+            page_cache: Arc::new(RwLock::new(LruCache::new(page_size))),
+            text_cache: Arc::new(RwLock::new(LruCache::new(text_size))),
         }
     }
 
@@ -97,8 +178,30 @@ impl PdfCache {
         data: &[u8],
         book_id: String,
     ) -> Result<ParsedPdf, PdfParseError> {
-        let parser = PdfParser::from_bytes(data, book_id.clone())?;
-        let pdf = parser.parse()?;
+        // Clone data for the blocking task
+        let data_owned = data.to_vec();
+        let book_id_clone = book_id.clone();
+
+        // Offload CPU-bound PDF parsing to a blocking thread pool
+        // This prevents blocking the async runtime for large PDFs
+        // Add timeout to prevent indefinite hangs on problematic PDFs
+        let parse_result = timeout(
+            Duration::from_secs(PARSE_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || {
+                let parser = PdfParser::from_bytes(&data_owned, book_id_clone)?;
+                let pdf = parser.parse()?;
+                Ok::<_, PdfParseError>((parser, pdf))
+            }),
+        )
+        .await;
+
+        // Handle timeout and join errors
+        let (parser, pdf) = match parse_result {
+            Ok(join_result) => join_result
+                .map_err(|e| PdfParseError::LoadError(format!("Task join error: {}", e)))??,
+            Err(_) => return Err(PdfParseError::Timeout(PARSE_TIMEOUT_SECS)),
+        };
+
         let id = pdf.id.clone();
 
         // Cache the parsed metadata
@@ -107,10 +210,10 @@ impl PdfCache {
             pdfs.insert(id.clone(), pdf.clone());
         }
 
-        // Cache the parser for content retrieval
+        // Cache the parser wrapped in SafePdfParser for thread-safety
         {
             let mut parsers = self.parsers.write().await;
-            parsers.insert(id, Arc::new(parser));
+            parsers.insert(id, Arc::new(SafePdfParser::new(parser)));
         }
 
         Ok(pdf)
@@ -122,8 +225,29 @@ impl PdfCache {
         path: impl AsRef<std::path::Path>,
         book_id: String,
     ) -> Result<ParsedPdf, PdfParseError> {
-        let parser = PdfParser::from_path(path, book_id.clone())?;
-        let pdf = parser.parse()?;
+        // Clone path for the blocking task
+        let path_owned = path.as_ref().to_path_buf();
+        let book_id_clone = book_id.clone();
+
+        // Offload CPU-bound PDF parsing to a blocking thread pool
+        // Add timeout to prevent indefinite hangs on problematic PDFs
+        let parse_result = timeout(
+            Duration::from_secs(PARSE_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || {
+                let parser = PdfParser::from_path(&path_owned, book_id_clone)?;
+                let pdf = parser.parse()?;
+                Ok::<_, PdfParseError>((parser, pdf))
+            }),
+        )
+        .await;
+
+        // Handle timeout and join errors
+        let (parser, pdf) = match parse_result {
+            Ok(join_result) => join_result
+                .map_err(|e| PdfParseError::LoadError(format!("Task join error: {}", e)))??,
+            Err(_) => return Err(PdfParseError::Timeout(PARSE_TIMEOUT_SECS)),
+        };
+
         let id = pdf.id.clone();
 
         // Cache the parsed metadata
@@ -132,10 +256,10 @@ impl PdfCache {
             pdfs.insert(id.clone(), pdf.clone());
         }
 
-        // Cache the parser for content retrieval
+        // Cache the parser wrapped in SafePdfParser for thread-safety
         {
             let mut parsers = self.parsers.write().await;
-            parsers.insert(id, Arc::new(parser));
+            parsers.insert(id, Arc::new(SafePdfParser::new(parser)));
         }
 
         Ok(pdf)
@@ -175,13 +299,28 @@ impl PdfCache {
             }
         }
 
-        // Render the page
-        let parsers = self.parsers.read().await;
-        let parser = parsers
-            .get(book_id)
-            .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?;
+        // Get the parser
+        let parser = {
+            let parsers = self.parsers.read().await;
+            parsers
+                .get(book_id)
+                .cloned()
+                .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?
+        };
 
-        let data = parser.render_page(request)?;
+        // Offload CPU-bound rendering to blocking thread pool with timeout
+        let request_clone = request.clone();
+        let render_result = timeout(
+            Duration::from_secs(RENDER_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || parser.render_page(&request_clone)),
+        )
+        .await;
+
+        let data = match render_result {
+            Ok(join_result) => join_result
+                .map_err(|e| PdfParseError::RenderError(format!("Task join error: {}", e)))??,
+            Err(_) => return Err(PdfParseError::Timeout(RENDER_TIMEOUT_SECS)),
+        };
 
         // Cache the result
         {
@@ -209,13 +348,27 @@ impl PdfCache {
             }
         }
 
-        // Render the thumbnail
-        let parsers = self.parsers.read().await;
-        let parser = parsers
-            .get(book_id)
-            .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?;
+        // Get the parser
+        let parser = {
+            let parsers = self.parsers.read().await;
+            parsers
+                .get(book_id)
+                .cloned()
+                .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?
+        };
 
-        let data = parser.render_thumbnail(page, max_size)?;
+        // Offload CPU-bound rendering to blocking thread pool with timeout
+        let render_result = timeout(
+            Duration::from_secs(RENDER_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || parser.render_thumbnail(page, max_size)),
+        )
+        .await;
+
+        let data = match render_result {
+            Ok(join_result) => join_result
+                .map_err(|e| PdfParseError::RenderError(format!("Task join error: {}", e)))??,
+            Err(_) => return Err(PdfParseError::Timeout(RENDER_TIMEOUT_SECS)),
+        };
 
         // Cache the result
         {
@@ -234,54 +387,89 @@ impl PdfCache {
     ) -> Result<TextLayer, PdfParseError> {
         let cache_key = (book_id.to_string(), page);
 
-        // Check text cache first
+        // Check text cache first (need write lock for LRU to update access order)
         {
-            let text_cache = self.text_cache.read().await;
+            let mut text_cache = self.text_cache.write().await;
             if let Some(layer) = text_cache.get(&cache_key) {
                 return Ok(layer.clone());
             }
         }
 
-        // Extract text layer
-        let parsers = self.parsers.read().await;
-        let parser = parsers
-            .get(book_id)
-            .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?;
+        // Get the parser
+        let parser = {
+            let parsers = self.parsers.read().await;
+            parsers
+                .get(book_id)
+                .cloned()
+                .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?
+        };
 
-        let layer = parser.get_text_layer(page)?;
+        // Offload text extraction to blocking thread pool with timeout
+        let text_result = timeout(
+            Duration::from_secs(TEXT_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || parser.get_text_layer(page)),
+        )
+        .await;
 
-        // Cache the result
+        let layer = match text_result {
+            Ok(join_result) => join_result
+                .map_err(|e| PdfParseError::LoadError(format!("Task join error: {}", e)))??,
+            Err(_) => return Err(PdfParseError::Timeout(TEXT_TIMEOUT_SECS)),
+        };
+
+        // Cache the result using LRU put
         {
             let mut text_cache = self.text_cache.write().await;
-            text_cache.insert(cache_key, layer.clone());
+            text_cache.put(cache_key, layer.clone());
         }
 
         Ok(layer)
     }
 
-    /// Search PDF content
+    /// Search PDF content (with timeout to prevent DoS on large PDFs)
     pub async fn search(
         &self,
         book_id: &str,
         query: &str,
         limit: usize,
     ) -> Result<Vec<super::types::PdfSearchResult>, PdfParseError> {
-        let parsers = self.parsers.read().await;
-        let parser = parsers
-            .get(book_id)
-            .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?;
+        let parser = {
+            let parsers = self.parsers.read().await;
+            parsers
+                .get(book_id)
+                .cloned()
+                .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?
+        };
 
-        parser.search(query, limit)
+        let query_owned = query.to_string();
+
+        // Add timeout to prevent indefinite hangs on large PDFs (DoS prevention)
+        let search_result = timeout(
+            Duration::from_secs(SEARCH_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || parser.search(&query_owned, limit)),
+        )
+        .await;
+
+        match search_result {
+            Ok(join_result) => join_result
+                .map_err(|e| PdfParseError::LoadError(format!("Task join error: {}", e)))?,
+            Err(_) => Err(PdfParseError::Timeout(SEARCH_TIMEOUT_SECS)),
+        }
     }
 
     /// Get page text
     pub async fn get_page_text(&self, book_id: &str, page: usize) -> Result<String, PdfParseError> {
-        let parsers = self.parsers.read().await;
-        let parser = parsers
-            .get(book_id)
-            .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?;
+        let parser = {
+            let parsers = self.parsers.read().await;
+            parsers
+                .get(book_id)
+                .cloned()
+                .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?
+        };
 
-        parser.get_page_text(page)
+        tokio::task::spawn_blocking(move || parser.get_page_text(page))
+            .await
+            .map_err(|e| PdfParseError::LoadError(format!("Task join error: {}", e)))?
     }
 
     /// Get page dimensions
@@ -290,12 +478,17 @@ impl PdfCache {
         book_id: &str,
         page: usize,
     ) -> Result<super::types::PageDimensions, PdfParseError> {
-        let parsers = self.parsers.read().await;
-        let parser = parsers
-            .get(book_id)
-            .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?;
+        let parser = {
+            let parsers = self.parsers.read().await;
+            parsers
+                .get(book_id)
+                .cloned()
+                .ok_or_else(|| PdfParseError::LoadError(format!("PDF {} not cached", book_id)))?
+        };
 
-        parser.get_page_dimensions(page)
+        tokio::task::spawn_blocking(move || parser.get_page_dimensions(page))
+            .await
+            .map_err(|e| PdfParseError::LoadError(format!("Task join error: {}", e)))?
     }
 
     /// Remove a PDF from the cache
@@ -326,10 +519,17 @@ impl PdfCache {
             }
         }
 
-        // Remove cached text layers
+        // Remove cached text layers (LruCache doesn't have retain, so collect and pop)
         {
             let mut text_cache = self.text_cache.write().await;
-            text_cache.retain(|(book_id, _), _| book_id != id);
+            let keys_to_remove: Vec<(String, usize)> = text_cache
+                .iter()
+                .filter(|((book_id, _), _)| book_id == id)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in keys_to_remove {
+                text_cache.pop(&key);
+            }
         }
     }
 

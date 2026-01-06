@@ -204,8 +204,10 @@ export interface DocumentSelectionEvent {
   selector: DocumentSelector;
   /** Position for showing popup */
   position: { x: number; y: number };
-  /** DOM range (if available) */
+  /** DOM range (if available, for EPUB) */
   range?: Range;
+  /** Pre-computed selection rects (for PDF where Range isn't available) */
+  rects?: Array<{ x: number; y: number; width: number; height: number }>;
 }
 
 /**

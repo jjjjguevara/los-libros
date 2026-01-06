@@ -182,7 +182,7 @@ export { HybridBookProvider, createHybridProvider } from './hybrid-provider';
 export type { HybridProviderConfig, ProviderMode } from './hybrid-provider';
 export { ProviderAdapter, createProviderAdapter } from './provider-adapter';
 
-// PDF Renderer
+// PDF Renderer (server-based, PDF.js deprecated)
 export {
   PdfRenderer,
   PdfCanvasLayer,
@@ -191,10 +191,6 @@ export {
   PdfRegionSelection,
   PdfPaginator,
   PdfScroller,
-  // PDF.js fallback providers
-  PdfJsProvider,
-  getPdfJsProvider,
-  resetPdfJsProvider,
   HybridPdfProvider,
   createHybridPdfProvider,
 } from './pdf';
@@ -218,8 +214,6 @@ export type {
   PdfScrollCallback,
   PageRenderCallback,
   PdfScrollerConfig,
-  // PDF.js provider types
-  PdfJsProviderStatus,
   HybridPdfProviderConfig,
   HybridPdfProviderStatus,
   PdfProviderMode,
