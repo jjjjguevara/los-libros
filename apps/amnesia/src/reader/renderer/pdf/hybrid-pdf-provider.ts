@@ -23,14 +23,15 @@
  * ```
  */
 
-import { ApiClient, getApiClient } from '../api-client';
+import { ApiClient, ApiError, getApiClient } from '../api-client';
 import type {
   ParsedPdf,
   PdfTextLayerData,
   PdfRenderOptions,
   PdfSearchResult,
 } from '../types';
-import { PdfPageCache } from './pdf-cache';
+import { PdfPageCache, type CacheStats } from './pdf-cache';
+import { AdaptivePrefetcher, type PrefetchStrategy, type PrefetchStats } from './adaptive-prefetcher';
 
 export type PdfProviderMode = 'server' | 'auto';
 
@@ -49,6 +50,27 @@ export interface HybridPdfProviderConfig {
   enablePrefetch?: boolean;
   /** Number of pages to prefetch ahead/behind (default: 2) */
   prefetchCount?: number;
+  /** Maximum number of pages to keep in memory cache (default: 10) */
+  cacheSize?: number;
+  /** Memory budget for cache in MB (default: 200) - overrides cacheSize */
+  memoryBudgetMB?: number;
+  /** Enable batch page requests (default: true) */
+  enableBatchRequests?: boolean;
+  /** Number of pages per batch request (default: 5) */
+  batchSize?: number;
+  /** Prefetch strategy: 'none', 'fixed', or 'adaptive' (default: 'adaptive') */
+  prefetchStrategy?: PrefetchStrategy;
+  /** DPI for server-side rendering. Default: 150 */
+  renderDpi?: number;
+  /**
+   * @deprecated Scale is no longer used. Use renderDpi for quality control.
+   * This field is ignored.
+   */
+  renderScale?: number;
+  /** Image format for rendered pages. Default: 'png' */
+  imageFormat?: 'png' | 'jpeg' | 'webp';
+  /** Image quality for lossy formats (1-100). Default: 85 */
+  imageQuality?: number;
 }
 
 export interface HybridPdfProviderStatus {
@@ -77,6 +99,9 @@ export class HybridPdfProvider {
   private isPrefetching: boolean = false;
   private prefetchTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
+  // Adaptive prefetcher
+  private adaptivePrefetcher: AdaptivePrefetcher | null = null;
+
   constructor(config: HybridPdfProviderConfig = {}) {
     this.config = {
       serverBaseUrl: config.serverBaseUrl ?? '',
@@ -86,9 +111,37 @@ export class HybridPdfProvider {
       enableCache: config.enableCache ?? true,
       enablePrefetch: config.enablePrefetch ?? true,
       prefetchCount: config.prefetchCount ?? 2,
+      cacheSize: config.cacheSize ?? 10,
+      memoryBudgetMB: config.memoryBudgetMB ?? 200,
+      enableBatchRequests: config.enableBatchRequests ?? true,
+      batchSize: config.batchSize ?? 5,
+      prefetchStrategy: config.prefetchStrategy ?? 'adaptive',
+      // Render quality settings - wired from plugin settings
+      // Note: renderScale is deprecated, only DPI is used for quality
+      renderDpi: config.renderDpi ?? 150,
+      renderScale: 1.0, // Deprecated, kept for type compatibility
+      imageFormat: config.imageFormat ?? 'png',
+      imageQuality: config.imageQuality ?? 85,
     };
 
-    this.pageCache = new PdfPageCache();
+    // Use byte-based cache if memoryBudgetMB is set, otherwise fall back to entry count
+    if (config.memoryBudgetMB !== undefined) {
+      this.pageCache = new PdfPageCache({
+        maxMemoryBytes: this.config.memoryBudgetMB * 1024 * 1024,
+      });
+    } else {
+      // Legacy: convert entry count to byte estimate
+      this.pageCache = PdfPageCache.fromEntryCount(this.config.cacheSize);
+    }
+
+    // Create adaptive prefetcher if strategy is adaptive
+    if (this.config.prefetchStrategy === 'adaptive') {
+      this.adaptivePrefetcher = new AdaptivePrefetcher({
+        strategy: 'adaptive',
+        basePrefetchCount: this.config.prefetchCount,
+        maxPrefetchCount: Math.min(this.config.prefetchCount * 4, 10),
+      });
+    }
   }
 
   /**
@@ -166,16 +219,25 @@ export class HybridPdfProvider {
         this.parsedPdf = await this.apiClient.getPdf(pdfId);
         this.documentId = this.parsedPdf.id;
         console.log('[HybridPdfProvider] Using existing PDF from server:', pdfId);
+        this.initializePrefetcher();
         return this.parsedPdf;
-      } catch {
-        // PDF doesn't exist, fall through to upload
-        console.log('[HybridPdfProvider] PDF not found on server, uploading:', pdfId);
+      } catch (error) {
+        // Only fall through to upload on 404 (not found)
+        // Other errors (timeout, server error, etc.) should be propagated
+        if (error instanceof ApiError && error.statusCode === 404) {
+          console.log('[HybridPdfProvider] PDF not found on server, uploading:', pdfId);
+        } else {
+          // Re-throw non-404 errors (timeout, server error, etc.)
+          console.error('[HybridPdfProvider] Server error:', error);
+          throw error;
+        }
       }
     }
 
     // Upload the PDF
     this.parsedPdf = await this.apiClient.uploadPdf(data, documentId);
     this.documentId = this.parsedPdf.id;
+    this.initializePrefetcher();
     return this.parsedPdf;
   }
 
@@ -189,42 +251,96 @@ export class HybridPdfProvider {
 
     this.parsedPdf = await this.apiClient.getPdf(pdfId);
     this.documentId = pdfId;
+    this.initializePrefetcher();
     return this.parsedPdf;
   }
 
   /**
+   * Initialize adaptive prefetcher with page count and fetch callback
+   */
+  private initializePrefetcher(): void {
+    if (this.adaptivePrefetcher && this.parsedPdf) {
+      this.adaptivePrefetcher.initialize(
+        this.parsedPdf.pageCount,
+        async (page: number) => {
+          // Fetch and cache the page using config values (DPI only, scale deprecated)
+          const dpi = this.config.renderDpi;
+          const format = this.config.imageFormat;
+          const quality = this.config.imageQuality;
+          const renderOptions = { dpi, format, quality };
+          const blob = await this.apiClient!.getPdfPage(this.documentId!, page, renderOptions);
+
+          // Validate blob before caching (prefetch should not cache bad data)
+          const validImageTypes = ['image/png', 'image/jpeg', 'image/webp'];
+          if (!validImageTypes.includes(blob.type) || blob.size === 0) {
+            console.warn(`[HybridPdfProvider] Prefetch rejected invalid blob for page ${page}: type=${blob.type}, size=${blob.size}`);
+            return; // Skip caching invalid blob
+          }
+
+          await this.pageCache.set(this.documentId!, page, renderOptions, blob);
+          this.adaptivePrefetcher?.markCached(page);
+        }
+      );
+    }
+  }
+
+  /**
    * Render a page to a blob (with caching)
+   *
+   * Note: Scale is deprecated. Only DPI is used for quality control.
    */
   async renderPage(pageNumber: number, options?: PdfRenderOptions): Promise<Blob> {
     if (!this.apiClient || !this.documentId) {
       throw new Error('No document loaded');
     }
 
-    const scale = options?.scale ?? 1.5;
+    // Merge caller options with config defaults (scale is deprecated, ignored)
+    const mergedOptions: PdfRenderOptions = {
+      dpi: options?.dpi ?? this.config.renderDpi,
+      format: options?.format ?? this.config.imageFormat,
+      quality: options?.quality ?? this.config.imageQuality,
+    };
 
-    // Check cache first
+    console.log('[HybridPdfProvider] renderPage called:', {
+      page: pageNumber,
+      requestedDpi: options?.dpi,
+      mergedOptions,
+    });
+
+    // Check cache first - now includes DPI, format, quality in cache key
     if (this.config.enableCache) {
-      const cached = await this.pageCache.get(this.documentId, pageNumber, scale);
+      const cached = await this.pageCache.get(this.documentId, pageNumber, mergedOptions);
       if (cached) {
+        console.log('[HybridPdfProvider] Cache hit for page', pageNumber, 'with options:', mergedOptions);
         // Trigger prefetch in background
         if (this.config.enablePrefetch) {
-          this.prefetchAdjacentPages(pageNumber, scale);
+          this.prefetchAdjacentPages(pageNumber, mergedOptions);
         }
         return cached;
       }
     }
 
-    // Fetch from server
-    const blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
+    // Fetch from server with merged options
+    console.log('[HybridPdfProvider] Fetching from server:', { page: pageNumber, ...mergedOptions });
+    const blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, mergedOptions);
 
-    // Cache for later
+    // Validate blob type and size before caching (defense in depth)
+    const validImageTypes = ['image/png', 'image/jpeg', 'image/webp'];
+    if (!validImageTypes.includes(blob.type)) {
+      throw new ApiError(`Invalid image type for page ${pageNumber}: ${blob.type}`, 400);
+    }
+    if (blob.size === 0) {
+      throw new ApiError(`Empty blob received for page ${pageNumber}`, 500);
+    }
+
+    // Cache for later - includes all render options in cache key
     if (this.config.enableCache) {
-      await this.pageCache.set(this.documentId, pageNumber, scale, blob);
+      await this.pageCache.set(this.documentId, pageNumber, mergedOptions, blob);
     }
 
     // Trigger prefetch in background
     if (this.config.enablePrefetch) {
-      this.prefetchAdjacentPages(pageNumber, scale);
+      this.prefetchAdjacentPages(pageNumber, mergedOptions);
     }
 
     return blob;
@@ -267,6 +383,19 @@ export class HybridPdfProvider {
     }
 
     return this.apiClient.getPdfTextLayer(this.documentId, pageNumber);
+  }
+
+  /**
+   * Get SVG text layer for crisp text at any zoom level
+   * Returns an SVG document string with transparent text elements positioned
+   * to match the PDF layout.
+   */
+  async getSvgTextLayer(pageNumber: number): Promise<string> {
+    if (!this.apiClient || !this.documentId) {
+      throw new Error('No document loaded');
+    }
+
+    return this.apiClient.getPdfSvgTextLayer(this.documentId, pageNumber);
   }
 
   /**
@@ -316,6 +445,12 @@ export class HybridPdfProvider {
     // Cancel pending prefetch
     this.cancelPrefetch();
 
+    // Destroy adaptive prefetcher
+    if (this.adaptivePrefetcher) {
+      this.adaptivePrefetcher.destroy();
+      this.adaptivePrefetcher = null;
+    }
+
     // Destroy page cache
     this.pageCache.destroy();
 
@@ -335,10 +470,57 @@ export class HybridPdfProvider {
   }
 
   /**
+   * Get prefetch statistics (for debugging/monitoring)
+   */
+  getPrefetchStats(): PrefetchStats | null {
+    if (this.adaptivePrefetcher) {
+      return this.adaptivePrefetcher.getStats();
+    }
+    return null;
+  }
+
+  /**
+   * Notify provider of page change (for adaptive prefetching)
+   */
+  notifyPageChange(page: number): void {
+    if (this.adaptivePrefetcher && this.config.prefetchStrategy === 'adaptive') {
+      this.adaptivePrefetcher.onPageChange(page);
+    }
+  }
+
+  /**
+   * Update prefetch strategy at runtime
+   */
+  setPrefetchStrategy(strategy: PrefetchStrategy): void {
+    this.config.prefetchStrategy = strategy;
+
+    if (strategy === 'adaptive' && !this.adaptivePrefetcher) {
+      // Create adaptive prefetcher if switching to adaptive
+      this.adaptivePrefetcher = new AdaptivePrefetcher({
+        strategy: 'adaptive',
+        basePrefetchCount: this.config.prefetchCount,
+        maxPrefetchCount: Math.min(this.config.prefetchCount * 4, 10),
+      });
+      this.initializePrefetcher();
+    } else if (strategy !== 'adaptive' && this.adaptivePrefetcher) {
+      // Destroy adaptive prefetcher if switching away
+      this.adaptivePrefetcher.destroy();
+      this.adaptivePrefetcher = null;
+    }
+  }
+
+  /**
    * Get cache statistics
    */
-  getCacheStats(): { memorySize: number; maxMemory: number } {
+  getCacheStats(): CacheStats {
     return this.pageCache.getStats();
+  }
+
+  /**
+   * Update memory budget at runtime
+   */
+  setMemoryBudget(mb: number): void {
+    this.pageCache.setMemoryBudget(mb * 1024 * 1024);
   }
 
   // Private methods
@@ -346,9 +528,17 @@ export class HybridPdfProvider {
   /**
    * Prefetch adjacent pages in the background
    */
-  private prefetchAdjacentPages(currentPage: number, scale: number): void {
+  private prefetchAdjacentPages(currentPage: number, options: PdfRenderOptions): void {
     if (!this.documentId || !this.config.enablePrefetch) return;
+    if (this.config.prefetchStrategy === 'none') return;
 
+    // Use adaptive prefetcher if strategy is adaptive
+    if (this.config.prefetchStrategy === 'adaptive' && this.adaptivePrefetcher) {
+      this.adaptivePrefetcher.onPageChange(currentPage);
+      return;
+    }
+
+    // Fixed prefetch strategy (legacy behavior)
     const pageCount = this.getPageCount();
     const pagesToPrefetch: number[] = [];
 
@@ -368,10 +558,10 @@ export class HybridPdfProvider {
     for (const page of pagesToPrefetch) {
       if (!this.prefetchQueue.includes(page)) {
         // Check if already cached (sync check of memory cache)
-        this.pageCache.has(this.documentId, page, scale).then((isCached) => {
+        this.pageCache.has(this.documentId, page, options).then((isCached) => {
           if (!isCached && !this.prefetchQueue.includes(page)) {
             this.prefetchQueue.push(page);
-            this.processPrefetchQueue(scale);
+            this.processPrefetchQueue(options);
           }
         });
       }
@@ -379,34 +569,111 @@ export class HybridPdfProvider {
   }
 
   /**
-   * Process the prefetch queue sequentially
+   * Process the prefetch queue - uses batch or sequential based on config
    */
-  private async processPrefetchQueue(scale: number): Promise<void> {
+  private async processPrefetchQueue(options: PdfRenderOptions): Promise<void> {
     if (this.isPrefetching || this.prefetchQueue.length === 0) return;
     if (!this.apiClient || !this.documentId) return;
 
     this.isPrefetching = true;
-    const page = this.prefetchQueue.shift()!;
 
     try {
-      // Check if already cached (might have been loaded by user navigation)
-      const isCached = await this.pageCache.has(this.documentId, page, scale);
-      if (!isCached) {
-        const blob = await this.apiClient.getPdfPage(this.documentId, page, { scale });
-        await this.pageCache.set(this.documentId, page, scale, blob);
-        console.log(`[PDF] Prefetched page ${page}`);
+      if (this.config.enableBatchRequests && this.prefetchQueue.length > 1) {
+        // Use batch requests for multiple pages
+        await this.processPrefetchBatch(options);
+      } else {
+        // Process single page
+        await this.processPrefetchSingle(options);
       }
     } catch (error) {
-      console.warn(`[PDF] Prefetch failed for page ${page}:`, error);
+      console.warn('[PDF] Prefetch error:', error);
     }
 
     this.isPrefetching = false;
 
-    // Process next with delay to avoid overwhelming server
+    // Process remaining pages with delay
     if (this.prefetchQueue.length > 0) {
       this.prefetchTimeoutId = setTimeout(() => {
-        this.processPrefetchQueue(scale);
-      }, 200);
+        this.processPrefetchQueue(options);
+      }, 100);
+    }
+  }
+
+  /**
+   * Process prefetch queue using batch requests
+   */
+  private async processPrefetchBatch(options: PdfRenderOptions): Promise<void> {
+    if (!this.apiClient || !this.documentId) return;
+
+    // Take up to batchSize pages from queue
+    const batchSize = Math.min(this.config.batchSize, this.prefetchQueue.length);
+    const pages = this.prefetchQueue.splice(0, batchSize);
+
+    // Filter out already-cached pages
+    const uncachedPages: number[] = [];
+    for (const page of pages) {
+      const isCached = await this.pageCache.has(this.documentId, page, options);
+      if (!isCached) {
+        uncachedPages.push(page);
+      }
+    }
+
+    if (uncachedPages.length === 0) return;
+
+    try {
+      const blobs = await this.apiClient.getPdfPagesBatch(
+        this.documentId,
+        uncachedPages,
+        options
+      );
+
+      // Cache all fetched pages with full render options (validate before caching)
+      const validImageTypes = ['image/png', 'image/jpeg', 'image/webp'];
+      let cachedCount = 0;
+      for (const [page, blob] of blobs) {
+        // Skip invalid blobs
+        if (!validImageTypes.includes(blob.type) || blob.size === 0) {
+          console.warn(`[PDF] Batch prefetch rejected invalid blob for page ${page}: type=${blob.type}, size=${blob.size}`);
+          continue;
+        }
+        await this.pageCache.set(this.documentId, page, options, blob);
+        cachedCount++;
+      }
+
+      console.log(`[PDF] Batch prefetched ${cachedCount} pages: ${Array.from(blobs.keys()).join(', ')}`);
+    } catch (error) {
+      console.warn('[PDF] Batch prefetch failed:', error);
+      // Re-add pages to queue for retry
+      this.prefetchQueue.push(...uncachedPages);
+    }
+  }
+
+  /**
+   * Process a single page from the prefetch queue
+   */
+  private async processPrefetchSingle(options: PdfRenderOptions): Promise<void> {
+    if (!this.apiClient || !this.documentId) return;
+
+    const page = this.prefetchQueue.shift();
+    if (!page) return;
+
+    try {
+      const isCached = await this.pageCache.has(this.documentId, page, options);
+      if (!isCached) {
+        const blob = await this.apiClient.getPdfPage(this.documentId, page, options);
+
+        // Validate blob before caching
+        const validImageTypes = ['image/png', 'image/jpeg', 'image/webp'];
+        if (!validImageTypes.includes(blob.type) || blob.size === 0) {
+          console.warn(`[PDF] Prefetch rejected invalid blob for page ${page}: type=${blob.type}, size=${blob.size}`);
+          return; // Skip caching invalid blob
+        }
+
+        await this.pageCache.set(this.documentId, page, options, blob);
+        console.log(`[PDF] Prefetched page ${page}`);
+      }
+    } catch (error) {
+      console.warn(`[PDF] Prefetch failed for page ${page}:`, error);
     }
   }
 

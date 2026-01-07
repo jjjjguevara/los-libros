@@ -11,8 +11,8 @@ use uuid::Uuid;
 /// Default chunk size: 2MB
 pub const DEFAULT_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 
-/// Maximum file size: 500MB
-pub const MAX_FILE_SIZE: u64 = 500 * 1024 * 1024;
+/// Maximum file size: 2GB (supports very large PDFs like dictionaries)
+pub const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Session expiry time: 24 hours
 pub const SESSION_EXPIRY_HOURS: i64 = 24;

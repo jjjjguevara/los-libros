@@ -29,6 +29,7 @@ const TAB_INFO: Record<TabId, { label: string; icon: string }> = {
     pdf: { label: 'PDF', icon: 'file-type' },
     sync: { label: 'Sync', icon: 'refresh-cw' },
     notes: { label: 'Notes', icon: 'file-text' },
+    hud: { label: 'HUD', icon: 'layout-dashboard' },
     advanced: { label: 'Advanced', icon: 'settings' },
 };
 

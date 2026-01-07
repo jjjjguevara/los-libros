@@ -1220,11 +1220,33 @@
       if (detectedFormat === 'pdf') {
         console.log('[ServerReader] Detected PDF file, using PDF renderer');
 
+        // Log the PDF settings being used
+        console.log('[ServerReader] PDF Settings from plugin:', {
+          renderDpi: plugin.settings.pdf?.renderDpi,
+          scale: plugin.settings.pdf?.scale,
+          imageFormat: plugin.settings.pdf?.imageFormat,
+          imageQuality: plugin.settings.pdf?.imageQuality,
+          displayMode: plugin.settings.pdf?.displayMode,
+        });
+
         // Create PDF provider
         pdfProvider = createHybridPdfProvider({
           serverBaseUrl: plugin.settings.serverEnabled ? plugin.settings.serverUrl : undefined,
           preferMode: plugin.settings.pdf?.preferMode ?? 'auto',
           deviceId: getDeviceId(),
+          enableCache: plugin.settings.pdf?.enablePageCache ?? true,
+          cacheSize: plugin.settings.pdf?.pageCacheSize ?? 10,
+          memoryBudgetMB: plugin.settings.pdf?.memoryBudgetMB ?? 200,
+          enablePrefetch: (plugin.settings.pdf?.pagePreloadCount ?? 2) > 0,
+          prefetchCount: plugin.settings.pdf?.pagePreloadCount ?? 2,
+          enableBatchRequests: plugin.settings.pdf?.enableBatchRequests ?? true,
+          batchSize: plugin.settings.pdf?.batchSize ?? 5,
+          prefetchStrategy: plugin.settings.pdf?.prefetchStrategy ?? 'adaptive',
+          // Render quality settings - must match PdfRenderer for consistent prefetch quality
+          renderDpi: plugin.settings.pdf?.renderDpi ?? 150,
+          renderScale: plugin.settings.pdf?.scale ?? 1.5,
+          imageFormat: plugin.settings.pdf?.imageFormat ?? 'png',
+          imageQuality: plugin.settings.pdf?.imageQuality ?? 85,
         });
 
         // Initialize provider (check server health)
@@ -1259,6 +1281,9 @@
           async getPdfTextLayer(id: string, page: number) {
             return pdfProvider!.getTextLayer(page);
           },
+          async getPdfSvgTextLayer(id: string, page: number) {
+            return pdfProvider!.getSvgTextLayer(page);
+          },
           async searchPdf(id: string, query: string, limit?: number) {
             return pdfProvider!.search(query, limit);
           },
@@ -1273,17 +1298,21 @@
           scrollDirection: plugin.settings.pdf?.scrollDirection ?? 'vertical',
           // Optimization settings
           renderDpi: plugin.settings.pdf?.renderDpi ?? 150,
-          enableHardwareAcceleration: plugin.settings.pdf?.enableHardwareAcceleration ?? true,
-          enableCanvasAcceleration: plugin.settings.pdf?.enableCanvasAcceleration ?? true,
           pagePreloadCount: plugin.settings.pdf?.pagePreloadCount ?? 2,
           enablePageCache: plugin.settings.pdf?.enablePageCache ?? true,
           pageCacheSize: plugin.settings.pdf?.pageCacheSize ?? 10,
           imageFormat: plugin.settings.pdf?.imageFormat ?? 'png',
           imageQuality: plugin.settings.pdf?.imageQuality ?? 85,
-          enableProgressiveRendering: plugin.settings.pdf?.enableProgressiveRendering ?? true,
-          previewScale: plugin.settings.pdf?.previewScale ?? 0.25,
           enableTextAntialiasing: plugin.settings.pdf?.enableTextAntialiasing ?? true,
           enableImageSmoothing: plugin.settings.pdf?.enableImageSmoothing ?? true,
+          // Advanced performance settings
+          enableDomPooling: plugin.settings.pdf?.enableDomPooling ?? true,
+          useIntersectionObserver: plugin.settings.pdf?.useIntersectionObserver ?? true,
+          textLayerMode: plugin.settings.pdf?.textLayerMode ?? 'full',
+          // Virtualization performance settings
+          renderDebounceMs: plugin.settings.pdf?.renderDebounceMs ?? 150,
+          minCreationBuffer: plugin.settings.pdf?.minCreationBuffer ?? 150,
+          minDestructionBuffer: plugin.settings.pdf?.minDestructionBuffer ?? 300,
         };
 
         // Create PDF renderer with the adapter

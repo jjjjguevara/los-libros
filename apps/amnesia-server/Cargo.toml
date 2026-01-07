@@ -58,6 +58,7 @@ futures = "0.3"
 
 # HTML processing
 lol_html = "2.0"
+html-escape = "0.2"
 
 # PDF rendering
 pdfium-render = { version = "0.8", features = ["thread_safe"] }

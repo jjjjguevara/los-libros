@@ -5,6 +5,7 @@ import { DEFAULT_BOOK_NOTE_TEMPLATE, DEFAULT_HIGHLIGHT_NOTE_TEMPLATE, DEFAULT_TE
 import type { SyncDirection, ConflictResolution, SyncableField } from '../calibre/calibre-types';
 import type { TemplateSettings } from '../templates/template-types';
 import type { BookSettingsRecord } from '../reader/book-settings-store';
+import type { TabName } from '../hud/types';
 
 // ==========================================================================
 // File System Architecture Settings Types
@@ -276,6 +277,47 @@ export interface UnifiedSyncSettings {
 }
 
 // ==========================================================================
+// HUD Settings Types
+// ==========================================================================
+
+/**
+ * Status bar metric options for HUD
+ */
+export type HudStatusBarMetric = 'reading-count' | 'highlight-count' | 'today-highlights' | 'streak';
+
+/**
+ * HUD settings for the Heads-Up Display
+ */
+export interface HudSettings {
+  /** Enable HUD. Default: true */
+  enabled: boolean;
+  /** Default tab when opening HUD. Default: 'reading' */
+  defaultTab: TabName;
+  /** Status bar metrics to display. Default: ['reading-count', 'highlight-count'] */
+  statusBarMetrics: HudStatusBarMetric[];
+  /** Show server status in status bar. Default: true */
+  showServerStatus: boolean;
+  /** Tab visibility configuration */
+  tabVisibility: {
+    reading: boolean;
+    library: boolean;
+    stats: boolean;
+    server: boolean;
+    series: boolean;
+  };
+  /** Compact view width in pixels. Default: 400 */
+  compactViewWidth: number;
+  /** Auto-close HUD after inactivity (ms, 0 = never). Default: 0 */
+  autoCloseDelay: number;
+  /** Remember last open tab. Default: true */
+  rememberLastTab: boolean;
+  /** Show badges on tabs. Default: true */
+  showBadges: boolean;
+  /** Use Doc Doctor integration when available. Default: true */
+  useDocDoctorIntegration: boolean;
+}
+
+// ==========================================================================
 // Server Management Settings Types
 // ==========================================================================
 
@@ -406,6 +448,41 @@ export interface PdfSettings {
   enableTextAntialiasing: boolean;
   /** Enable image smoothing/interpolation. Default: true */
   enableImageSmoothing: boolean;
+
+  // ==========================================================================
+  // Performance Settings
+  // ==========================================================================
+
+  /** Enable batch page requests for faster loading. Default: true */
+  enableBatchRequests: boolean;
+  /** Maximum pages per batch request. Default: 5 */
+  batchSize: number;
+  /** Memory budget for page cache in MB. Default: 200 */
+  memoryBudgetMB: number;
+
+  // ==========================================================================
+  // Advanced Performance Settings
+  // ==========================================================================
+
+  /** Text layer rendering mode. Default: 'virtualized' */
+  textLayerMode: 'full' | 'virtualized' | 'disabled';
+  /** Prefetch strategy for loading adjacent pages. Default: 'adaptive' */
+  prefetchStrategy: 'none' | 'fixed' | 'adaptive';
+  /** Enable DOM element pooling for page recycling. Default: true */
+  enableDomPooling: boolean;
+  /** Use IntersectionObserver for visibility detection. Default: true */
+  useIntersectionObserver: boolean;
+
+  // ==========================================================================
+  // Virtualization Performance Settings
+  // ==========================================================================
+
+  /** Render debounce delay in milliseconds. Lower = more responsive, higher = less server load. Default: 150 */
+  renderDebounceMs: number;
+  /** Minimum creation buffer in pixels. Pages are created when this close to viewport. Default: 150 */
+  minCreationBuffer: number;
+  /** Minimum destruction buffer in pixels. Pages are kept alive when this far from viewport. Default: 300 */
+  minDestructionBuffer: number;
 }
 
 export interface LibrosSettings {
@@ -555,6 +632,13 @@ export interface LibrosSettings {
 
   /** Server management configuration */
   serverManagement: ServerManagementSettings;
+
+  // ==========================================================================
+  // HUD Settings
+  // ==========================================================================
+
+  /** HUD configuration */
+  hud: HudSettings;
 }
 
 export const DEFAULT_SETTINGS: LibrosSettings = {
@@ -776,10 +860,26 @@ export const DEFAULT_SETTINGS: LibrosSettings = {
     pagePreloadCount: 2,     // Preload 2 pages ahead
     enablePageCache: true,   // Cache rendered pages
     pageCacheSize: 10,       // Keep 10 pages in cache
-    imageFormat: 'png',      // Lossless format for crisp text
-    imageQuality: 85,        // Quality for jpeg/webp (if used)
+    imageFormat: 'jpeg',     // JPEG: ~1-2MB vs PNG: ~25MB per page (10-20x smaller, faster decode)
+    imageQuality: 90,        // High quality JPEG - visually indistinguishable from PNG
     enableTextAntialiasing: true,     // Smooth text edges
     enableImageSmoothing: true,       // Smooth image interpolation
+
+    // Performance Settings
+    enableBatchRequests: true,  // Batch page requests for faster loading
+    batchSize: 5,               // Request 5 pages at a time
+    memoryBudgetMB: 200,        // 200MB default memory budget for cache
+
+    // Advanced Performance Settings
+    textLayerMode: 'virtualized',     // Only render visible text spans
+    prefetchStrategy: 'adaptive',     // Adaptive prefetching based on scroll behavior
+    enableDomPooling: true,           // Recycle page DOM elements
+    useIntersectionObserver: true,    // Use browser-native visibility detection
+
+    // Virtualization Performance Settings
+    renderDebounceMs: 50,             // Delay before rendering pages during scroll (ms) - lower = more responsive
+    minCreationBuffer: 300,           // Minimum buffer for creating page elements (px) - ~1 page height
+    minDestructionBuffer: 600,        // Minimum buffer for keeping page elements (px) - prevents flicker
   },
 
   // ==========================================================================
@@ -796,5 +896,28 @@ export const DEFAULT_SETTINGS: LibrosSettings = {
     showNotices: true,            // Show UI notices for server events
     useExternalServer: false,     // Use bundled server by default
     externalServerUrl: '',        // External server URL (when useExternalServer)
+  },
+
+  // ==========================================================================
+  // HUD Settings Defaults
+  // ==========================================================================
+
+  hud: {
+    enabled: true,                // HUD enabled by default
+    defaultTab: 'reading',        // Start on Reading tab
+    statusBarMetrics: ['reading-count', 'highlight-count'],
+    showServerStatus: true,       // Show server status indicator
+    tabVisibility: {
+      reading: true,
+      library: true,
+      stats: true,
+      server: true,
+      series: true,
+    },
+    compactViewWidth: 400,        // 400px width
+    autoCloseDelay: 0,            // Never auto-close
+    rememberLastTab: true,        // Remember last open tab
+    showBadges: true,             // Show badges on tabs
+    useDocDoctorIntegration: true, // Use Doc Doctor when available
   },
 };

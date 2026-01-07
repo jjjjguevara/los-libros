@@ -17,6 +17,9 @@ export type { CanvasLayerConfig } from './pdf-canvas-layer';
 export { PdfTextLayer } from './pdf-text-layer';
 export type { TextLayerConfig, TextSelection } from './pdf-text-layer';
 
+export { PdfSvgTextLayer } from './pdf-svg-text-layer';
+export type { SvgTextLayerConfig, SvgTextSelection, SvgTextLayerFetcher } from './pdf-svg-text-layer';
+
 export { PdfAnnotationLayer } from './pdf-annotation-layer';
 export type {
   PdfHighlightClickCallback,
@@ -67,6 +70,10 @@ export type {
 export { PdfPageElement } from './pdf-page-element';
 export type { ReadingMode, PageHighlight, PageRenderData } from './pdf-page-element';
 
+// Page element pool for DOM recycling
+export { PageElementPool } from './page-element-pool';
+export type { PageElementPoolConfig, PoolStats } from './page-element-pool';
+
 // Infinite canvas (new pan-zoom system)
 export { PdfInfiniteCanvas } from './pdf-infinite-canvas';
 export type { InfiniteCanvasConfig, PageLayout, DisplayMode as InfiniteCanvasDisplayMode } from './pdf-infinite-canvas';
@@ -87,3 +94,17 @@ export {
   canvasToScreen,
 } from './pdf-canvas-camera';
 export type { Camera, Point, CameraConstraints } from './pdf-canvas-camera';
+
+// Virtualized text layer
+export { VirtualizedTextLayer } from './virtualized-text-layer';
+export type { VirtualizedTextLayerConfig, TextLayerMode } from './virtualized-text-layer';
+
+// Adaptive prefetcher
+export { AdaptivePrefetcher } from './adaptive-prefetcher';
+export type {
+  AdaptivePrefetcherConfig,
+  PrefetchStrategy,
+  PrefetchPriority,
+  PrefetchRequest,
+  PrefetchStats,
+} from './adaptive-prefetcher';

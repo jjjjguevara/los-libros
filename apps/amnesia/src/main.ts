@@ -54,6 +54,9 @@ import {
 // Server Management
 import { ServerManager, type ServerState } from './server/server-manager';
 
+// HUD System
+import { AmnesiaHUD, AmnesiaHUDProvider, isDocDoctorAvailable, getDocDoctorRegistry, onDocDoctorHUDReady } from './hud';
+
 export default class AmnesiaPlugin extends Plugin {
 	settings: LibrosSettings;
 	libraryStore: Store<LibraryState, LibraryAction>;
@@ -110,6 +113,10 @@ export default class AmnesiaPlugin extends Plugin {
 	private offlineProgressUnsubscribe: (() => void) | null = null;
 	private networkStatusBarItem: HTMLElement | null = null;
 
+	// HUD System
+	hudProvider: AmnesiaHUDProvider | null = null;
+	standaloneHUD: AmnesiaHUD | null = null;
+	private docDoctorReadyUnsubscribe: (() => void) | null = null;
 
 	async onload() {
 		console.log('Loading Amnesia plugin');
@@ -208,10 +215,13 @@ export default class AmnesiaPlugin extends Plugin {
 			() => this.settings
 		);
 
-		// Add status bar item for Calibre sync
-		this.statusBarItem = this.addStatusBarItem();
-		this.statusBarItem.addClass('amnesia-status-bar');
-		this.updateStatusBar();
+		// Add status bar item for Calibre sync (only when HUD is disabled)
+		// When HUD is enabled, it consolidates all status indicators
+		if (!this.settings.hud?.enabled) {
+			this.statusBarItem = this.addStatusBarItem();
+			this.statusBarItem.addClass('amnesia-status-bar');
+			this.updateStatusBar();
+		}
 
 		// Subscribe to Calibre store for status updates
 		this.calibreStoreUnsubscribe = this.calibreService.getStore().subscribe(() => {
@@ -247,9 +257,12 @@ export default class AmnesiaPlugin extends Plugin {
 				},
 			});
 
-			// Add network status bar item
-			this.networkStatusBarItem = this.addStatusBarItem();
-			this.networkStatusBarItem.addClass('amnesia-network-status');
+			// Add network status bar item (only when HUD is disabled)
+			// When HUD is enabled, it consolidates all status indicators
+			if (!this.settings.hud?.enabled) {
+				this.networkStatusBarItem = this.addStatusBarItem();
+				this.networkStatusBarItem.addClass('amnesia-network-status');
+			}
 
 			// Subscribe to network state changes
 			this.networkStatusUnsubscribe = this.networkMonitor.on('state-change', (data) => {
@@ -338,9 +351,12 @@ export default class AmnesiaPlugin extends Plugin {
 				pluginDir: this.manifest.dir || '',
 			});
 
-			// Add server status bar item
-			this.serverStatusBarItem = this.addStatusBarItem();
-			this.serverStatusBarItem.addClass('amnesia-server-status');
+			// Add server status bar item (only when HUD is disabled)
+			// When HUD is enabled, it consolidates all status indicators
+			if (!this.settings.hud?.enabled) {
+				this.serverStatusBarItem = this.addStatusBarItem();
+				this.serverStatusBarItem.addClass('amnesia-server-status');
+			}
 
 			// Subscribe to server events
 			this.serverEventUnsubscribe = this.serverManager.on((event) => {
@@ -1032,6 +1048,11 @@ export default class AmnesiaPlugin extends Plugin {
 		// Add settings tab
 		this.addSettingTab(new AmnesiaSettingTab(this.app, this));
 
+		// Initialize HUD if enabled
+		if (this.settings.hud?.enabled !== false) {
+			this.initializeHUD();
+		}
+
 		// Initialize services on layout ready (or immediately if already ready)
 		const initializeServices = async () => {
 			// Configure library scanner with server settings if enabled
@@ -1091,6 +1112,24 @@ export default class AmnesiaPlugin extends Plugin {
 
 	onunload() {
 		console.log('Unloading Amnesia plugin');
+
+		// ==========================================================================
+		// Cleanup HUD
+		// ==========================================================================
+		if (this.docDoctorReadyUnsubscribe) {
+			this.docDoctorReadyUnsubscribe();
+			this.docDoctorReadyUnsubscribe = null;
+		}
+
+		if (this.standaloneHUD) {
+			this.standaloneHUD.destroy();
+			this.standaloneHUD = null;
+		}
+
+		if (this.hudProvider) {
+			this.hudProvider.destroy();
+			this.hudProvider = null;
+		}
 
 		// ==========================================================================
 		// Cleanup Server Manager
@@ -1239,6 +1278,36 @@ export default class AmnesiaPlugin extends Plugin {
 		// Update field aliases for Calibre metadata sync
 		if (this.calibreMetadataSync) {
 			this.calibreMetadataSync.setFieldAliases(this.settings.fieldAliases);
+		}
+	}
+
+	/**
+	 * Update PDF render quality settings on all active PDF readers.
+	 * Called when DPI, format, or quality settings change.
+	 */
+	updatePdfRenderSettings(): void {
+		const readerLeaves = this.app.workspace.getLeavesOfType('amnesia-reader');
+		for (const leaf of readerLeaves) {
+			const view = leaf.view as ReaderView;
+			// Access the renderer through the Svelte component context
+			const ctx = (view as any).component?.$$.ctx;
+			if (!ctx) continue;
+
+			// Find PdfRenderer in context (typically at index 3)
+			const renderer = ctx[3];
+			if (!renderer || typeof renderer.setRenderDpi !== 'function') continue;
+
+			// Apply the new settings
+			const pdfSettings = this.settings.pdf;
+			if (pdfSettings.renderDpi !== undefined) {
+				renderer.setRenderDpi(pdfSettings.renderDpi);
+			}
+			if (pdfSettings.imageFormat !== undefined) {
+				renderer.setImageFormat(pdfSettings.imageFormat);
+			}
+			if (pdfSettings.imageQuality !== undefined) {
+				renderer.setImageQuality(pdfSettings.imageQuality);
+			}
 		}
 	}
 
@@ -2250,5 +2319,117 @@ export default class AmnesiaPlugin extends Plugin {
 		this.readerVaultSync.start();
 
 		console.log('Reader ↔ Vault Sync initialized');
+	}
+
+	// ==========================================================================
+	// HUD System
+	// ==========================================================================
+
+	/**
+	 * Initialize the HUD system
+	 * Supports both standalone mode and Doc Doctor integration
+	 */
+	private initializeHUD(): void {
+		console.log('[Amnesia] Initializing HUD...');
+
+		// Create the HUD provider (takes plugin reference)
+		this.hudProvider = new AmnesiaHUDProvider(this as any);
+
+		// Check if user wants Doc Doctor integration
+		const wantsDocDoctor = this.settings.hud?.useDocDoctorIntegration !== false;
+
+		if (wantsDocDoctor) {
+			// Subscribe to Doc Doctor ready event for re-registration on reload
+			this.docDoctorReadyUnsubscribe = onDocDoctorHUDReady((registry) => {
+				console.log('[Amnesia] Doc Doctor HUD ready event received');
+				this.registerWithDocDoctor(registry);
+			});
+
+			// Try to register with Doc Doctor, with retries for timing issues
+			this.tryRegisterWithDocDoctor(0);
+		} else {
+			// User explicitly disabled Doc Doctor integration
+			this.initializeStandaloneHUD();
+		}
+	}
+
+	/**
+	 * Register with Doc Doctor's HUD registry.
+	 * Called both on initial load and when Doc Doctor reloads.
+	 */
+	private registerWithDocDoctor(registry: any): void {
+		if (!this.hudProvider) {
+			console.warn('[Amnesia] Cannot register with Doc Doctor: HUD provider not initialized');
+			return;
+		}
+
+		try {
+			registry.register(this.hudProvider);
+			console.log('[Amnesia] Registered with Doc Doctor HUD');
+
+			// If we had a standalone HUD, clean it up
+			if (this.standaloneHUD) {
+				console.log('[Amnesia] Switching from standalone to Doc Doctor HUD');
+				this.standaloneHUD.destroy();
+				this.standaloneHUD = null;
+			}
+		} catch (error) {
+			console.warn('[Amnesia] Failed to register with Doc Doctor HUD:', error);
+		}
+	}
+
+	/**
+	 * Try to register with Doc Doctor HUD registry.
+	 * Retries a few times to handle plugin load order timing issues.
+	 */
+	private tryRegisterWithDocDoctor(attempt: number): void {
+		const MAX_ATTEMPTS = 5;
+		const RETRY_DELAY_MS = 500;
+
+		// Check if Doc Doctor is available now
+		if (isDocDoctorAvailable(this.app)) {
+			const registry = getDocDoctorRegistry(this.app);
+			if (registry) {
+				this.registerWithDocDoctor(registry);
+				// Check if registration succeeded (provider won't be null)
+				if (this.hudProvider && !this.standaloneHUD) {
+					return; // Success
+				}
+			}
+		}
+
+		// Retry if we haven't exceeded max attempts
+		if (attempt < MAX_ATTEMPTS) {
+			console.log(`[Amnesia] Doc Doctor not ready, retrying in ${RETRY_DELAY_MS}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+			setTimeout(() => {
+				this.tryRegisterWithDocDoctor(attempt + 1);
+			}, RETRY_DELAY_MS);
+		} else {
+			// Max retries exceeded - fall back to standalone mode
+			console.log('[Amnesia] Doc Doctor not available, using standalone HUD');
+			this.initializeStandaloneHUD();
+		}
+	}
+
+	/**
+	 * Initialize standalone HUD when Doc Doctor is not available
+	 */
+	private initializeStandaloneHUD(): void {
+		if (!this.hudProvider) {
+			console.error('[Amnesia] HUD provider not initialized');
+			return;
+		}
+
+		this.standaloneHUD = new AmnesiaHUD(
+			this.app,
+			this as any,
+			this.hudProvider
+		);
+
+		this.standaloneHUD.initialize().then(() => {
+			console.log('[Amnesia] Standalone HUD initialized');
+		}).catch((error) => {
+			console.error('[Amnesia] Failed to initialize standalone HUD:', error);
+		});
 	}
 }

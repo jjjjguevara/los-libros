@@ -14,6 +14,7 @@ import { PdfSettings } from './pdf-settings';
 import { SyncSettings } from './sync-settings';
 import { NotesSettings } from './notes-settings';
 import { AdvancedSettings } from './advanced-settings';
+import { HudSettings } from './hud-settings';
 import { SettingsUICoordinator } from '../settings-ui/settings-ui-coordinator';
 import type { TabId } from '../settings-ui/settings-search-index';
 
@@ -30,6 +31,7 @@ const TABS: TabDefinition[] = [
     { id: 'pdf', name: 'PDF', icon: 'file-type' },
     { id: 'sync', name: 'Sync', icon: 'refresh-cw' },
     { id: 'notes', name: 'Notes', icon: 'file-text' },
+    { id: 'hud', name: 'HUD', icon: 'layout-dashboard' },
     { id: 'advanced', name: 'Advanced', icon: 'settings' },
 ];
 
@@ -161,6 +163,20 @@ export class AmnesiaSettingTab extends PluginSettingTab {
         NotesSettings({
             plugin: this.plugin,
             containerEl: notesContent,
+        });
+
+        // =========================================================================
+        // HUD TAB - Status bar, floating panel, tabs
+        // =========================================================================
+        const hudContent = this.contentWrapper.createEl('div', {
+            cls: `amnesia-tab-content ${this.activeTab === 'hud' ? 'is-active' : ''}`,
+            attr: { 'data-tab-content': 'hud' },
+        });
+        this.contentContainers.set('hud', hudContent);
+
+        HudSettings({
+            plugin: this.plugin,
+            containerEl: hudContent,
         });
 
         // =========================================================================

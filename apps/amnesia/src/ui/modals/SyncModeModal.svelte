@@ -92,6 +92,11 @@
     document.addEventListener('keydown', handleKeydown);
     return () => document.removeEventListener('keydown', handleKeydown);
   });
+
+  // Helper to set mode (avoids 'as' in template)
+  function setMode(mode: string) {
+    selectedMode = mode as SyncMode;
+  }
 </script>
 
 <div class="sync-mode-overlay">
@@ -119,7 +124,7 @@
         <button
           class="mode-option"
           class:selected={selectedMode === mode}
-          on:click={() => (selectedMode = mode as SyncMode)}
+          on:click={() => setMode(mode)}
         >
           <div class="mode-icon">
             {#if info.icon === 'fast-forward'}

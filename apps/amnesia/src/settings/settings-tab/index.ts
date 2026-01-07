@@ -11,5 +11,6 @@ export { PdfSettings } from './pdf-settings';
 export { SyncSettings } from './sync-settings';
 export { NotesSettings } from './notes-settings';
 export { AdvancedSettings } from './advanced-settings';
+export { HudSettings } from './hud-settings';
 // AppearanceSettings merged into other tabs
 export { AppearanceSettings } from './appearance-settings';

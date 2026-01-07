@@ -52,6 +52,17 @@ export class ApiError extends Error {
 }
 
 /**
+ * Calculate upload timeout based on file size
+ * Larger files need more time for upload + server parsing
+ */
+function getUploadTimeout(sizeBytes: number): number {
+  if (sizeBytes < 1_000_000) return 60_000;       // <1MB: 1 min
+  if (sizeBytes < 10_000_000) return 180_000;     // <10MB: 3 min
+  if (sizeBytes < 50_000_000) return 360_000;     // <50MB: 6 min
+  return 600_000;                                  // >50MB: 10 min
+}
+
+/**
  * Amnesia API Client
  */
 export class ApiClient {
@@ -400,10 +411,13 @@ export class ApiClient {
    */
   async uploadPdf(data: ArrayBuffer, filename?: string): Promise<ParsedPdf> {
     const finalFilename = filename || 'document.pdf';
+    const timeout = getUploadTimeout(data.byteLength);
 
     console.log('[ApiClient] Uploading PDF via XHR:', {
       size: data.byteLength,
+      sizeMB: (data.byteLength / 1024 / 1024).toFixed(2),
       filename: finalFilename,
+      timeoutMs: timeout,
     });
 
     // Use XHR instead of fetch for large file uploads
@@ -413,7 +427,7 @@ export class ApiClient {
       data,
       finalFilename,
       'application/pdf',
-      300000 // 5 minute timeout for large/complex PDFs
+      timeout // Dynamic timeout based on file size
     );
 
     // Fetch full PDF metadata
@@ -533,7 +547,9 @@ export class ApiClient {
    * Get rendered page image
    * @param pdfId PDF identifier
    * @param page Page number (1-based)
-   * @param options Render options (scale, rotation, format)
+   * @param options Render options (dpi, rotation, format, quality)
+   *
+   * Note: `scale` is deprecated and ignored. Use `dpi` for quality control.
    */
   async getPdfPage(
     pdfId: string,
@@ -541,13 +557,98 @@ export class ApiClient {
     options?: PdfRenderOptions
   ): Promise<Blob> {
     const params = new URLSearchParams();
-    if (options?.scale) params.set('scale', options.scale.toString());
+    // scale is deprecated - only use dpi for quality control
     if (options?.rotation) params.set('rotation', options.rotation.toString());
     if (options?.format) params.set('format', options.format);
+    if (options?.dpi) params.set('dpi', options.dpi.toString());
+    if (options?.quality) params.set('quality', options.quality.toString());
 
     const url = `/api/v1/pdf/${encodeURIComponent(pdfId)}/pages/${page}?${params}`;
+    console.log('[ApiClient] getPdfPage:', { pdfId, page, dpi: options?.dpi, format: options?.format, url });
     const response = await this.fetch(url, {});
-    return response.blob();
+
+    // Validate content-type before converting to blob
+    const contentType = response.headers.get('content-type');
+    const validImageTypes = ['image/png', 'image/jpeg', 'image/webp'];
+    if (!contentType || !validImageTypes.some(t => contentType.includes(t))) {
+      throw new ApiError(
+        `Server returned non-image response for page ${page}: ${contentType || 'unknown'}`,
+        response.status || 500
+      );
+    }
+
+    const blob = await response.blob();
+    console.log('[ApiClient] getPdfPage response:', { page, size: blob.size, type: blob.type });
+    return blob;
+  }
+
+  /**
+   * Get multiple PDF pages in a single batch request
+   * @param pdfId PDF identifier
+   * @param pages Array of page numbers (1-based)
+   * @param options Render options (dpi, rotation, format, quality)
+   * @returns Map of page number to image Blob
+   *
+   * Note: `scale` is deprecated and ignored. Use `dpi` for quality control.
+   */
+  async getPdfPagesBatch(
+    pdfId: string,
+    pages: number[],
+    options?: PdfRenderOptions
+  ): Promise<Map<number, Blob>> {
+    if (pages.length === 0) {
+      return new Map();
+    }
+
+    // Limit to 20 pages per batch (server enforces this)
+    const pagesStr = pages.slice(0, 20).join(',');
+
+    const params = new URLSearchParams();
+    params.set('pages', pagesStr);
+    // scale is deprecated - only use dpi for quality control
+    if (options?.rotation) params.set('rotation', options.rotation.toString());
+    if (options?.format) params.set('format', options.format);
+    if (options?.dpi) params.set('dpi', options.dpi.toString());
+    if (options?.quality) params.set('quality', options.quality.toString());
+
+    const url = `/api/v1/pdf/${encodeURIComponent(pdfId)}/pages/batch?${params}`;
+
+    interface BatchResponse {
+      pages: Array<{
+        page: number;
+        data: string; // base64 encoded
+        content_type: string;
+      }>;
+      errors: Array<{
+        page: number;
+        error: string;
+      }>;
+    }
+
+    const response = await this.request<BatchResponse>(url);
+    const result = new Map<number, Blob>();
+
+    // Convert base64 data to Blobs
+    for (const pageResult of response.pages) {
+      try {
+        const binaryStr = atob(pageResult.data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: pageResult.content_type });
+        result.set(pageResult.page, blob);
+      } catch (e) {
+        console.warn(`Failed to decode page ${pageResult.page}:`, e);
+      }
+    }
+
+    // Log any errors
+    for (const error of response.errors) {
+      console.warn(`Batch render error for page ${error.page}: ${error.error}`);
+    }
+
+    return result;
   }
 
   /**
@@ -562,6 +663,23 @@ export class ApiClient {
   }
 
   /**
+   * Get text layer for a page as SVG
+   *
+   * Returns an SVG document with transparent text elements positioned to match
+   * the PDF layout. This enables crisp text selection at any zoom level when
+   * overlaid on the raster page image.
+   *
+   * @param pdfId PDF identifier
+   * @param page Page number (1-based)
+   * @returns SVG document as string
+   */
+  async getPdfSvgTextLayer(pdfId: string, page: number): Promise<string> {
+    const url = `/api/v1/pdf/${encodeURIComponent(pdfId)}/pages/${page}/text-svg`;
+    const response = await this.fetch(url, {});
+    return response.text();
+  }
+
+  /**
    * Get page thumbnail (low-resolution)
    * @param pdfId PDF identifier
    * @param page Page number (1-based)
@@ -569,6 +687,17 @@ export class ApiClient {
   async getPdfThumbnail(pdfId: string, page: number): Promise<Blob> {
     const url = `/api/v1/pdf/${encodeURIComponent(pdfId)}/pages/${page}/thumbnail`;
     const response = await this.fetch(url, {});
+
+    // Validate content-type before converting to blob
+    const contentType = response.headers.get('content-type');
+    const validImageTypes = ['image/png', 'image/jpeg', 'image/webp'];
+    if (!contentType || !validImageTypes.some(t => contentType.includes(t))) {
+      throw new ApiError(
+        `Server returned non-image response for thumbnail page ${page}: ${contentType || 'unknown'}`,
+        response.status || 500
+      );
+    }
+
     return response.blob();
   }
 

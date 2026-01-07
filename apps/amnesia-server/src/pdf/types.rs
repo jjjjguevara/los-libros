@@ -24,6 +24,14 @@ pub struct ParsedPdf {
     pub has_text_layer: bool,
     /// Overall page orientation
     pub orientation: PageOrientation,
+    /// First page width in points (72 points = 1 inch) - for backwards compatibility
+    pub page_width: f32,
+    /// First page height in points (72 points = 1 inch) - for backwards compatibility
+    pub page_height: f32,
+    /// Dimensions for each page (index 0 = page 1)
+    /// Enables proper layout for PDFs with variable page sizes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_dimensions: Option<Vec<PageDimensions>>,
 }
 
 /// PDF metadata extracted from document info dictionary
@@ -94,6 +102,13 @@ pub struct PageRenderRequest {
     /// Rotation in degrees (0, 90, 180, 270)
     #[serde(default)]
     pub rotation: u16,
+    /// Image quality for lossy formats (1-100). Default: 85
+    #[serde(default = "default_quality")]
+    pub quality: u8,
+}
+
+fn default_quality() -> u8 {
+    85
 }
 
 fn default_scale() -> f32 {

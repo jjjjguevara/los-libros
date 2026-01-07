@@ -60,10 +60,6 @@ export interface PdfRendererConfig extends Partial<DocumentRendererConfig> {
 
   /** Render DPI for server-side rendering. Higher = sharper but slower. Default: 150 */
   renderDpi?: number;
-  /** Enable hardware/GPU acceleration for rendering. Default: true */
-  enableHardwareAcceleration?: boolean;
-  /** Use canvas 2D hardware acceleration hints. Default: true */
-  enableCanvasAcceleration?: boolean;
   /** Number of pages to preload ahead of current page. Default: 2 */
   pagePreloadCount?: number;
   /** Enable rendered page caching. Default: true */
@@ -74,14 +70,27 @@ export interface PdfRendererConfig extends Partial<DocumentRendererConfig> {
   imageFormat?: 'png' | 'jpeg' | 'webp';
   /** Image quality for lossy formats (jpeg/webp). 1-100. Default: 85 */
   imageQuality?: number;
-  /** Enable progressive rendering (show low-res first). Default: true */
-  enableProgressiveRendering?: boolean;
-  /** Low-res preview scale multiplier. Default: 0.25 */
-  previewScale?: number;
   /** Enable text layer anti-aliasing. Default: true */
   enableTextAntialiasing?: boolean;
   /** Enable image smoothing/interpolation. Default: true */
   enableImageSmoothing?: boolean;
+  /** Enable DOM element pooling for page recycling. Default: true */
+  enableDomPooling?: boolean;
+  /** Use IntersectionObserver for visibility detection. Default: true */
+  useIntersectionObserver?: boolean;
+  /** Text layer rendering mode. Default: 'full' */
+  textLayerMode?: 'full' | 'virtualized' | 'disabled';
+
+  // ==========================================================================
+  // Virtualization Performance Settings
+  // ==========================================================================
+
+  /** Render debounce delay in milliseconds. Default: 50 */
+  renderDebounceMs?: number;
+  /** Minimum creation buffer in pixels. Default: 300 */
+  minCreationBuffer?: number;
+  /** Minimum destruction buffer in pixels. Default: 600 */
+  minDestructionBuffer?: number;
 }
 
 export interface PdfContentProvider {
@@ -93,6 +102,8 @@ export interface PdfContentProvider {
   getPdfPage(id: string, page: number, options?: PdfRenderOptions): Promise<Blob>;
   /** Get text layer for a page */
   getPdfTextLayer(id: string, page: number): Promise<TextLayerData>;
+  /** Get SVG text layer for crisp text at any zoom level */
+  getPdfSvgTextLayer?(id: string, page: number): Promise<string>;
   /** Search PDF content */
   searchPdf(id: string, query: string, limit?: number): Promise<Array<{
     page: number;
@@ -161,6 +172,14 @@ export class PdfRenderer implements DocumentRenderer {
     previewScale?: number;
     enableTextAntialiasing?: boolean;
     enableImageSmoothing?: boolean;
+    // Advanced performance settings
+    enableDomPooling?: boolean;
+    useIntersectionObserver?: boolean;
+    textLayerMode?: 'full' | 'virtualized' | 'disabled';
+    // Virtualization performance settings
+    renderDebounceMs?: number;
+    minCreationBuffer?: number;
+    minDestructionBuffer?: number;
   };
   private isInitialLoad = true; // Track if this is the first load (for loading indicator)
 
@@ -198,17 +217,17 @@ export class PdfRenderer implements DocumentRenderer {
       scrollDirection: pdfConfig?.scrollDirection ?? 'vertical',
       // Optimization settings
       renderDpi: pdfConfig?.renderDpi ?? 150,
-      enableHardwareAcceleration: pdfConfig?.enableHardwareAcceleration ?? true,
-      enableCanvasAcceleration: pdfConfig?.enableCanvasAcceleration ?? true,
-      pagePreloadCount: pdfConfig?.pagePreloadCount ?? 0, // Disabled: server crashes with concurrent renders
+      pagePreloadCount: pdfConfig?.pagePreloadCount ?? 2,
       enablePageCache: pdfConfig?.enablePageCache ?? true,
       pageCacheSize: pdfConfig?.pageCacheSize ?? 10,
       imageFormat: pdfConfig?.imageFormat ?? 'png',
       imageQuality: pdfConfig?.imageQuality ?? 85,
-      enableProgressiveRendering: pdfConfig?.enableProgressiveRendering ?? false, // Disabled: doubles request load
-      previewScale: pdfConfig?.previewScale ?? 0.25,
       enableTextAntialiasing: pdfConfig?.enableTextAntialiasing ?? true,
       enableImageSmoothing: pdfConfig?.enableImageSmoothing ?? true,
+      // Virtualization performance settings (optimized defaults)
+      renderDebounceMs: pdfConfig?.renderDebounceMs ?? 50,
+      minCreationBuffer: pdfConfig?.minCreationBuffer ?? 300,
+      minDestructionBuffer: pdfConfig?.minDestructionBuffer ?? 600,
     };
 
     // Create page container
@@ -270,15 +289,31 @@ export class PdfRenderer implements DocumentRenderer {
         userZoom: undefined,
         gap: 20,
         padding: this.config.margin ?? 20,
+        // Use actual PDF dimensions for correct aspect ratio
+        pageWidth: this.document?.pageWidth ?? 612,
+        pageHeight: this.document?.pageHeight ?? 792,
         pixelRatio: window.devicePixelRatio ?? 1,
         enableTextAntialiasing: this.config.enableTextAntialiasing,
         enableImageSmoothing: this.config.enableImageSmoothing,
+        renderDpi: this.config.renderDpi,
+        imageFormat: this.config.imageFormat,
+        imageQuality: this.config.imageQuality,
+        enableDomPooling: this.config.enableDomPooling,
+        useIntersectionObserver: this.config.useIntersectionObserver,
+        textLayerMode: this.config.textLayerMode,
       }
     );
 
     // Wire up callbacks
     this.multiPageContainer.setOnPageChange((page) => {
       this.currentPage = page;
+
+      // Notify provider for adaptive prefetching
+      // HybridPdfProvider implements notifyPageChange for AdaptivePrefetcher
+      if (this.provider && 'notifyPageChange' in this.provider) {
+        (this.provider as any).notifyPageChange(page);
+      }
+
       this.emitLocation();
     });
 
@@ -330,21 +365,41 @@ export class PdfRenderer implements DocumentRenderer {
       },
     };
 
+    // Create SVG text layer fetcher if the provider supports it
+    const svgTextLayerFetcher = this.provider.getPdfSvgTextLayer
+      ? async (pdfId: string, page: number) => {
+          return this.provider.getPdfSvgTextLayer!(pdfId, page);
+        }
+      : undefined;
+
     this.infiniteCanvas = new PdfInfiniteCanvas(
       this.pageContainer,
       pageDataProvider,
       {
         gap: 20,
         padding: this.config.margin ?? 20,
-        minZoom: 0.1,
-        maxZoom: 5,
-        pageWidth: 612,
-        pageHeight: 792,
+        minZoom: 0.05,  // Extended for overview mode
+        maxZoom: 16,    // Extended for character-level inspection (SVG text enables this)
+        // Use actual PDF dimensions for correct aspect ratio
+        pageWidth: this.document?.pageWidth ?? 612,
+        pageHeight: this.document?.pageHeight ?? 792,
         renderScale: this.config.scale ?? 1.5,
         pixelRatio: window.devicePixelRatio ?? 1,
         readingMode: 'device',
         layoutMode: this.config.scrollDirection === 'horizontal' ? 'horizontal' : 'vertical',
         pagesPerRow: 1,
+        // Render quality settings - wired from plugin settings
+        renderDpi: this.config.renderDpi ?? 150,
+        imageFormat: this.config.imageFormat ?? 'png',
+        imageQuality: this.config.imageQuality ?? 85,
+        // SVG text layer for crisp text at any zoom
+        pdfId: this.document?.id,
+        svgTextLayerFetcher,
+        textLayerMode: svgTextLayerFetcher ? 'svg' : 'full',
+        // Virtualization performance settings - wired from plugin settings (optimized defaults)
+        renderDebounceMs: this.config.renderDebounceMs ?? 50,
+        minCreationBuffer: this.config.minCreationBuffer ?? 300,
+        minDestructionBuffer: this.config.minDestructionBuffer ?? 600,
       }
     );
 
@@ -502,19 +557,37 @@ export class PdfRenderer implements DocumentRenderer {
 
       // Initialize the appropriate container with page count
       if (this.infiniteCanvas) {
+        // Set the PDF ID now that the document is loaded (required for SVG text layer)
+        this.infiniteCanvas.setPdfId(this.document.id);
         this.infiniteCanvas.initialize(this.document.pageCount);
+        // Set actual page dimensions for correct aspect ratio (AFTER initialize so pageCount > 0)
+        // Pass per-page dimensions if available for variable page sizes
+        if (this.document.pageWidth && this.document.pageHeight) {
+          this.infiniteCanvas.setPageDimensions(
+            this.document.pageWidth,
+            this.document.pageHeight,
+            this.document.pageDimensions
+          );
+        }
         this.infiniteCanvas.goToPage(1);
       } else if (this.multiPageContainer) {
         this.multiPageContainer.initialize(this.document.pageCount);
+        // Set actual page dimensions for correct aspect ratio (AFTER initialize so pageCount > 0)
+        if (this.document.pageWidth && this.document.pageHeight) {
+          this.multiPageContainer.setPageDimensions(this.document.pageWidth, this.document.pageHeight);
+        }
         await this.multiPageContainer.goToPage(1);
       }
 
       this.emit('loading', false);
       this.emitLocation();
     } catch (error) {
+      // Always emit loading=false first to reset UI state
       this.emit('loading', false);
+      // Emit the error for UI to display
       this.emit('error', error as Error);
-      throw error;
+      // DON'T re-throw - let the UI handle the error gracefully
+      console.error('[PdfRenderer] Failed to load PDF:', error);
     }
   }
 
@@ -527,19 +600,38 @@ export class PdfRenderer implements DocumentRenderer {
 
       // Initialize the appropriate container with page count
       if (this.infiniteCanvas) {
+        // Set the PDF ID now that the document is loaded (required for SVG text layer)
+        this.infiniteCanvas.setPdfId(this.document.id);
         this.infiniteCanvas.initialize(this.document.pageCount);
+        // Set actual page dimensions for correct aspect ratio (AFTER initialize so pageCount > 0)
+        // Pass per-page dimensions if available for variable page sizes
+        if (this.document.pageWidth && this.document.pageHeight) {
+          this.infiniteCanvas.setPageDimensions(
+            this.document.pageWidth,
+            this.document.pageHeight,
+            this.document.pageDimensions
+          );
+        }
         this.infiniteCanvas.goToPage(1);
       } else if (this.multiPageContainer) {
         this.multiPageContainer.initialize(this.document.pageCount);
+        // Set actual page dimensions for correct aspect ratio (AFTER initialize so pageCount > 0)
+        if (this.document.pageWidth && this.document.pageHeight) {
+          this.multiPageContainer.setPageDimensions(this.document.pageWidth, this.document.pageHeight);
+        }
         await this.multiPageContainer.goToPage(1);
       }
 
       this.emit('loading', false);
       this.emitLocation();
     } catch (error) {
+      // Always emit loading=false first to reset UI state
       this.emit('loading', false);
+      // Emit the error for UI to display
       this.emit('error', error as Error);
-      throw error;
+      // DON'T re-throw - let the UI handle the error gracefully
+      // Re-throwing causes the loading indicator to get stuck
+      console.error('[PdfRenderer] Failed to load PDF:', error);
     }
   }
 
@@ -1691,6 +1783,12 @@ export class PdfRenderer implements DocumentRenderer {
     if (this.config.renderDpi === dpi) return;
     this.clearCache();
     this.config.renderDpi = dpi;
+
+    // Update infinite canvas (handles its own cache invalidation)
+    if (this.infiniteCanvas) {
+      this.infiniteCanvas.setRenderQuality({ dpi });
+    }
+
     if (this.document && this.multiPageContainer) {
       this.multiPageContainer.handleResize();
     }
@@ -1710,6 +1808,12 @@ export class PdfRenderer implements DocumentRenderer {
     if (this.config.imageFormat === format) return;
     this.clearCache();
     this.config.imageFormat = format;
+
+    // Update infinite canvas (handles its own cache invalidation)
+    if (this.infiniteCanvas) {
+      this.infiniteCanvas.setRenderQuality({ format });
+    }
+
     if (this.document && this.multiPageContainer) {
       this.multiPageContainer.handleResize();
     }
@@ -1720,6 +1824,32 @@ export class PdfRenderer implements DocumentRenderer {
    */
   getImageFormat(): 'png' | 'jpeg' | 'webp' {
     return this.config.imageFormat ?? 'png';
+  }
+
+  /**
+   * Set image quality for lossy formats (clears cache and re-renders)
+   */
+  setImageQuality(quality: number): void {
+    const clampedQuality = Math.max(1, Math.min(100, quality));
+    if (this.config.imageQuality === clampedQuality) return;
+    this.clearCache();
+    this.config.imageQuality = clampedQuality;
+
+    // Update infinite canvas (handles its own cache invalidation)
+    if (this.infiniteCanvas) {
+      this.infiniteCanvas.setRenderQuality({ quality: clampedQuality });
+    }
+
+    if (this.document && this.multiPageContainer) {
+      this.multiPageContainer.handleResize();
+    }
+  }
+
+  /**
+   * Get current image quality
+   */
+  getImageQuality(): number {
+    return this.config.imageQuality ?? 85;
   }
 
   /**

@@ -8,8 +8,11 @@
 
 import type { PdfTextLayer as TextLayerData } from '../types';
 import type { HighlightColor } from '../types';
+import { VirtualizedTextLayer } from './virtualized-text-layer';
+import { PdfSvgTextLayer, type SvgTextLayerFetcher } from './pdf-svg-text-layer';
 
 export type ReadingMode = 'device' | 'light' | 'sepia' | 'dark' | 'night';
+export type TextLayerMode = 'full' | 'virtualized' | 'svg' | 'disabled';
 
 export interface PageRenderData {
   imageBlob: Blob;
@@ -25,6 +28,12 @@ export interface PdfPageElementConfig {
   enableTextAntialiasing?: boolean;
   /** Enable image smoothing */
   enableImageSmoothing?: boolean;
+  /** Text layer rendering mode. Default: 'svg' for crisp text at any zoom */
+  textLayerMode?: TextLayerMode;
+  /** PDF identifier (required for SVG text layer mode) */
+  pdfId?: string;
+  /** Function to fetch SVG text layer (required for SVG text layer mode) */
+  svgTextLayerFetcher?: SvgTextLayerFetcher;
 }
 
 export interface PageHighlight {
@@ -44,11 +53,17 @@ export class PdfPageElement {
   private textLayerEl: HTMLDivElement;
   private annotationLayerEl: HTMLDivElement;
 
-  private config: Required<PdfPageElementConfig>;
+  private config: Omit<Required<PdfPageElementConfig>, 'pdfId' | 'svgTextLayerFetcher'> & Pick<PdfPageElementConfig, 'pdfId' | 'svgTextLayerFetcher'>;
   private currentWidth = 0;
   private currentHeight = 0;
   private isRendered = false;
   private currentReadingMode: ReadingMode = 'light';
+
+  // Virtualized text layer for better performance
+  private virtualizedTextLayer: VirtualizedTextLayer | null = null;
+
+  // SVG text layer for crisp text at any zoom level
+  private svgTextLayer: PdfSvgTextLayer | null = null;
 
   // Callbacks
   private onSelectionCallback?: (page: number, text: string, rects: DOMRect[]) => void;
@@ -60,6 +75,9 @@ export class PdfPageElement {
       pixelRatio: config.pixelRatio ?? window.devicePixelRatio ?? 1,
       enableTextAntialiasing: config.enableTextAntialiasing ?? true,
       enableImageSmoothing: config.enableImageSmoothing ?? true,
+      textLayerMode: config.textLayerMode ?? 'svg', // Default to SVG for crisp text
+      pdfId: config.pdfId,
+      svgTextLayerFetcher: config.svgTextLayerFetcher,
     };
 
     // Create container
@@ -72,6 +90,7 @@ export class PdfPageElement {
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
       overflow: hidden;
       flex-shrink: 0;
+      contain: layout paint;
     `;
 
     // Create canvas
@@ -90,7 +109,7 @@ export class PdfPageElement {
     }
     this.ctx = ctx;
 
-    // Create text layer
+    // Create text layer - invisible but selectable for text selection
     this.textLayerEl = document.createElement('div');
     this.textLayerEl.className = 'pdf-page-text-layer';
     this.textLayerEl.style.cssText = `
@@ -100,15 +119,16 @@ export class PdfPageElement {
       right: 0;
       bottom: 0;
       overflow: hidden;
-      opacity: 0.2;
+      opacity: 0.01;
       line-height: 1;
       pointer-events: auto;
       user-select: text;
       -webkit-user-select: text;
+      z-index: 1;
     `;
     this.container.appendChild(this.textLayerEl);
 
-    // Create annotation layer
+    // Create annotation layer - above text layer for highlight visibility
     this.annotationLayerEl = document.createElement('div');
     this.annotationLayerEl.className = 'pdf-page-annotation-layer';
     this.annotationLayerEl.style.cssText = `
@@ -118,8 +138,27 @@ export class PdfPageElement {
       right: 0;
       bottom: 0;
       pointer-events: none;
+      z-index: 2;
     `;
     this.container.appendChild(this.annotationLayerEl);
+
+    // Create VirtualizedTextLayer for 'virtualized' mode
+    // This provides DOM virtualization for pages with many text items
+    if (this.config.textLayerMode === 'virtualized') {
+      this.virtualizedTextLayer = new VirtualizedTextLayer(this.container, {
+        mode: 'virtualized',
+        bufferPx: 100,
+        virtualizationThreshold: 50,
+      });
+    }
+
+    // Create SVG text layer for 'svg' mode
+    // SVG provides crisp text at any zoom level (up to 16x)
+    if (this.config.textLayerMode === 'svg') {
+      this.svgTextLayer = new PdfSvgTextLayer(this.container);
+      // Disable HTML text layer pointer events - SVG layer handles text selection
+      this.textLayerEl.style.pointerEvents = 'none';
+    }
 
     // Setup selection listener
     this.setupSelectionListener();
@@ -155,6 +194,9 @@ export class PdfPageElement {
 
     this.container.style.width = `${width}px`;
     this.container.style.height = `${height}px`;
+
+    // Update SVG text layer dimensions (SVG scales with viewBox)
+    this.svgTextLayer?.setDimensions(width, height);
   }
 
   /**
@@ -164,9 +206,44 @@ export class PdfPageElement {
     // Render canvas
     await this.renderCanvas(data.imageBlob);
 
-    // Render text layer if available
-    if (data.textLayerData) {
-      this.renderTextLayer(data.textLayerData, scale);
+    // Render text layer if available and not disabled
+    if (this.config.textLayerMode !== 'disabled') {
+      let svgRenderSucceeded = false;
+
+      if (this.svgTextLayer && this.config.pdfId && this.config.svgTextLayerFetcher) {
+        // Try SVG text layer for crisp text at any zoom level
+        // Falls back to HTML text layer if server endpoint not available
+        try {
+          await this.svgTextLayer.render(
+            this.config.pdfId,
+            this.config.pageNumber,
+            this.currentWidth,
+            this.currentHeight,
+            this.config.svgTextLayerFetcher
+          );
+          svgRenderSucceeded = true;
+        } catch (error) {
+          // SVG endpoint not available - fall back to HTML text layer
+          console.debug('[PdfPageElement] SVG text layer unavailable, using HTML fallback');
+        }
+      }
+
+      // Fall back to other text layer modes if SVG failed or not configured
+      if (!svgRenderSucceeded) {
+        if (this.virtualizedTextLayer && data.textLayerData) {
+          // Use VirtualizedTextLayer for 'virtualized' mode
+          this.virtualizedTextLayer.render(
+            data.textLayerData,
+            scale,
+            0, // rotation - handled at container level
+            this.currentWidth,
+            this.currentHeight
+          );
+        } else if (data.textLayerData) {
+          // Use inline text layer for 'full' mode
+          this.renderTextLayer(data.textLayerData, scale);
+        }
+      }
     }
 
     this.isRendered = true;
@@ -174,32 +251,77 @@ export class PdfPageElement {
 
   /**
    * Render canvas from image blob
+   *
+   * Uses the image's native dimensions to preserve full DPI quality.
+   * The server renders at the requested DPI (e.g., 300 DPI = 4.17× scale).
+   * By using native dimensions, we avoid downscaling and preserve crispness.
+   * CSS scales the canvas to display size for proper layout.
    */
   private async renderCanvas(imageBlob: Blob): Promise<void> {
+    // Diagnostic: Log blob details before creating URL
+    console.log('[PdfPageElement] renderCanvas called:', {
+      page: this.config.pageNumber,
+      blobType: imageBlob.type,
+      blobSize: imageBlob.size,
+      isValidType: ['image/png', 'image/jpeg', 'image/webp'].includes(imageBlob.type)
+    });
+
+    // Validate blob before attempting to render
+    if (!imageBlob || imageBlob.size === 0) {
+      throw new Error(`Invalid blob for page ${this.config.pageNumber}: empty or null`);
+    }
+
     const imageUrl = URL.createObjectURL(imageBlob);
     const image = new Image();
 
     return new Promise((resolve, reject) => {
-      image.onload = () => {
+      image.onload = async () => {
         try {
-          const pixelRatio = this.config.pixelRatio;
+          console.log('[PdfPageElement] Image loaded:', {
+            page: this.config.pageNumber,
+            naturalWidth: image.naturalWidth,
+            naturalHeight: image.naturalHeight
+          });
 
-          // Set canvas size with pixel ratio
-          this.canvas.width = Math.floor(this.currentWidth * pixelRatio);
-          this.canvas.height = Math.floor(this.currentHeight * pixelRatio);
-          this.canvas.style.width = `${this.currentWidth}px`;
-          this.canvas.style.height = `${this.currentHeight}px`;
+          // NOTE: image.decode() was causing DOMException on some images
+          // even after onload fires successfully. This appears to be a
+          // Chromium/Electron issue with large images or memory pressure.
+          // Skipping decode() - the drawImage call will decode synchronously
+          // on the main thread, which is slightly less performant but reliable.
+          // if (image.decode) {
+          //   await image.decode();
+          // }
 
-          // Scale context for HiDPI
-          this.ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+          // Use the IMAGE's native dimensions to preserve DPI quality
+          // This ensures we don't downscale the server's high-DPI output
+          this.canvas.width = image.naturalWidth;
+          this.canvas.height = image.naturalHeight;
 
-          // Apply smoothing
+          // CRITICAL: Set canvas CSS size to MATCH native dimensions to prevent downsampling.
+          // Previously we set CSS to currentWidth/currentHeight which caused browser to
+          // downsample the high-DPI image (e.g., 2819px → 400px), losing quality.
+          // Instead, we set CSS to native size and use transform: scale() to fit the container.
+          // This preserves full resolution - the browser scales a crisp image, not a blurry one.
+          const scaleX = this.currentWidth / image.naturalWidth;
+          const scaleY = this.currentHeight / image.naturalHeight;
+          const fitScale = Math.min(scaleX, scaleY);
+
+          // Canvas displays at native resolution, transformed to fit layout
+          this.canvas.style.width = `${image.naturalWidth}px`;
+          this.canvas.style.height = `${image.naturalHeight}px`;
+          this.canvas.style.transformOrigin = '0 0';
+          this.canvas.style.transform = `scale(${fitScale})`;
+
+          // Reset context transform - draw at native resolution
+          this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+          // Apply smoothing for image quality
           this.ctx.imageSmoothingEnabled = this.config.enableImageSmoothing;
           this.ctx.imageSmoothingQuality = 'high';
 
-          // Clear and draw
-          this.ctx.clearRect(0, 0, this.currentWidth, this.currentHeight);
-          this.ctx.drawImage(image, 0, 0, this.currentWidth, this.currentHeight);
+          // Clear and draw at native resolution (no JS-side scaling)
+          this.ctx.clearRect(0, 0, image.naturalWidth, image.naturalHeight);
+          this.ctx.drawImage(image, 0, 0);
 
           URL.revokeObjectURL(imageUrl);
           resolve();
@@ -220,11 +342,20 @@ export class PdfPageElement {
 
   /**
    * Render text layer for selection
+   * Uses DocumentFragment for batched DOM insertion (better performance)
    */
   private renderTextLayer(data: TextLayerData, scale: number): void {
     this.textLayerEl.innerHTML = '';
 
     if (!data.items || data.items.length === 0) return;
+
+    // Use actual page dimensions from server (not hardcoded 612x792)
+    const pageWidth = data.width || 612;   // Fallback for older data
+    const pageHeight = data.height || 792;
+
+    // Use DocumentFragment for batched DOM insertion
+    // This prevents multiple reflows and repaints
+    const fragment = document.createDocumentFragment();
 
     for (const item of data.items) {
       if (!item.text || item.text.trim() === '') continue;
@@ -233,10 +364,10 @@ export class PdfPageElement {
       span.textContent = item.text;
 
       // Position based on text item coordinates
-      // Scale from PDF coordinates to display coordinates
-      const left = (item.x / 612) * this.currentWidth;
-      const top = (item.y / 792) * this.currentHeight;
-      const fontSize = Math.max(8, (item.height / 792) * this.currentHeight);
+      // Scale from PDF coordinates to display coordinates using actual page dimensions
+      const left = (item.x / pageWidth) * this.currentWidth;
+      const top = (item.y / pageHeight) * this.currentHeight;
+      const fontSize = Math.max(8, (item.height / pageHeight) * this.currentHeight);
 
       span.style.cssText = `
         position: absolute;
@@ -249,8 +380,11 @@ export class PdfPageElement {
         color: transparent;
       `;
 
-      this.textLayerEl.appendChild(span);
+      fragment.appendChild(span);
     }
+
+    // Single DOM insertion for all spans
+    this.textLayerEl.appendChild(fragment);
   }
 
   /**
@@ -421,18 +555,87 @@ export class PdfPageElement {
     }
   }
 
+  // Loading indicator element
+  private loadingIndicator: HTMLDivElement | null = null;
+
   /**
    * Show loading state
+   *
+   * Uses a subtle spinner in corner instead of opacity change to prevent
+   * blank pages during fast scroll/zoom. If content is already rendered,
+   * the existing canvas stays fully visible while loading new content.
    */
   showLoading(): void {
-    this.container.style.opacity = '0.7';
+    // If content is already rendered, don't dim - keep showing existing content
+    // while loading new version in background
+    if (this.isRendered) {
+      // Show subtle loading indicator in corner for re-renders (e.g., zoom quality upgrade)
+      this.showLoadingIndicator();
+      return;
+    }
+
+    // For unrendered pages, show a clean placeholder with subtle pulse
+    // Never use opacity - it creates jarring blank appearance
+    if (!this.loadingIndicator) {
+      this.showLoadingIndicator();
+    }
   }
 
   /**
    * Hide loading state
    */
   hideLoading(): void {
+    this.hideLoadingIndicator();
+    // Ensure full opacity (in case of edge cases)
     this.container.style.opacity = '1';
+  }
+
+  /**
+   * Show subtle loading indicator in corner
+   * This provides visual feedback without hiding content
+   */
+  private showLoadingIndicator(): void {
+    if (this.loadingIndicator) return;
+
+    this.loadingIndicator = document.createElement('div');
+    this.loadingIndicator.className = 'pdf-page-loading-indicator';
+    this.loadingIndicator.style.cssText = `
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(128, 128, 128, 0.3);
+      border-top-color: rgba(128, 128, 128, 0.8);
+      border-radius: 50%;
+      animation: pdf-page-spin 0.8s linear infinite;
+      z-index: 10;
+      pointer-events: none;
+    `;
+
+    // Inject keyframes if not already present
+    if (!document.getElementById('pdf-page-loading-keyframes')) {
+      const style = document.createElement('style');
+      style.id = 'pdf-page-loading-keyframes';
+      style.textContent = `
+        @keyframes pdf-page-spin {
+          to { transform: rotate(360deg); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    this.container.appendChild(this.loadingIndicator);
+  }
+
+  /**
+   * Hide loading indicator
+   */
+  private hideLoadingIndicator(): void {
+    if (this.loadingIndicator) {
+      this.loadingIndicator.remove();
+      this.loadingIndicator = null;
+    }
   }
 
   /**
@@ -442,7 +645,40 @@ export class PdfPageElement {
     this.ctx.clearRect(0, 0, this.currentWidth, this.currentHeight);
     this.textLayerEl.innerHTML = '';
     this.annotationLayerEl.innerHTML = '';
+    // Clear VirtualizedTextLayer if present
+    this.virtualizedTextLayer?.clear();
+    // Clear SVG text layer if present
+    this.svgTextLayer?.clear();
+    // Hide loading indicator
+    this.hideLoadingIndicator();
     this.isRendered = false;
+  }
+
+  /**
+   * Reset element for reuse with a new page number
+   * Used by PageElementPool for element recycling
+   */
+  reset(pageNumber: number): void {
+    this.clear();
+    this.config.pageNumber = pageNumber;
+    this.container.dataset.page = String(pageNumber);
+
+    // Reset opacity and loading state
+    this.container.style.opacity = '1';
+    this.hideLoadingIndicator();
+
+    // Clear callbacks (new page, new callbacks)
+    this.onSelectionCallback = undefined;
+    this.onHighlightClickCallback = undefined;
+  }
+
+  /**
+   * Detach from DOM without destroying (for pool release)
+   */
+  detach(): void {
+    if (this.container.parentElement) {
+      this.container.remove();
+    }
   }
 
   /**
@@ -450,6 +686,18 @@ export class PdfPageElement {
    */
   destroy(): void {
     this.clear();
+    // Destroy VirtualizedTextLayer if present
+    if (this.virtualizedTextLayer) {
+      this.virtualizedTextLayer.destroy();
+      this.virtualizedTextLayer = null;
+    }
+    // Destroy SVG text layer if present
+    if (this.svgTextLayer) {
+      this.svgTextLayer.destroy();
+      this.svgTextLayer = null;
+    }
+    // Clean up loading indicator
+    this.hideLoadingIndicator();
     this.container.remove();
   }
 }

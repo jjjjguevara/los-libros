@@ -190,6 +190,8 @@ export function PdfSettings({ plugin, containerEl }: PdfSettingsProps): void {
             .onChange(async (value) => {
                 settings.pdf.renderDpi = parseInt(value) as 72 | 96 | 150 | 200 | 300;
                 await plugin.saveSettings();
+                // Apply to active readers immediately
+                plugin.updatePdfRenderSettings();
             }));
 
     new Setting(perfSection)
@@ -203,6 +205,8 @@ export function PdfSettings({ plugin, containerEl }: PdfSettingsProps): void {
             .onChange(async (value) => {
                 settings.pdf.imageFormat = value as 'png' | 'jpeg' | 'webp';
                 await plugin.saveSettings();
+                // Apply to active readers immediately
+                plugin.updatePdfRenderSettings();
             }));
 
     new Setting(perfSection)
@@ -215,6 +219,8 @@ export function PdfSettings({ plugin, containerEl }: PdfSettingsProps): void {
             .onChange(async (value) => {
                 settings.pdf.imageQuality = value;
                 await plugin.saveSettings();
+                // Apply to active readers immediately
+                plugin.updatePdfRenderSettings();
             }))
         .addExtraButton(button => button
             .setIcon('reset')
@@ -247,8 +253,29 @@ export function PdfSettings({ plugin, containerEl }: PdfSettingsProps): void {
             }));
 
     new Setting(cacheSection)
-        .setName('Cache Size')
-        .setDesc('Maximum pages to keep in memory cache')
+        .setName('Memory Budget')
+        .setDesc('Maximum memory for page cache (MB). Higher = more pages cached.')
+        .addSlider(slider => slider
+            .setLimits(50, 500, 50)
+            .setValue(settings.pdf.memoryBudgetMB)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.pdf.memoryBudgetMB = value;
+                await plugin.saveSettings();
+            }))
+        .addExtraButton(button => button
+            .setIcon('reset')
+            .setTooltip('Reset to 200 MB')
+            .onClick(async () => {
+                settings.pdf.memoryBudgetMB = 200;
+                await plugin.saveSettings();
+                containerEl.empty();
+                PdfSettings({ plugin, containerEl });
+            }));
+
+    new Setting(cacheSection)
+        .setName('Cache Size (Legacy)')
+        .setDesc('Maximum pages to keep in memory cache (used for entry-based caching)')
         .addSlider(slider => slider
             .setLimits(5, 50, 5)
             .setValue(settings.pdf.pageCacheSize)
@@ -304,7 +331,7 @@ export function PdfSettings({ plugin, containerEl }: PdfSettingsProps): void {
                 await plugin.saveSettings();
             }));
 
-    new Setting(hwSection)
+    new Setting(qualitySection)
         .setName('Text Anti-aliasing')
         .setDesc('Smooth text edges for better readability')
         .addToggle(toggle => toggle
@@ -312,5 +339,172 @@ export function PdfSettings({ plugin, containerEl }: PdfSettingsProps): void {
             .onChange(async (value) => {
                 settings.pdf.enableTextAntialiasing = value;
                 await plugin.saveSettings();
+            }));
+
+    // ==========================================================================
+    // BATCH REQUESTS
+    // ==========================================================================
+
+    const batchSection = createSection(containerEl, 'zap', 'Batch Requests');
+
+    createExplainerBox(batchSection,
+        'Batch requests combine multiple page requests into a single network call, ' +
+        'reducing latency when scrolling through documents.'
+    );
+
+    new Setting(batchSection)
+        .setName('Enable Batch Requests')
+        .setDesc('Request multiple pages at once for faster loading')
+        .addToggle(toggle => toggle
+            .setValue(settings.pdf.enableBatchRequests)
+            .onChange(async (value) => {
+                settings.pdf.enableBatchRequests = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(batchSection)
+        .setName('Batch Size')
+        .setDesc('Number of pages per batch request (1-20)')
+        .addSlider(slider => slider
+            .setLimits(1, 20, 1)
+            .setValue(settings.pdf.batchSize)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.pdf.batchSize = value;
+                await plugin.saveSettings();
+            }));
+
+    // ==========================================================================
+    // ADVANCED PERFORMANCE
+    // ==========================================================================
+
+    const advancedSection = createSection(containerEl, 'settings-2', 'Advanced Performance');
+
+    createExplainerBox(advancedSection,
+        'Advanced settings for optimizing PDF rendering performance. ' +
+        'These settings control text layer virtualization, prefetching strategy, and DOM recycling.'
+    );
+
+    new Setting(advancedSection)
+        .setName('Text Layer Mode')
+        .setDesc('How text layer is rendered for selection')
+        .addDropdown(dropdown => dropdown
+            .addOption('full', 'Full (All text spans)')
+            .addOption('virtualized', 'Virtualized (Only visible)')
+            .addOption('disabled', 'Disabled (No text selection)')
+            .setValue(settings.pdf.textLayerMode)
+            .onChange(async (value) => {
+                settings.pdf.textLayerMode = value as 'full' | 'virtualized' | 'disabled';
+                await plugin.saveSettings();
+            }));
+
+    new Setting(advancedSection)
+        .setName('Prefetch Strategy')
+        .setDesc('How pages are prefetched during reading')
+        .addDropdown(dropdown => dropdown
+            .addOption('none', 'None (No prefetching)')
+            .addOption('fixed', 'Fixed (Same pages ahead/behind)')
+            .addOption('adaptive', 'Adaptive (Based on scroll behavior)')
+            .setValue(settings.pdf.prefetchStrategy)
+            .onChange(async (value) => {
+                settings.pdf.prefetchStrategy = value as 'none' | 'fixed' | 'adaptive';
+                await plugin.saveSettings();
+            }));
+
+    new Setting(advancedSection)
+        .setName('DOM Element Pooling')
+        .setDesc('Recycle page DOM elements for better scroll performance')
+        .addToggle(toggle => toggle
+            .setValue(settings.pdf.enableDomPooling)
+            .onChange(async (value) => {
+                settings.pdf.enableDomPooling = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(advancedSection)
+        .setName('Use IntersectionObserver')
+        .setDesc('Use browser-native visibility detection (recommended)')
+        .addToggle(toggle => toggle
+            .setValue(settings.pdf.useIntersectionObserver)
+            .onChange(async (value) => {
+                settings.pdf.useIntersectionObserver = value;
+                await plugin.saveSettings();
+            }));
+
+    // ==========================================================================
+    // VIRTUALIZATION PERFORMANCE
+    // ==========================================================================
+
+    const virtualizationSection = createSection(containerEl, 'activity', 'Virtualization Performance');
+
+    createExplainerBox(virtualizationSection,
+        'Controls how pages are created and destroyed during scrolling. ' +
+        'Tune these settings to prevent blank pages during rapid scrolling or at high zoom levels.'
+    );
+
+    new Setting(virtualizationSection)
+        .setName('Render Debounce (ms)')
+        .setDesc('Delay before rendering pages during scroll. Lower = more responsive, higher = less server load.')
+        .addSlider(slider => slider
+            .setLimits(50, 500, 25)
+            .setValue(settings.pdf.renderDebounceMs)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.pdf.renderDebounceMs = value;
+                await plugin.saveSettings();
+                plugin.updatePdfRenderSettings();
+            }))
+        .addExtraButton(button => button
+            .setIcon('reset')
+            .setTooltip('Reset to 150 ms')
+            .onClick(async () => {
+                settings.pdf.renderDebounceMs = 150;
+                await plugin.saveSettings();
+                containerEl.empty();
+                PdfSettings({ plugin, containerEl });
+            }));
+
+    new Setting(virtualizationSection)
+        .setName('Creation Buffer (px)')
+        .setDesc('Minimum distance from viewport where pages are created. Higher = smoother scroll but more memory.')
+        .addSlider(slider => slider
+            .setLimits(50, 500, 25)
+            .setValue(settings.pdf.minCreationBuffer)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.pdf.minCreationBuffer = value;
+                await plugin.saveSettings();
+                plugin.updatePdfRenderSettings();
+            }))
+        .addExtraButton(button => button
+            .setIcon('reset')
+            .setTooltip('Reset to 150 px')
+            .onClick(async () => {
+                settings.pdf.minCreationBuffer = 150;
+                await plugin.saveSettings();
+                containerEl.empty();
+                PdfSettings({ plugin, containerEl });
+            }));
+
+    new Setting(virtualizationSection)
+        .setName('Keep Buffer (px)')
+        .setDesc('Minimum distance from viewport where pages are kept alive. Higher = fewer re-renders but more memory.')
+        .addSlider(slider => slider
+            .setLimits(100, 1000, 50)
+            .setValue(settings.pdf.minDestructionBuffer)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+                settings.pdf.minDestructionBuffer = value;
+                await plugin.saveSettings();
+                plugin.updatePdfRenderSettings();
+            }))
+        .addExtraButton(button => button
+            .setIcon('reset')
+            .setTooltip('Reset to 300 px')
+            .onClick(async () => {
+                settings.pdf.minDestructionBuffer = 300;
+                await plugin.saveSettings();
+                containerEl.empty();
+                PdfSettings({ plugin, containerEl });
             }));
 }

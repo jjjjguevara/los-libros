@@ -3,8 +3,8 @@ import path from 'path';
 
 export default defineConfig({
   test: {
-    // Test environment
-    environment: 'node',
+    // Test environment - jsdom for DOM testing
+    environment: 'jsdom',
 
     // Include patterns
     include: ['src/test/**/*.test.ts', 'src/test/**/*.spec.ts'],
@@ -28,16 +28,21 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
-      include: ['src/sync/**/*.ts', 'src/test/**/*.ts'],
+      include: ['src/sync/**/*.ts', 'src/reader/renderer/pdf/**/*.ts'],
       exclude: ['**/*.test.ts', '**/*.spec.ts', '**/types.ts'],
     },
 
     // Setup files
-    setupFiles: ['./src/test/setup.ts'],
+    setupFiles: ['./src/test/setup.ts', './src/test/pdf/setup.ts'],
 
     // Environment variables for testing
     env: {
       NODE_ENV: 'test',
+    },
+
+    // Benchmark configuration
+    benchmark: {
+      include: ['src/test/**/benchmark/**/*.bench.ts'],
     },
   },
 

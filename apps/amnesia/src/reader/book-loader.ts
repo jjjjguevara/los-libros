@@ -194,10 +194,14 @@ async function loadCalibreBook(
   }
 
   // Read binary data
-  // Note: Node's Buffer.buffer returns a shared ArrayBuffer pool which can cause
-  // issues with XHR/fetch uploads in Electron. We need to copy to a fresh ArrayBuffer.
+  // IMPORTANT: Node's Buffer.buffer returns a shared ArrayBuffer pool which can cause
+  // issues with XHR/fetch uploads in Electron. We MUST create a true copy, not just a view.
+  // Using `new Uint8Array(buffer).buffer` is NOT enough - it still references the same memory.
   const buffer = fs.readFileSync(filePath);
-  const arrayBuffer = new Uint8Array(buffer).buffer;
+  // Create a true copy by allocating a new ArrayBuffer and copying bytes
+  const arrayBuffer = new ArrayBuffer(buffer.length);
+  new Uint8Array(arrayBuffer).set(buffer);
+  // buffer will be garbage collected when this function returns
 
   // Find Calibre book metadata if available
   // Match by either the exact file path or the directory path

@@ -11,7 +11,8 @@
  * - Page elements never resize - only the viewport moves
  */
 
-import { PdfPageElement, type PageRenderData, type PageHighlight, type ReadingMode } from './pdf-page-element';
+import { PdfPageElement, type PageRenderData, type PageHighlight, type ReadingMode, type TextLayerMode } from './pdf-page-element';
+import type { SvgTextLayerFetcher } from './pdf-svg-text-layer';
 import {
   type Camera,
   type Point,
@@ -61,10 +62,12 @@ export interface InfiniteCanvasConfig {
   minZoom: number;
   /** Maximum zoom level */
   maxZoom: number;
-  /** Page width (PDF units) */
+  /** Page width (PDF units) - default for all pages */
   pageWidth: number;
-  /** Page height (PDF units) */
+  /** Page height (PDF units) - default for all pages */
   pageHeight: number;
+  /** Per-page dimensions (index 0 = page 1) - for variable page sizes */
+  pageDimensions?: Array<{width: number; height: number}>;
   /** Scale factor for rendering (affects render quality) */
   renderScale: number;
   /** Pixel ratio for HiDPI */
@@ -77,19 +80,41 @@ export interface InfiniteCanvasConfig {
   layoutMode: 'vertical' | 'horizontal' | 'grid';
   /** Internal: pages per row */
   pagesPerRow: number;
+  /** DPI for server-side rendering. Default: 150 */
+  renderDpi: number;
+  /** Image format for rendered pages. Default: 'png' */
+  imageFormat: 'png' | 'jpeg' | 'webp';
+  /** Image quality for lossy formats (1-100). Default: 85 */
+  imageQuality: number;
+  /** Text layer rendering mode. Default: 'svg' for crisp text at any zoom */
+  textLayerMode?: TextLayerMode;
+  /** PDF identifier (required for SVG text layer mode) */
+  pdfId?: string;
+  /** Function to fetch SVG text layer (required for SVG text layer mode) */
+  svgTextLayerFetcher?: SvgTextLayerFetcher;
+
+  // Virtualization performance settings
+  /** Render debounce delay in milliseconds. Default: 150 */
+  renderDebounceMs?: number;
+  /** Minimum creation buffer in pixels. Default: 150 */
+  minCreationBuffer?: number;
+  /** Minimum destruction buffer in pixels. Default: 300 */
+  minDestructionBuffer?: number;
 }
 
 export interface PageDataProvider {
   getPageImage(page: number, options: PdfRenderOptions): Promise<Blob>;
   getPageTextLayer(page: number): Promise<TextLayerData>;
+  /** Optional: Notify provider of current page (for prefetching) */
+  notifyPageChange?(page: number): void;
 }
 
 const DEFAULT_CONFIG: InfiniteCanvasConfig = {
   displayMode: 'auto-grid',
   gap: 16,
   padding: 24,
-  minZoom: 0.1,
-  maxZoom: 10,
+  minZoom: 0.05,  // Extended for overview mode (0.05x = 5%)
+  maxZoom: 16,    // Extended for character-level inspection (16x = 1600%)
   pageWidth: 612,
   pageHeight: 792,
   renderScale: 1.5,
@@ -98,6 +123,14 @@ const DEFAULT_CONFIG: InfiniteCanvasConfig = {
   canvasColumns: 10,
   layoutMode: 'vertical',
   pagesPerRow: 1,
+  // Render quality settings - wired from plugin settings
+  renderDpi: 150,
+  imageFormat: 'png',
+  imageQuality: 85,
+  // Virtualization performance settings
+  renderDebounceMs: 50,
+  minCreationBuffer: 300,
+  minDestructionBuffer: 600,
 };
 
 // Base page size in canvas units (at 100% zoom)
@@ -135,6 +168,10 @@ export class PdfInfiniteCanvas {
   private renderQueue: number[] = [];
   private isRendering = false;
   private renderVersion = 0;
+  private renderDebounceTimeout: ReturnType<typeof setTimeout> | null = null;
+  private upgradeDebounceTimeout: ReturnType<typeof setTimeout> | null = null;
+  // Track pages with pending render requests - protected from destruction until render completes
+  private pendingRenderPages: Set<number> = new Set();
 
   // Image cache
   private readonly PAGE_CACHE_SIZE = 100;
@@ -209,7 +246,6 @@ export class PdfInfiniteCanvas {
       top: 0;
       left: 0;
       transform-origin: 0 0;
-      will-change: transform;
     `;
     this.viewport.appendChild(this.canvas);
 
@@ -436,37 +472,49 @@ export class PdfInfiniteCanvas {
   private calculatePageLayouts(): void {
     this.pageLayouts.clear();
 
-    const { gap, padding, pageWidth, pageHeight, layoutMode, pagesPerRow } = this.config;
+    const { gap, padding, pageWidth, pageHeight, pageDimensions, layoutMode, pagesPerRow } = this.config;
 
-    // Calculate base page dimensions (at 100% zoom on canvas)
-    // Use a reasonable base size that looks good
+    // Helper to get dimensions for a specific page (1-indexed)
+    const getPageDimensions = (pageNum: number): { width: number; height: number } => {
+      if (pageDimensions && pageDimensions[pageNum - 1]) {
+        return pageDimensions[pageNum - 1];
+      }
+      return { width: pageWidth, height: pageHeight };
+    };
+
+    // Calculate base width for canvas units (at 100% zoom)
     const baseWidth = 400; // Canvas units at 100% zoom
-    const aspectRatio = pageWidth / pageHeight;
-    const baseHeight = baseWidth / aspectRatio;
 
     let x = padding;
     let y = padding;
     let row = 0;
     let col = 0;
     let maxRowHeight = 0;
+    let maxWidth = 0;
 
     for (let page = 1; page <= this.pageCount; page++) {
+      const dims = getPageDimensions(page);
+      const aspectRatio = dims.width / dims.height;
+      const pageBaseWidth = baseWidth;
+      const pageBaseHeight = pageBaseWidth / aspectRatio;
+
       this.pageLayouts.set(page, {
         page,
         x,
         y,
-        width: baseWidth,
-        height: baseHeight,
+        width: pageBaseWidth,
+        height: pageBaseHeight,
       });
 
-      maxRowHeight = Math.max(maxRowHeight, baseHeight);
+      maxRowHeight = Math.max(maxRowHeight, pageBaseHeight);
+      maxWidth = Math.max(maxWidth, pageBaseWidth);
 
       if (layoutMode === 'vertical') {
         // Vertical: stack pages vertically
-        y += baseHeight + gap;
+        y += pageBaseHeight + gap;
       } else if (layoutMode === 'horizontal') {
         // Horizontal: pages in a row
-        x += baseWidth + gap;
+        x += pageBaseWidth + gap;
       } else {
         // Grid: wrap to new row after pagesPerRow
         col++;
@@ -477,7 +525,7 @@ export class PdfInfiniteCanvas {
           y += maxRowHeight + gap;
           maxRowHeight = 0;
         } else {
-          x += baseWidth + gap;
+          x += pageBaseWidth + gap;
         }
       }
     }
@@ -487,20 +535,20 @@ export class PdfInfiniteCanvas {
     if (lastLayout) {
       if (layoutMode === 'vertical') {
         this.canvasBounds = {
-          width: baseWidth + padding * 2,
+          width: maxWidth + padding * 2,
           height: lastLayout.y + lastLayout.height + padding,
         };
       } else if (layoutMode === 'horizontal') {
         this.canvasBounds = {
           width: lastLayout.x + lastLayout.width + padding,
-          height: baseHeight + padding * 2,
+          height: maxRowHeight + padding * 2,
         };
       } else {
-        // Grid
+        // Grid - use max dimensions for bounds
         const numRows = Math.ceil(this.pageCount / pagesPerRow);
         this.canvasBounds = {
-          width: pagesPerRow * baseWidth + (pagesPerRow - 1) * gap + padding * 2,
-          height: numRows * baseHeight + (numRows - 1) * gap + padding * 2,
+          width: pagesPerRow * maxWidth + (pagesPerRow - 1) * gap + padding * 2,
+          height: numRows * maxRowHeight + (numRows - 1) * gap + padding * 2,
         };
       }
     }
@@ -717,10 +765,12 @@ export class PdfInfiniteCanvas {
         y = vpHeight / (2 * z) - contentHeight / 2;
         break;
 
-      case 'horizontal-scroll':
-        // Fixed vertical (page height), horizontal panning allowed
-        // Center vertically
-        y = vpHeight / (2 * z) - contentHeight / 2;
+      case 'horizontal-scroll': {
+        // Primary: horizontal panning, but allow vertical when zoomed in
+        // Get current page dimensions for zoom-aware constraints
+        const currentPage = this.getCurrentPage();
+        const pageLayout = this.pageLayouts.get(currentPage);
+        const pageScreenHeight = pageLayout ? pageLayout.height * z : contentHeight * z;
 
         // Horizontal: constrain to content bounds
         if (contentScreenWidth <= vpWidth) {
@@ -730,12 +780,37 @@ export class PdfInfiniteCanvas {
           const maxX = 0;
           x = Math.max(minX, Math.min(maxX, x));
         }
-        break;
 
-      case 'vertical-scroll':
-        // Fixed horizontal (page width), vertical panning allowed
-        // Center horizontally
-        x = vpWidth / (2 * z) - contentWidth / 2;
+        // Vertical: allow pan when page is zoomed beyond viewport
+        if (pageScreenHeight <= vpHeight) {
+          // Center vertically when page fits
+          y = vpHeight / (2 * z) - contentHeight / 2;
+        } else {
+          // Allow vertical pan when zoomed in on a page
+          const minY = vpHeight / z - contentHeight;
+          const maxY = 0;
+          y = Math.max(minY, Math.min(maxY, y));
+        }
+        break;
+      }
+
+      case 'vertical-scroll': {
+        // Primary: vertical panning, but allow horizontal when zoomed in
+        // Get current page dimensions for zoom-aware constraints
+        const currentPageV = this.getCurrentPage();
+        const pageLayoutV = this.pageLayouts.get(currentPageV);
+        const pageScreenWidth = pageLayoutV ? pageLayoutV.width * z : contentWidth * z;
+
+        // Horizontal: allow pan when page is zoomed beyond viewport
+        if (pageScreenWidth <= vpWidth) {
+          // Center horizontally when page fits
+          x = vpWidth / (2 * z) - contentWidth / 2;
+        } else {
+          // Allow horizontal pan when zoomed in on a page
+          const minX = vpWidth / z - contentWidth;
+          const maxX = 0;
+          x = Math.max(minX, Math.min(maxX, x));
+        }
 
         // Vertical: constrain to content bounds
         if (contentScreenHeight <= vpHeight) {
@@ -746,6 +821,7 @@ export class PdfInfiniteCanvas {
           y = Math.max(minY, Math.min(maxY, y));
         }
         break;
+      }
 
       case 'auto-grid':
         // Grid always fits width, center horizontally, vertical pan allowed
@@ -785,18 +861,37 @@ export class PdfInfiniteCanvas {
 
   /**
    * Get zoom constraints for current display mode
+   * Uses current page dimensions for accurate zoom limits
    */
   private getZoomConstraints(): { minZoom: number; maxZoom: number } {
     const viewportRect = this.viewport.getBoundingClientRect();
-    const layout = this.pageLayouts.get(1);
     const { displayMode, padding } = this.config;
 
     let minZoom = this.config.minZoom;
     let maxZoom = this.config.maxZoom;
 
-    if (!layout || viewportRect.width === 0 || viewportRect.height === 0) {
+    if (viewportRect.width === 0 || viewportRect.height === 0) {
       return { minZoom, maxZoom };
     }
+
+    // Get current page layout for accurate constraints
+    const currentPage = this.getCurrentPage();
+    const currentLayout = this.pageLayouts.get(currentPage);
+
+    // Also get the largest page dimensions for global min zoom
+    let maxPageWidth = 0;
+    let maxPageHeight = 0;
+    for (const layout of this.pageLayouts.values()) {
+      maxPageWidth = Math.max(maxPageWidth, layout.width);
+      maxPageHeight = Math.max(maxPageHeight, layout.height);
+    }
+
+    // Use current page or largest page for constraints
+    const layoutWidth = currentLayout?.width || maxPageWidth || 400;
+    const layoutHeight = currentLayout?.height || maxPageHeight || 500;
+
+    const availableWidth = viewportRect.width - padding * 2;
+    const availableHeight = viewportRect.height - padding * 2;
 
     switch (displayMode) {
       case 'paginated':
@@ -805,17 +900,19 @@ export class PdfInfiniteCanvas {
         maxZoom = this.camera.z;
         break;
 
-      case 'horizontal-scroll':
-        // Min zoom = fit page height, unlimited zoom in
-        const availableHeight = viewportRect.height - padding * 2;
-        minZoom = Math.max(this.config.minZoom, availableHeight / layout.height);
+      case 'horizontal-scroll': {
+        // Initial view fits page height
+        // Min zoom should allow fitting the page height
+        const fitHeightZoom = availableHeight / layoutHeight;
+        minZoom = Math.max(this.config.minZoom, fitHeightZoom * 0.9); // Allow slightly smaller for flexibility
         break;
+      }
 
       case 'vertical-scroll': {
-        // Min zoom = fit page height (so you can see whole page when zoomed out)
-        // Max zoom = renderer's max zoom
-        const availableHeightV = viewportRect.height - padding * 2;
-        minZoom = Math.max(this.config.minZoom, availableHeightV / layout.height);
+        // Initial view fits page width
+        // Min zoom should allow fitting the page width (the initial "fit to width" state)
+        const fitWidthZoom = availableWidth / layoutWidth;
+        minZoom = Math.max(this.config.minZoom, fitWidthZoom * 0.9); // Allow slightly smaller for flexibility
         break;
       }
 
@@ -841,6 +938,11 @@ export class PdfInfiniteCanvas {
 
   /**
    * Update visible pages based on camera position
+   * Creates page elements immediately for visual feedback, but debounces
+   * expensive render operations during rapid pan/zoom.
+   *
+   * Uses minimum buffer thresholds to prevent aggressive destruction at high zoom levels.
+   * Pages with pending render requests are protected from destruction.
    */
   private updateVisiblePages(): void {
     const viewportRect = this.viewport.getBoundingClientRect();
@@ -851,7 +953,9 @@ export class PdfInfiniteCanvas {
     );
 
     const newVisiblePages = new Set<number>();
-    const buffer = 200 / this.camera.z; // Buffer in canvas units
+    // Use minimum buffer threshold to prevent too-small buffers at high zoom
+    const minCreationBuffer = this.config.minCreationBuffer ?? 300;
+    const buffer = Math.max(minCreationBuffer, 1000 / this.camera.z); // Buffer in canvas units (~1 page height)
 
     for (const [page, layout] of this.pageLayouts) {
       // Check if page intersects visible bounds (with buffer)
@@ -866,7 +970,7 @@ export class PdfInfiniteCanvas {
       }
     }
 
-    // Create elements for newly visible pages
+    // IMMEDIATE: Create elements for newly visible pages (shows loading placeholder)
     for (const page of newVisiblePages) {
       if (!this.pageElements.has(page)) {
         this.createPageElement(page);
@@ -874,10 +978,15 @@ export class PdfInfiniteCanvas {
     }
 
     // Remove elements for pages no longer visible (with larger buffer to prevent thrashing)
-    const keepBuffer = 500 / this.camera.z;
+    // Use minimum threshold to prevent aggressive destruction at high zoom levels
+    const minDestructionBuffer = this.config.minDestructionBuffer ?? 600;
+    const keepBuffer = Math.max(minDestructionBuffer, 1500 / this.camera.z);
     for (const [page, element] of this.pageElements) {
       const layout = this.pageLayouts.get(page);
       if (!layout) continue;
+
+      // Skip destruction for pages with pending render requests
+      if (this.pendingRenderPages.has(page)) continue;
 
       const shouldKeep =
         layout.x + layout.width > visibleBounds.x - keepBuffer &&
@@ -893,8 +1002,145 @@ export class PdfInfiniteCanvas {
 
     this.visiblePages = newVisiblePages;
 
-    // Queue visible pages for rendering
-    this.queueRender([...newVisiblePages]);
+    // Calculate target quality for current zoom level
+    // Used to determine if rendered pages need quality upgrade
+    const effectiveDpi = this.getEffectiveDpi();
+    const targetScale = (effectiveDpi / 72) * this.config.pixelRatio;
+
+    // Separate pages into:
+    // - cachedPages: have cached images, can render immediately
+    // - uncachedPages: need server fetch, debounce to prevent flooding
+    // - upgradePages: already rendered but need higher quality for current zoom
+    const cachedPages: number[] = [];
+    const uncachedPages: number[] = [];
+    const upgradePages: number[] = [];
+
+    for (const page of newVisiblePages) {
+      const element = this.pageElements.get(page);
+
+      // Check if page needs quality upgrade
+      if (element?.getIsRendered()) {
+        const cachedScale = this.pageCacheScales.get(page) ?? 0;
+        // If cached quality is below 90% of target, need upgrade
+        if (cachedScale < targetScale * 0.9) {
+          upgradePages.push(page);
+        }
+        continue;  // Skip pages that are rendered and don't need upgrade
+      }
+
+      if (this.pageImageCache.has(page)) {
+        cachedPages.push(page);
+      } else {
+        uncachedPages.push(page);
+        // Mark uncached pages as pending to protect from destruction during debounce
+        this.pendingRenderPages.add(page);
+      }
+    }
+
+    // IMMEDIATE: Render cached pages without debounce
+    // No server request needed, so no risk of flooding
+    if (cachedPages.length > 0) {
+      this.queueRender(cachedPages);
+    }
+
+    // DEBOUNCED: Queue uncached pages for rendering
+    // This prevents flooding the server with requests during rapid pan/zoom
+    if (uncachedPages.length > 0) {
+      if (this.renderDebounceTimeout) {
+        clearTimeout(this.renderDebounceTimeout);
+      }
+      const debounceMs = this.config.renderDebounceMs ?? 50;
+      this.renderDebounceTimeout = setTimeout(() => {
+        this.renderDebounceTimeout = null;
+        // Clean up stale pendingRenderPages - pages that were marked pending
+        // but scrolled out of view before debounce fired
+        for (const page of this.pendingRenderPages) {
+          if (!this.visiblePages.has(page)) {
+            this.pendingRenderPages.delete(page);
+          }
+        }
+        // Only queue pages that are still visible and not yet rendered
+        const stillNeeded = uncachedPages.filter(
+          (p) => this.visiblePages.has(p) && !this.pageElements.get(p)?.getIsRendered()
+        );
+        if (stillNeeded.length > 0) {
+          this.queueRender(stillNeeded);
+        }
+      }, debounceMs);
+    }
+
+    // DEBOUNCED (longer): Queue quality upgrades for re-rendering
+    // Less urgent than new pages (content already visible), use longer debounce
+    // to avoid re-renders during continuous zoom gestures
+    if (upgradePages.length > 0) {
+      if (this.upgradeDebounceTimeout) {
+        clearTimeout(this.upgradeDebounceTimeout);
+      }
+      // Longer debounce for upgrades - user can see content, just at lower quality
+      const upgradeDebounceMs = 200;
+      this.upgradeDebounceTimeout = setTimeout(() => {
+        this.upgradeDebounceTimeout = null;
+        // Recalculate target scale in case zoom changed during debounce
+        const currentEffectiveDpi = this.getEffectiveDpi();
+        const currentTargetScale = (currentEffectiveDpi / 72) * this.config.pixelRatio;
+        // Only upgrade pages that are still visible and still need upgrade
+        const stillNeedUpgrade = upgradePages.filter((p) => {
+          if (!this.visiblePages.has(p)) return false;
+          const cachedScale = this.pageCacheScales.get(p) ?? 0;
+          return cachedScale < currentTargetScale * 0.9;
+        });
+        if (stillNeedUpgrade.length > 0) {
+          // Clear cache for these pages to force re-fetch at higher DPI
+          for (const page of stillNeedUpgrade) {
+            this.pageImageCache.delete(page);
+            this.pageCacheScales.delete(page);
+          }
+          this.queueRender(stillNeedUpgrade);
+        }
+      }, upgradeDebounceMs);
+    }
+
+    // Notify provider of most centered visible page for prefetching
+    // This enables the provider to prefetch adjacent pages in background
+    // NOTE: Spatial prefetching (getSpatialPrefetchList) is available but disabled
+    // pending performance optimization. Currently uses legacy linear prefetch.
+    if (this.provider.notifyPageChange && newVisiblePages.size > 0) {
+      const centerPage = this.getMostCenteredPage();
+      if (centerPage !== null) {
+        this.provider.notifyPageChange(centerPage);
+      }
+    }
+  }
+
+  /**
+   * Get the page closest to viewport center (for prefetch optimization)
+   */
+  private getMostCenteredPage(): number | null {
+    if (this.visiblePages.size === 0) return null;
+
+    const viewportRect = this.viewport.getBoundingClientRect();
+    const centerX = viewportRect.width / 2;
+    const centerY = viewportRect.height / 2;
+
+    let closestPage = null;
+    let closestDist = Infinity;
+
+    for (const page of this.visiblePages) {
+      const layout = this.pageLayouts.get(page);
+      if (!layout) continue;
+
+      // Convert page center to screen coordinates
+      const screenX = (layout.x + layout.width / 2 + this.camera.x) * this.camera.z;
+      const screenY = (layout.y + layout.height / 2 + this.camera.y) * this.camera.z;
+
+      const dist = Math.hypot(screenX - centerX, screenY - centerY);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestPage = page;
+      }
+    }
+
+    return closestPage;
   }
 
   /**
@@ -909,6 +1155,9 @@ export class PdfInfiniteCanvas {
       pixelRatio: this.config.pixelRatio,
       enableTextAntialiasing: true,
       enableImageSmoothing: true,
+      textLayerMode: this.config.textLayerMode ?? 'svg',
+      pdfId: this.config.pdfId,
+      svgTextLayerFetcher: this.config.svgTextLayerFetcher,
     });
 
     // Set reading mode
@@ -972,7 +1221,7 @@ export class PdfInfiniteCanvas {
   }
 
   /**
-   * Process render queue
+   * Process render queue - sequential to avoid FPS drops from parallel decode
    */
   private async processRenderQueue(): Promise<void> {
     if (this.isRendering || this.renderQueue.length === 0) return;
@@ -983,11 +1232,18 @@ export class PdfInfiniteCanvas {
     while (this.renderQueue.length > 0 && this.renderVersion === currentVersion) {
       const page = this.renderQueue.shift()!;
 
-      // Skip if page no longer visible
-      if (!this.visiblePages.has(page)) continue;
+      // Skip if page no longer visible - MUST clear pending status to prevent leak
+      if (!this.visiblePages.has(page)) {
+        this.pendingRenderPages.delete(page);
+        continue;
+      }
 
       const element = this.pageElements.get(page);
-      if (!element || element.getIsRendered()) continue;
+      if (!element || element.getIsRendered()) {
+        // Page doesn't need rendering - clear pending status
+        this.pendingRenderPages.delete(page);
+        continue;
+      }
 
       await this.renderPage(page, element, currentVersion);
     }
@@ -997,22 +1253,62 @@ export class PdfInfiniteCanvas {
 
   /**
    * Render a single page
+   *
+   * Uses progressive rendering strategy:
+   * 1. If page already rendered and cache has good quality, skip
+   * 2. If cache has any image, show it immediately (instant feedback)
+   * 3. Then fetch higher quality if needed (background upgrade)
+   *
+   * Clears page from pendingRenderPages on completion (success or failure).
    */
   private async renderPage(
     page: number,
     element: PdfPageElement,
     version: number
   ): Promise<void> {
-    if (this.renderVersion !== version) return;
+    if (this.renderVersion !== version) {
+      // Version changed, clear pending status and return
+      this.pendingRenderPages.delete(page);
+      return;
+    }
 
+    const effectiveDpi = this.getEffectiveDpi();
+    const targetScale = (effectiveDpi / 72) * this.config.pixelRatio;
+
+    // Check if page already has acceptable quality content
+    if (element.getIsRendered()) {
+      const cachedScale = this.pageCacheScales.get(page) ?? 0;
+      // If cached quality is within 90% of target, skip re-render
+      if (cachedScale >= targetScale * 0.9) {
+        // Already rendered, clear pending status
+        this.pendingRenderPages.delete(page);
+        return;
+      }
+    }
+
+    // Show loading indicator (subtle spinner, doesn't hide content)
     element.showLoading();
 
     try {
-      // Get or fetch image
-      const imageBlob = await this.getCachedPageImage(page);
-      if (this.renderVersion !== version) return;
+      // Quick path: if we have ANY cached image, show it immediately
+      // This provides instant visual feedback during fast scrolling
+      const cachedBlob = this.pageImageCache.get(page);
+      if (cachedBlob && !element.getIsRendered()) {
+        // Render cached version first for immediate feedback
+        const renderScale = this.getRenderScaleFromDpi();
+        await element.render({ imageBlob: cachedBlob }, renderScale);
+      }
 
-      // Get text layer (optional)
+      // Now fetch at target quality (may be same as cache, may be upgrade)
+      const imageBlob = await this.getCachedPageImage(page);
+      if (this.renderVersion !== version) {
+        element.hideLoading();
+        this.pendingRenderPages.delete(page);
+        return;
+      }
+
+      // Get text layer (optional) - fetch in parallel with image would be better
+      // but keeping sequential for simplicity
       let textLayerData: TextLayerData | undefined;
       try {
         textLayerData = await this.provider.getPageTextLayer(page);
@@ -1020,25 +1316,98 @@ export class PdfInfiniteCanvas {
         // Text layer is optional
       }
 
-      if (this.renderVersion !== version) return;
+      if (this.renderVersion !== version) {
+        element.hideLoading();
+        this.pendingRenderPages.delete(page);
+        return;
+      }
 
-      await element.render({ imageBlob, textLayerData }, this.config.renderScale);
+      // Only re-render if we got a different (better) image
+      if (imageBlob !== cachedBlob) {
+        const renderScale = this.getRenderScaleFromDpi();
+        await element.render({ imageBlob, textLayerData }, renderScale);
+      }
+
       element.hideLoading();
+      // Render complete - clear pending status
+      this.pendingRenderPages.delete(page);
     } catch (error) {
       if (!this.isAbortError(error)) {
         console.error(`Failed to render page ${page}:`, error);
+
+        // Auto-recovery: Clear corrupted cache entry on decode error
+        // This handles corrupted blobs that were cached before validation was added
+        if (error instanceof DOMException && error.message.includes('cannot be decoded')) {
+          console.warn(`[PdfInfiniteCanvas] Clearing corrupted cache for page ${page}`);
+          this.pageImageCache.delete(page);
+          this.pageCacheScales.delete(page);
+          // Remove from cacheOrder as well
+          const idx = this.cacheOrder.indexOf(page);
+          if (idx > -1) this.cacheOrder.splice(idx, 1);
+        }
       }
       element.hideLoading();
+      // Render failed - clear pending status so page can be destroyed if needed
+      this.pendingRenderPages.delete(page);
     }
   }
 
   /**
+   * Get effective DPI based on current zoom level
+   * - When zoomed out: reduce DPI to save bandwidth/memory
+   * - When zoomed in: increase DPI proportionally for crisp rendering
+   *
+   * At 4x zoom with 300 base DPI, CSS scale(4) upscales a 1900px canvas to 7600px,
+   * causing blur. By scaling DPI with zoom (capped), we render higher resolution
+   * images that remain crisp when CSS-scaled.
+   */
+  private getEffectiveDpi(): number {
+    const baseDpi = this.config.renderDpi;
+    const zoom = this.camera.z;  // Camera uses 'z' for zoom
+
+    // Maximum DPI cap to prevent server failures and excessive memory usage
+    // 600 DPI provides good crispness up to ~4x zoom
+    // Higher values (800+) cause server image encoding failures on large pages
+    const maxDpi = 600;
+
+    // When zoomed out, pages appear smaller so lower DPI is acceptable
+    if (zoom < 0.5) return Math.round(baseDpi * 0.5);  // 50% DPI when very zoomed out
+    if (zoom < 1.0) return Math.round(baseDpi * 0.75); // 75% DPI when moderately zoomed out
+
+    // When zoomed in, scale DPI proportionally to maintain crispness
+    // CSS scale(zoom) enlarges the bitmap, so we need more pixels
+    if (zoom > 1.0) {
+      // Scale DPI with zoom, capped at maxDpi
+      const scaledDpi = Math.round(baseDpi * zoom);
+      return Math.min(scaledDpi, maxDpi);
+    }
+
+    return baseDpi;  // Full DPI at 100% zoom
+  }
+
+  /**
+   * Calculate render scale from DPI
+   * This ensures the image is displayed at a resolution matching the DPI setting.
+   * Formula: (DPI / 72) gives the scale factor relative to standard PDF resolution.
+   */
+  private getRenderScaleFromDpi(): number {
+    const effectiveDpi = this.getEffectiveDpi();
+    // 72 DPI is the standard PDF resolution (1 point = 1/72 inch)
+    return effectiveDpi / 72;
+  }
+
+  /**
    * Get cached page image or fetch from server
+   *
+   * Uses DPI-based scale for consistent quality. The scale is derived from DPI
+   * to ensure cache lookups match what was fetched from the server.
    */
   private async getCachedPageImage(page: number): Promise<Blob> {
-    const targetScale = this.config.renderScale * this.config.pixelRatio;
+    const effectiveDpi = this.getEffectiveDpi();
+    // Calculate target scale from DPI (72 DPI = 1x scale, 150 DPI ≈ 2x, 300 DPI ≈ 4x)
+    const targetScale = (effectiveDpi / 72) * this.config.pixelRatio;
 
-    // Check cache
+    // Check cache - accept cached image if it's within 80% of target quality
     if (this.pageImageCache.has(page)) {
       const cachedScale = this.pageCacheScales.get(page) ?? 0;
       if (cachedScale >= targetScale * 0.8) {
@@ -1052,22 +1421,24 @@ export class PdfInfiniteCanvas {
       }
     }
 
-    // Check for pending request
+    // Check for pending request at similar quality
     const pending = this.pendingImageRequests.get(page);
     if (pending) return pending;
 
-    // Fetch from server
-    const fetchScale = Math.max(targetScale, 1.5);
+    // Fetch from server using DPI-only quality control
+    // (scale param deprecated - server uses DPI for quality)
     const promise = (async () => {
       try {
         const blob = await this.provider.getPageImage(page, {
-          scale: fetchScale,
-          dpi: 150,
-          format: 'png',
+          scale: 1.0,  // Fixed scale - quality controlled by DPI only
+          dpi: effectiveDpi,
+          format: this.config.imageFormat,
+          quality: this.config.imageQuality,
         });
 
         this.pageImageCache.set(page, blob);
-        this.pageCacheScales.set(page, fetchScale);
+        // Store the DPI-derived scale for cache comparisons
+        this.pageCacheScales.set(page, targetScale);
 
         // Update LRU
         const idx = this.cacheOrder.indexOf(page);
@@ -1250,20 +1621,44 @@ export class PdfInfiniteCanvas {
           // No panning in paginated mode
           return;
 
-        case 'horizontal-scroll':
-          // Only horizontal panning allowed
+        case 'horizontal-scroll': {
+          // Primary: horizontal panning
+          // When zoomed in, allow vertical panning too
+          const viewportRectH = this.viewport.getBoundingClientRect();
+          const currentPageH = this.getCurrentPage();
+          const pageLayoutH = this.pageLayouts.get(currentPageH);
+          const pageScreenHeightH = pageLayoutH ? pageLayoutH.height * this.camera.z : 0;
+          const isZoomedInH = pageScreenHeightH > viewportRectH.height;
+
           // Use deltaY for horizontal scroll if deltaX is 0 (mouse wheel)
-          if (Math.abs(deltaX) < 1 && Math.abs(deltaY) > 1) {
+          if (Math.abs(deltaX) < 1 && Math.abs(deltaY) > 1 && !isZoomedInH) {
             deltaX = deltaY;
+            deltaY = 0;
+          } else if (!isZoomedInH) {
+            // Not zoomed in - only horizontal movement
+            deltaY = 0;
           }
-          deltaY = 0;
+          // When zoomed in, allow both deltaX and deltaY
           break;
+        }
 
         case 'vertical-scroll':
-        case 'auto-grid':
-          // Only vertical panning allowed
-          deltaX = 0;
+        case 'auto-grid': {
+          // Primary: vertical panning
+          // When zoomed in, allow horizontal panning too
+          const viewportRectV = this.viewport.getBoundingClientRect();
+          const currentPageV = this.getCurrentPage();
+          const pageLayoutV = this.pageLayouts.get(currentPageV);
+          const pageScreenWidthV = pageLayoutV ? pageLayoutV.width * this.camera.z : 0;
+          const isZoomedInV = pageScreenWidthV > viewportRectV.width;
+
+          if (!isZoomedInV) {
+            // Not zoomed in - only vertical movement
+            deltaX = 0;
+          }
+          // When zoomed in, allow both deltaX and deltaY
           break;
+        }
 
         case 'canvas':
           // Free panning - use both deltas
@@ -1498,10 +1893,52 @@ export class PdfInfiniteCanvas {
   }
 
   /**
-   * Reset zoom to 100%
+   * Reset zoom to the mode's initial level (fit to width/height based on display mode)
    */
   resetZoom(): void {
-    this.setZoom(1);
+    const viewportRect = this.viewport.getBoundingClientRect();
+    const { displayMode, padding } = this.config;
+    const currentPage = this.getCurrentPage();
+    const layout = this.pageLayouts.get(currentPage) || this.pageLayouts.get(1);
+
+    if (!layout || viewportRect.width === 0 || viewportRect.height === 0) {
+      this.setZoom(1);
+      return;
+    }
+
+    const availableWidth = viewportRect.width - padding * 2;
+    const availableHeight = viewportRect.height - padding * 2;
+
+    let targetZoom = 1;
+
+    switch (displayMode) {
+      case 'vertical-scroll':
+      case 'auto-grid':
+        // Fit width
+        targetZoom = availableWidth / layout.width;
+        break;
+      case 'horizontal-scroll':
+        // Fit height
+        targetZoom = availableHeight / layout.height;
+        break;
+      case 'paginated':
+      case 'canvas':
+        // Fit page in view
+        this.fitPageInView(currentPage, true);
+        return;
+    }
+
+    // Center on current page with the new zoom
+    this.camera = {
+      x: viewportRect.width / (2 * targetZoom) - layout.x - layout.width / 2,
+      y: viewportRect.height / (2 * targetZoom) - layout.y - layout.height / 2,
+      z: targetZoom,
+    };
+
+    this.constrainCameraPosition();
+    this.applyTransform();
+    this.updateVisiblePages();
+    this.onZoomChangeCallback?.(targetZoom);
   }
 
   /**
@@ -1516,28 +1953,28 @@ export class PdfInfiniteCanvas {
    * Fit page width to viewport (useful for reading)
    */
   fitToWidth(): void {
-    const layout = this.pageLayouts.get(1);
+    const currentPage = this.getCurrentPage();
+    const layout = this.pageLayouts.get(currentPage) || this.pageLayouts.get(1);
     if (!layout) return;
 
     const viewportRect = this.viewport.getBoundingClientRect();
     const { padding } = this.config;
     const availableWidth = viewportRect.width - padding * 2;
 
-    // Calculate zoom to fit page width
+    // Calculate zoom to fit page width (using current page dimensions)
     const zoom = availableWidth / layout.width;
 
     // Position camera to show current page
-    const currentPage = this.getCurrentPage();
-    const currentLayout = this.pageLayouts.get(currentPage);
-    if (currentLayout) {
-      this.camera = {
-        x: padding / zoom,
-        y: viewportRect.height / (2 * zoom) - currentLayout.y - currentLayout.height / 2,
-        z: zoom,
-      };
-      this.applyTransform();
-      this.updateVisiblePages();
-    }
+    this.camera = {
+      x: viewportRect.width / (2 * zoom) - layout.x - layout.width / 2,
+      y: viewportRect.height / (2 * zoom) - layout.y - layout.height / 2,
+      z: zoom,
+    };
+
+    this.constrainCameraPosition();
+    this.applyTransform();
+    this.updateVisiblePages();
+    this.onZoomChangeCallback?.(zoom);
   }
 
   /**
@@ -1664,6 +2101,89 @@ export class PdfInfiniteCanvas {
     this.config.readingMode = mode;
     for (const element of this.pageElements.values()) {
       element.setReadingMode(mode);
+    }
+  }
+
+  /**
+   * Update render quality settings
+   * Invalidates cache and re-renders visible pages when settings change
+   */
+  setRenderQuality(options: {
+    dpi?: number;
+    format?: 'png' | 'jpeg' | 'webp';
+    quality?: number;
+  }): void {
+    let needsRerender = false;
+
+    // Check if DPI changed (affects image quality)
+    if (options.dpi !== undefined && options.dpi !== this.config.renderDpi) {
+      this.config.renderDpi = options.dpi;
+      needsRerender = true;
+    }
+
+    // Check if format changed
+    if (options.format !== undefined && options.format !== this.config.imageFormat) {
+      this.config.imageFormat = options.format;
+      needsRerender = true;
+    }
+
+    // Check if quality changed (affects lossy formats)
+    if (options.quality !== undefined && options.quality !== this.config.imageQuality) {
+      this.config.imageQuality = options.quality;
+      needsRerender = true;
+    }
+
+    if (needsRerender) {
+      // Invalidate cache - clear all cached images
+      this.pageImageCache.clear();
+      this.pageCacheScales.clear();
+      this.cacheOrder.length = 0;
+
+      // Cancel pending requests (they're at old quality)
+      this.pendingImageRequests.clear();
+
+      // Increment render version to abandon in-flight renders
+      this.renderVersion++;
+
+      // Re-render visible pages at new quality
+      this.updateVisiblePages();
+    }
+  }
+
+  /**
+   * Set PDF ID for SVG text layer rendering
+   * Must be called after document is loaded for SVG text layer to work
+   */
+  setPdfId(pdfId: string): void {
+    this.config.pdfId = pdfId;
+    // Note: Existing page elements won't be updated automatically.
+    // They'll get the correct pdfId when re-created during scroll/zoom.
+    // For immediate update, we could clear and re-render visible pages,
+    // but that's not necessary since elements are recreated frequently.
+  }
+
+  /**
+   * Set page dimensions (called after document loads with actual PDF dimensions)
+   * This is necessary because the canvas is created before the document is loaded
+   * @param width Default page width (for backwards compatibility)
+   * @param height Default page height (for backwards compatibility)
+   * @param pageDimensions Optional per-page dimensions array (index 0 = page 1)
+   */
+  setPageDimensions(width: number, height: number, pageDimensions?: Array<{width: number; height: number}>): void {
+    this.config.pageWidth = width;
+    this.config.pageHeight = height;
+    this.config.pageDimensions = pageDimensions;
+
+    // Recalculate layouts with new dimensions
+    if (this.pageCount > 0) {
+      this.calculatePageLayouts();
+      this.updateCanvasSize();
+      // Clear existing page elements to force re-render with new aspect ratio
+      for (const element of this.pageElements.values()) {
+        element.destroy();
+      }
+      this.pageElements.clear();
+      this.updateVisiblePages();
     }
   }
 
@@ -1835,6 +2355,16 @@ export class PdfInfiniteCanvas {
 
     // Stop inertia animation
     this.stopInertia();
+
+    // Clear render debounce timers
+    if (this.renderDebounceTimeout) {
+      clearTimeout(this.renderDebounceTimeout);
+      this.renderDebounceTimeout = null;
+    }
+    if (this.upgradeDebounceTimeout) {
+      clearTimeout(this.upgradeDebounceTimeout);
+      this.upgradeDebounceTimeout = null;
+    }
 
     for (const element of this.pageElements.values()) {
       element.destroy();

@@ -12,7 +12,7 @@ import MiniSearch from 'minisearch';
 // TYPES
 // =============================================================================
 
-export type TabId = 'library' | 'reading' | 'pdf' | 'sync' | 'notes' | 'advanced';
+export type TabId = 'library' | 'reading' | 'pdf' | 'sync' | 'notes' | 'advanced' | 'hud';
 
 export type SettingImpact = 'critical' | 'high' | 'medium' | 'low';
 

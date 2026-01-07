@@ -392,6 +392,14 @@ export type RendererEventListener<K extends keyof RendererEvents> = (
 // ============================================================================
 
 /**
+ * Page dimensions in points (72 points = 1 inch)
+ */
+export interface PdfPageDimensions {
+  width: number;
+  height: number;
+}
+
+/**
  * Parsed PDF document from server
  */
 export interface ParsedPdf {
@@ -402,6 +410,12 @@ export interface ParsedPdf {
   pageLabels?: string[];
   hasTextLayer: boolean;
   orientation: 'portrait' | 'landscape' | 'mixed';
+  /** First page width in points (72 points = 1 inch) */
+  pageWidth: number;
+  /** First page height in points (72 points = 1 inch) */
+  pageHeight: number;
+  /** Dimensions for each page (index 0 = page 1) - enables variable page sizes */
+  pageDimensions?: PdfPageDimensions[];
 }
 
 /**
@@ -513,8 +527,17 @@ export interface PdfPosition {
 
 /**
  * PDF render request options
+ *
+ * Note: `scale` has been deprecated. Use `dpi` only for quality control.
+ * DPI directly controls the rendered image resolution:
+ * - 72 DPI: Fast, low quality (1x screen)
+ * - 96 DPI: Standard screen resolution
+ * - 150 DPI: Recommended default (2x screen, good for most displays)
+ * - 200 DPI: High quality
+ * - 300 DPI: Print quality
  */
 export interface PdfRenderOptions {
+  /** @deprecated Use dpi instead. This field is ignored. */
   scale?: number;
   rotation?: number;
   format?: 'png' | 'jpeg' | 'webp';
@@ -522,8 +545,6 @@ export interface PdfRenderOptions {
   dpi?: number;
   /** Image quality for lossy formats (1-100). Default: 85 */
   quality?: number;
-  /** Enable hardware acceleration hints. Default: true */
-  hardwareAcceleration?: boolean;
 }
 
 /**
