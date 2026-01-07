@@ -13,14 +13,18 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::db::{CreateHighlight, Highlight, HighlightRepository, UpdateHighlight};
 use crate::epub::TocEntry;
 use crate::ocr::{OcrRect, OcrRequest, OcrResult, OcrService, OcrServiceConfig};
-use crate::pdf::{ImageFormat, PageRenderRequest, ParsedPdf, PdfMetadata, PdfSearchResult, TextLayer};
+use crate::pdf::{
+    FormField, FormInfo, ImageFormat, PageRenderRequest, ParsedPdf, PdfMetadata, PdfSearchResult,
+    SignatureInfo, TextLayer,
+};
 use crate::state::AppState;
 
 /// Response for PDF list
@@ -171,6 +175,21 @@ pub fn router() -> Router<AppState> {
         .route("/:id/pages/:page/ocr", post(ocr_region))
         .route("/:id/search", get(search_pdf))
         .route("/:id/ocr/providers", get(list_ocr_providers))
+        // Annotations (per Phase 8 plan)
+        .route(
+            "/:id/annotations",
+            get(list_annotations).post(create_annotation),
+        )
+        .route(
+            "/:id/annotations/:annotation_id",
+            get(get_annotation)
+                .put(update_annotation)
+                .delete(delete_annotation),
+        )
+        // Forms (Phase 9)
+        .route("/:id/forms", get(get_form_info))
+        .route("/:id/forms/fields", get(list_form_fields))
+        .route("/:id/forms/signatures", get(list_signatures))
         // Allow up to 200MB uploads for large PDFs
         .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
 }
@@ -554,4 +573,470 @@ async fn ocr_region(
     );
 
     Ok(Json(result))
+}
+
+// ============================================================================
+// PDF Annotations API (Phase 8)
+// ============================================================================
+
+/// Response for annotations list
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationsResponse {
+    pub annotations: Vec<Highlight>,
+    pub total: usize,
+}
+
+/// List all annotations for a PDF
+async fn list_annotations(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AnnotationsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Check if PDF exists in cache
+    if !state.pdf_cache().contains(&id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        ));
+    }
+
+    let repo = HighlightRepository::new(state.db());
+    let annotations = repo
+        .list_for_book(&id, None)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to list annotations",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    // Filter to only PDF annotations
+    let pdf_annotations: Vec<Highlight> = annotations
+        .into_iter()
+        .filter(|a| a.document_format == "pdf")
+        .collect();
+
+    let total = pdf_annotations.len();
+
+    Ok(Json(AnnotationsResponse {
+        annotations: pdf_annotations,
+        total,
+    }))
+}
+
+/// Create a new annotation for a PDF
+async fn create_annotation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(mut data): Json<CreateHighlight>,
+) -> Result<(StatusCode, Json<Highlight>), (StatusCode, Json<ErrorResponse>)> {
+    // Check if PDF exists in cache
+    if !state.pdf_cache().contains(&id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        ));
+    }
+
+    // Force document_format to pdf
+    data.document_format = Some("pdf".to_string());
+
+    let repo = HighlightRepository::new(state.db());
+    let annotation = repo
+        .create(&id, None, &data)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to create annotation",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    Ok((StatusCode::CREATED, Json(annotation)))
+}
+
+/// Get a specific annotation
+async fn get_annotation(
+    State(state): State<AppState>,
+    Path((id, annotation_id)): Path<(String, String)>,
+) -> Result<Json<Highlight>, (StatusCode, Json<ErrorResponse>)> {
+    // Check if PDF exists in cache
+    if !state.pdf_cache().contains(&id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        ));
+    }
+
+    let repo = HighlightRepository::new(state.db());
+    let annotation = repo
+        .get(&annotation_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to get annotation",
+                    e.to_string(),
+                )),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(format!(
+                    "Annotation '{}' not found",
+                    annotation_id
+                ))),
+            )
+        })?;
+
+    // Verify the annotation belongs to this PDF
+    if annotation.book_id != id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "Annotation '{}' not found in PDF '{}'",
+                annotation_id, id
+            ))),
+        ));
+    }
+
+    Ok(Json(annotation))
+}
+
+/// Update an annotation
+async fn update_annotation(
+    State(state): State<AppState>,
+    Path((id, annotation_id)): Path<(String, String)>,
+    Json(data): Json<UpdateHighlight>,
+) -> Result<Json<Highlight>, (StatusCode, Json<ErrorResponse>)> {
+    // Check if PDF exists in cache
+    if !state.pdf_cache().contains(&id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        ));
+    }
+
+    let repo = HighlightRepository::new(state.db());
+
+    // First verify the annotation exists and belongs to this PDF
+    let existing = repo
+        .get(&annotation_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to get annotation",
+                    e.to_string(),
+                )),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(format!(
+                    "Annotation '{}' not found",
+                    annotation_id
+                ))),
+            )
+        })?;
+
+    if existing.book_id != id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "Annotation '{}' not found in PDF '{}'",
+                annotation_id, id
+            ))),
+        ));
+    }
+
+    // Update the annotation
+    let annotation = repo
+        .update(&annotation_id, &data)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to update annotation",
+                    e.to_string(),
+                )),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(format!(
+                    "Annotation '{}' not found",
+                    annotation_id
+                ))),
+            )
+        })?;
+
+    Ok(Json(annotation))
+}
+
+/// Delete an annotation
+async fn delete_annotation(
+    State(state): State<AppState>,
+    Path((id, annotation_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    // Check if PDF exists in cache
+    if !state.pdf_cache().contains(&id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        ));
+    }
+
+    let repo = HighlightRepository::new(state.db());
+
+    // First verify the annotation exists and belongs to this PDF
+    let existing = repo
+        .get(&annotation_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to get annotation",
+                    e.to_string(),
+                )),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(format!(
+                    "Annotation '{}' not found",
+                    annotation_id
+                ))),
+            )
+        })?;
+
+    if existing.book_id != id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "Annotation '{}' not found in PDF '{}'",
+                annotation_id, id
+            ))),
+        ));
+    }
+
+    // Delete the annotation
+    let deleted = repo
+        .delete(&annotation_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to delete annotation",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "Annotation '{}' not found",
+                annotation_id
+            ))),
+        ))
+    }
+}
+
+// ============================================================================
+// Form Endpoints (Phase 9)
+// ============================================================================
+
+/// Response for form information
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormInfoResponse {
+    /// PDF ID
+    pub id: String,
+    /// Form information
+    #[serde(flatten)]
+    pub form_info: FormInfo,
+}
+
+/// Response for form fields list
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormFieldsResponse {
+    /// PDF ID
+    pub id: String,
+    /// Total number of fields
+    pub total: usize,
+    /// Form fields
+    pub fields: Vec<FormField>,
+}
+
+/// Response for signatures list
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignaturesResponse {
+    /// PDF ID
+    pub id: String,
+    /// Total number of signatures
+    pub total: usize,
+    /// Signature fields
+    pub signatures: Vec<SignatureInfo>,
+}
+
+/// Get form information for a PDF
+///
+/// Returns information about whether the PDF contains forms (AcroForm or XFA),
+/// the number of form fields, and whether calculations are needed.
+async fn get_form_info(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<FormInfoResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Check if PDF exists in cache
+    if !state.pdf_cache().contains(&id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        ));
+    }
+
+    // Get the parser for form extraction
+    let form_info = state
+        .pdf_cache()
+        .with_parser(&id, |parser| parser.get_form_info())
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to extract form information",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    Ok(Json(FormInfoResponse {
+        id: id.clone(),
+        form_info,
+    }))
+}
+
+/// List all form fields in a PDF
+///
+/// Returns detailed information about each form field including:
+/// - Field name and type
+/// - Current and default values
+/// - Validation constraints (required, max length, etc.)
+/// - Options for dropdown/listbox fields
+async fn list_form_fields(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<FormFieldsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Check if PDF exists in cache
+    if !state.pdf_cache().contains(&id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        ));
+    }
+
+    // Get form fields
+    let form_info = state
+        .pdf_cache()
+        .with_parser(&id, |parser| parser.get_form_info())
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to extract form fields",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    let total = form_info.fields.len();
+
+    Ok(Json(FormFieldsResponse {
+        id: id.clone(),
+        total,
+        fields: form_info.fields,
+    }))
+}
+
+/// List all digital signatures in a PDF
+///
+/// Returns information about signature fields including:
+/// - Signer name
+/// - Signing time and reason
+/// - Validation status (note: full cryptographic validation not yet implemented)
+async fn list_signatures(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SignaturesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Check if PDF exists in cache
+    if !state.pdf_cache().contains(&id).await {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+        ));
+    }
+
+    // Get signatures
+    let signatures = state
+        .pdf_cache()
+        .with_parser(&id, |parser| parser.get_signatures())
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(format!("PDF '{}' not found", id))),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to extract signatures",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    let total = signatures.len();
+
+    Ok(Json(SignaturesResponse {
+        id: id.clone(),
+        total,
+        signatures,
+    }))
 }

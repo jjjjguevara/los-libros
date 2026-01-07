@@ -109,6 +109,9 @@ pub enum OcrError {
 
     #[error("API error: {0}")]
     ApiError(String),
+
+    #[error("OCR text layer injection failed: {0}")]
+    InjectionError(String),
 }
 
 impl OcrError {
@@ -117,6 +120,7 @@ impl OcrError {
         match self {
             Self::ProviderNotAvailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::InvalidRegion(_) => StatusCode::BAD_REQUEST,
+            Self::InjectionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

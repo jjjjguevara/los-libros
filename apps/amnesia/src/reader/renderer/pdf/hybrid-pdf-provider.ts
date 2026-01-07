@@ -31,13 +31,19 @@ import type {
   PdfSearchResult,
 } from '../types';
 import { PdfPageCache } from './pdf-cache';
+import { WasmPdfRenderer, getSharedWasmRenderer, destroySharedWasmRenderer } from './wasm-renderer';
 
-export type PdfProviderMode = 'server' | 'auto';
+export type PdfProviderMode = 'server' | 'wasm' | 'auto';
 
 export interface HybridPdfProviderConfig {
   /** Server base URL */
   serverBaseUrl?: string;
-  /** Preferred provider mode (server or auto - both use server) */
+  /**
+   * Preferred provider mode:
+   * - 'server': Use server for all rendering (default)
+   * - 'wasm': Use local WASM for rendering (faster, no server required for rendering)
+   * - 'auto': Use WASM if available, fallback to server
+   */
   preferMode?: PdfProviderMode;
   /** Timeout for server health check in ms */
   healthCheckTimeout?: number;
@@ -49,11 +55,14 @@ export interface HybridPdfProviderConfig {
   enablePrefetch?: boolean;
   /** Number of pages to prefetch ahead/behind (default: 2) */
   prefetchCount?: number;
+  /** Enable WASM rendering when available (default: true) */
+  enableWasm?: boolean;
 }
 
 export interface HybridPdfProviderStatus {
-  activeMode: 'server';
+  activeMode: 'server' | 'wasm';
   serverAvailable: boolean;
+  wasmAvailable: boolean;
   documentId: string | null;
   pageCount: number;
 }
@@ -83,6 +92,11 @@ export class HybridPdfProvider {
   private parsedPdf: ParsedPdf | null = null;
   private pdfData: ArrayBuffer | null = null;
 
+  // WASM renderer
+  private wasmRenderer: WasmPdfRenderer | null = null;
+  private wasmAvailable: boolean = false;
+  private wasmDocumentId: string | null = null;
+
   // Caching
   private pageCache: PdfPageCache;
 
@@ -90,6 +104,7 @@ export class HybridPdfProvider {
   private prefetchQueue: number[] = [];
   private isPrefetching: boolean = false;
   private prefetchTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private isDestroyed: boolean = false;
 
   constructor(config: HybridPdfProviderConfig = {}) {
     this.config = {
@@ -100,6 +115,7 @@ export class HybridPdfProvider {
       enableCache: config.enableCache ?? true,
       enablePrefetch: config.enablePrefetch ?? true,
       prefetchCount: config.prefetchCount ?? 2,
+      enableWasm: config.enableWasm ?? true,
     };
 
     this.pageCache = new PdfPageCache();
@@ -110,11 +126,22 @@ export class HybridPdfProvider {
    */
   getStatus(): HybridPdfProviderStatus {
     return {
-      activeMode: 'server',
+      activeMode: this.shouldUseWasm() ? 'wasm' : 'server',
       serverAvailable: this.serverAvailable,
+      wasmAvailable: this.wasmAvailable,
       documentId: this.documentId,
       pageCount: this.parsedPdf?.pageCount ?? 0,
     };
+  }
+
+  /**
+   * Check if WASM should be used for rendering
+   */
+  private shouldUseWasm(): boolean {
+    if (!this.config.enableWasm || !this.wasmAvailable) return false;
+    if (this.config.preferMode === 'wasm') return true;
+    if (this.config.preferMode === 'auto') return true;
+    return false;
   }
 
   /**
@@ -146,7 +173,7 @@ export class HybridPdfProvider {
   }
 
   /**
-   * Initialize the provider - checks server availability and initializes cache
+   * Initialize the provider - checks server availability, initializes WASM renderer, and cache
    */
   async initialize(): Promise<void> {
     // Initialize cache if enabled
@@ -154,10 +181,27 @@ export class HybridPdfProvider {
       await this.pageCache.initialize();
     }
 
+    // Initialize WASM renderer if enabled (non-blocking)
+    if (this.config.enableWasm) {
+      try {
+        const startTime = performance.now();
+        this.wasmRenderer = await getSharedWasmRenderer();
+        this.wasmAvailable = true;
+        console.log(`[HybridPdfProvider] WASM renderer initialized in ${(performance.now() - startTime).toFixed(1)}ms`);
+      } catch (error) {
+        console.warn('[HybridPdfProvider] WASM renderer initialization failed:', error);
+        this.wasmAvailable = false;
+      }
+    }
+
+    // Check server availability
     if (await this.checkServerHealth()) {
       this.apiClient = getApiClient();
+    } else if (!this.wasmAvailable) {
+      // Only throw if WASM is also unavailable
+      throw new Error('No PDF rendering available. Both server and WASM renderer are unavailable.');
     } else {
-      throw new Error('Amnesia server is not available. PDF rendering requires a running server.');
+      console.log('[HybridPdfProvider] Server unavailable, using WASM-only mode');
     }
   }
 
@@ -166,22 +210,29 @@ export class HybridPdfProvider {
    * First checks if the PDF already exists on the server, if so uses it.
    * Otherwise uploads the PDF.
    *
+   * Also loads the document into WASM renderer for fast local rendering.
    * After loading, starts background thumbnail generation for fast placeholder display.
    */
   async loadDocument(data: ArrayBuffer, documentId?: string): Promise<ParsedPdf> {
-    if (!this.apiClient) {
+    if (!this.apiClient && !this.wasmAvailable) {
       throw new Error('Provider not initialized. Call initialize() first.');
     }
 
     this.pdfData = data;
 
+    // Load into WASM renderer in parallel (for fast local rendering)
+    const wasmLoadPromise = this.loadDocumentToWasm(data);
+
     // Try to get existing PDF first (by ID derived from filename)
-    if (documentId) {
+    if (documentId && this.apiClient) {
       const pdfId = documentId.replace(/\.pdf$/i, '');
       try {
         this.parsedPdf = await this.apiClient.getPdf(pdfId);
         this.documentId = this.parsedPdf.id;
         console.log('[HybridPdfProvider] Using existing PDF from server:', pdfId);
+
+        // Wait for WASM load to complete
+        await wasmLoadPromise;
 
         // Start background thumbnail generation (non-blocking)
         this.generateThumbnails(this.parsedPdf.pageCount).catch((err) => {
@@ -195,9 +246,29 @@ export class HybridPdfProvider {
       }
     }
 
-    // Upload the PDF
-    this.parsedPdf = await this.apiClient.uploadPdf(data, documentId);
-    this.documentId = this.parsedPdf.id;
+    // If API client is available, upload the PDF
+    if (this.apiClient) {
+      this.parsedPdf = await this.apiClient.uploadPdf(data, documentId);
+      this.documentId = this.parsedPdf.id;
+    } else {
+      // WASM-only mode: create minimal ParsedPdf from WASM data
+      const wasmResult = await wasmLoadPromise;
+      this.parsedPdf = {
+        id: wasmResult?.id ?? documentId ?? `wasm-${Date.now()}`,
+        metadata: {
+          title: documentId ?? 'Untitled PDF',
+          keywords: [],
+        },
+        toc: [],
+        pageCount: wasmResult?.pageCount ?? 0,
+        hasTextLayer: true, // WASM always extracts text
+        orientation: 'portrait',
+      };
+      this.documentId = this.parsedPdf.id;
+    }
+
+    // Wait for WASM load to complete (if not already done)
+    await wasmLoadPromise;
 
     // Start background thumbnail generation (non-blocking)
     this.generateThumbnails(this.parsedPdf.pageCount).catch((err) => {
@@ -205,6 +276,27 @@ export class HybridPdfProvider {
     });
 
     return this.parsedPdf;
+  }
+
+  /**
+   * Load document into WASM renderer
+   */
+  private async loadDocumentToWasm(data: ArrayBuffer): Promise<{ id: string; pageCount: number } | null> {
+    if (!this.wasmRenderer || !this.wasmAvailable) {
+      return null;
+    }
+
+    try {
+      const startTime = performance.now();
+      const result = await this.wasmRenderer.loadDocument(data.slice(0)); // Clone to avoid transfer issues
+      this.wasmDocumentId = result.id;
+      console.log(`[HybridPdfProvider] WASM loaded document (${result.pageCount} pages) in ${(performance.now() - startTime).toFixed(1)}ms`);
+      return result;
+    } catch (error) {
+      console.warn('[HybridPdfProvider] WASM document load failed:', error);
+      this.wasmDocumentId = null;
+      return null;
+    }
   }
 
   /**
@@ -228,16 +320,17 @@ export class HybridPdfProvider {
 
   /**
    * Render a page to a blob (with caching)
+   * Uses WASM renderer when available for faster local rendering.
    */
   async renderPage(pageNumber: number, options?: PdfRenderOptions): Promise<Blob> {
-    if (!this.apiClient || !this.documentId) {
+    if (!this.documentId && !this.wasmDocumentId) {
       throw new Error('No document loaded');
     }
 
     const scale = options?.scale ?? 1.5;
 
-    // Check cache first
-    if (this.config.enableCache) {
+    // Check cache first (regardless of render source)
+    if (this.config.enableCache && this.documentId) {
       const cached = await this.pageCache.get(this.documentId, pageNumber, scale);
       if (cached) {
         // Trigger prefetch in background
@@ -248,12 +341,24 @@ export class HybridPdfProvider {
       }
     }
 
-    // Fetch from server
-    const blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
+    let blob: Blob;
 
-    // Cache for later
+    // Use WASM renderer if available and enabled
+    if (this.shouldUseWasm() && this.wasmRenderer && this.wasmDocumentId) {
+      const startTime = performance.now();
+      blob = await this.wasmRenderer.renderPage(pageNumber, options);
+      console.log(`[HybridPdfProvider] WASM rendered page ${pageNumber} @ ${scale}x in ${(performance.now() - startTime).toFixed(1)}ms`);
+    } else if (this.apiClient && this.documentId) {
+      // Fallback to server rendering
+      blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
+    } else {
+      throw new Error('No rendering backend available');
+    }
+
+    // Cache for later (use documentId if available, otherwise wasmDocumentId)
     if (this.config.enableCache) {
-      await this.pageCache.set(this.documentId, pageNumber, scale, blob);
+      const cacheId = this.documentId ?? this.wasmDocumentId!;
+      await this.pageCache.set(cacheId, pageNumber, scale, blob);
     }
 
     // Trigger prefetch in background
@@ -401,23 +506,38 @@ export class HybridPdfProvider {
 
   /**
    * Get text layer for a page
+   * Uses WASM for accurate character-level positions when available.
    */
   async getTextLayer(pageNumber: number): Promise<PdfTextLayerData> {
-    if (!this.apiClient || !this.documentId) {
+    if (!this.documentId && !this.wasmDocumentId) {
       throw new Error('No document loaded');
     }
 
-    return this.apiClient.getPdfTextLayer(this.documentId, pageNumber);
+    // Prefer WASM for more accurate character positions
+    if (this.shouldUseWasm() && this.wasmRenderer && this.wasmDocumentId) {
+      return this.wasmRenderer.getTextLayer(pageNumber);
+    }
+
+    // Fallback to server
+    if (this.apiClient && this.documentId) {
+      return this.apiClient.getPdfTextLayer(this.documentId, pageNumber);
+    }
+
+    throw new Error('No text layer backend available');
   }
 
   /**
    * Get page dimensions
-   * Note: Server should provide page dimensions in a future API endpoint.
-   * For now, returns standard US Letter dimensions at 72 DPI.
+   * Uses WASM for accurate dimensions when available.
    */
-  async getPageDimensions(_pageNumber: number): Promise<{ width: number; height: number }> {
-    if (!this.parsedPdf) {
+  async getPageDimensions(pageNumber: number): Promise<{ width: number; height: number }> {
+    if (!this.parsedPdf && !this.wasmDocumentId) {
       throw new Error('No document loaded');
+    }
+
+    // Use WASM for accurate dimensions
+    if (this.wasmRenderer && this.wasmDocumentId) {
+      return this.wasmRenderer.getPageDimensions(pageNumber);
     }
 
     // TODO: Add server API endpoint to get per-page dimensions
@@ -427,13 +547,24 @@ export class HybridPdfProvider {
 
   /**
    * Search for text
+   * Uses WASM for search with bounding boxes when available.
    */
   async search(query: string, limit: number = 50): Promise<PdfSearchResult[]> {
-    if (!this.apiClient || !this.documentId) {
+    if (!this.documentId && !this.wasmDocumentId) {
       throw new Error('No document loaded');
     }
 
-    return this.apiClient.searchPdf(this.documentId, query, limit);
+    // Use WASM for search with bounding boxes
+    if (this.shouldUseWasm() && this.wasmRenderer && this.wasmDocumentId) {
+      return this.wasmRenderer.search(query, limit);
+    }
+
+    // Fallback to server
+    if (this.apiClient && this.documentId) {
+      return this.apiClient.searchPdf(this.documentId, query, limit);
+    }
+
+    throw new Error('No search backend available');
   }
 
   /**
@@ -454,16 +585,33 @@ export class HybridPdfProvider {
    * Destroy the provider and release resources
    */
   async destroy(): Promise<void> {
+    // Signal destroy to stop in-progress operations
+    this.isDestroyed = true;
+
     // Cancel pending prefetch
     this.cancelPrefetch();
+
+    // Wait for any in-progress prefetch to complete
+    let waitCount = 0;
+    while (this.isPrefetching && waitCount < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      waitCount++;
+    }
+
+    // Unload WASM document
+    if (this.wasmRenderer && this.wasmDocumentId) {
+      await this.wasmRenderer.unloadDocument();
+    }
 
     // Destroy page cache
     this.pageCache.destroy();
 
     this.documentId = null;
+    this.wasmDocumentId = null;
     this.parsedPdf = null;
     this.pdfData = null;
     this.apiClient = null;
+    this.wasmRenderer = null;
   }
 
   /**
@@ -523,7 +671,7 @@ export class HybridPdfProvider {
    * Process the prefetch queue sequentially
    */
   private async processPrefetchQueue(scale: number): Promise<void> {
-    if (this.isPrefetching || this.prefetchQueue.length === 0) return;
+    if (this.isDestroyed || this.isPrefetching || this.prefetchQueue.length === 0) return;
     if (!this.apiClient || !this.documentId) return;
 
     this.isPrefetching = true;

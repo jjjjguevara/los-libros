@@ -2,23 +2,21 @@
 //!
 //! In-memory cache to avoid re-parsing PDFs and re-rendering pages.
 //!
-//! IMPORTANT: pdfium is NOT thread-safe. Each PdfParser is wrapped in a Mutex
-//! to serialize all operations on a given PDF document. This prevents crashes
-//! when multiple requests access the same document concurrently.
+//! Thread Safety: MuPDF's fz_context is not thread-safe, so each PdfParser
+//! is wrapped in a parking_lot::Mutex for efficient serialization. This ensures
+//! safe concurrent access to PDF documents.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use lru::LruCache;
+use parking_lot::Mutex;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
 /// Timeout for PDF parsing operations (loading a new PDF)
-/// Note: Some PDFs cause pdfium to hang indefinitely. This timeout ensures
-/// the client gets a response rather than waiting forever.
-/// The blocking thread may continue running, but at least the request completes.
-const PARSE_TIMEOUT_SECS: u64 = 30; // 30 seconds max - faster feedback on problematic PDFs
+const PARSE_TIMEOUT_SECS: u64 = 30; // 30 seconds max
 /// Timeout for page rendering operations
 const RENDER_TIMEOUT_SECS: u64 = 30; // 30 seconds per page
 /// Timeout for text extraction operations
@@ -26,11 +24,11 @@ const TEXT_TIMEOUT_SECS: u64 = 15; // 15 seconds per page
 /// Timeout for search operations (prevent DoS on large PDFs)
 const SEARCH_TIMEOUT_SECS: u64 = 30; // 30 seconds max for search
 
-use super::parser::{PdfParseError, PdfParser};
-use super::types::{ImageFormat, PageRenderRequest, ParsedPdf, TextLayer};
+use super::mupdf_parser::{PdfParseError, PdfParser};
+use super::types::{FormInfo, ImageFormat, PageRenderRequest, ParsedPdf, SignatureInfo, TextLayer};
 
 /// Thread-safe wrapper for PdfParser that serializes all operations
-/// pdfium is NOT thread-safe, so we must use a Mutex to prevent concurrent access
+/// MuPDF is NOT thread-safe, so we use parking_lot::Mutex for efficient serialization
 pub struct SafePdfParser {
     inner: Mutex<PdfParser>,
 }
@@ -44,50 +42,56 @@ impl SafePdfParser {
 
     /// Render a page with exclusive access to the parser
     pub fn render_page(&self, request: &PageRenderRequest) -> Result<Vec<u8>, PdfParseError> {
-        let parser = self.inner.lock().map_err(|e| {
-            PdfParseError::RenderError(format!("Failed to acquire parser lock: {}", e))
-        })?;
+        let parser = self.inner.lock();
         parser.render_page(request)
     }
 
     /// Render a thumbnail with exclusive access
     pub fn render_thumbnail(&self, page: usize, max_size: u32) -> Result<Vec<u8>, PdfParseError> {
-        let parser = self.inner.lock().map_err(|e| {
-            PdfParseError::RenderError(format!("Failed to acquire parser lock: {}", e))
-        })?;
+        let parser = self.inner.lock();
         parser.render_thumbnail(page, max_size)
     }
 
     /// Get text layer with exclusive access
     pub fn get_text_layer(&self, page: usize) -> Result<TextLayer, PdfParseError> {
-        let parser = self.inner.lock().map_err(|e| {
-            PdfParseError::LoadError(format!("Failed to acquire parser lock: {}", e))
-        })?;
+        let parser = self.inner.lock();
         parser.get_text_layer(page)
     }
 
     /// Search with exclusive access
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<super::types::PdfSearchResult>, PdfParseError> {
-        let parser = self.inner.lock().map_err(|e| {
-            PdfParseError::LoadError(format!("Failed to acquire parser lock: {}", e))
-        })?;
+        let parser = self.inner.lock();
         parser.search(query, limit)
     }
 
     /// Get page text with exclusive access
     pub fn get_page_text(&self, page: usize) -> Result<String, PdfParseError> {
-        let parser = self.inner.lock().map_err(|e| {
-            PdfParseError::LoadError(format!("Failed to acquire parser lock: {}", e))
-        })?;
+        let parser = self.inner.lock();
         parser.get_page_text(page)
     }
 
     /// Get page dimensions with exclusive access
     pub fn get_page_dimensions(&self, page: usize) -> Result<super::types::PageDimensions, PdfParseError> {
-        let parser = self.inner.lock().map_err(|e| {
-            PdfParseError::LoadError(format!("Failed to acquire parser lock: {}", e))
-        })?;
+        let parser = self.inner.lock();
         parser.get_page_dimensions(page)
+    }
+
+    /// Get form information with exclusive access
+    pub fn get_form_info(&self) -> Result<FormInfo, PdfParseError> {
+        let parser = self.inner.lock();
+        parser.get_form_info()
+    }
+
+    /// Get signatures with exclusive access
+    pub fn get_signatures(&self) -> Result<Vec<SignatureInfo>, PdfParseError> {
+        let parser = self.inner.lock();
+        parser.get_signatures()
+    }
+
+    /// Check if PDF has forms with exclusive access
+    pub fn has_forms(&self) -> bool {
+        let parser = self.inner.lock();
+        parser.has_forms()
     }
 }
 
@@ -489,6 +493,25 @@ impl PdfCache {
         tokio::task::spawn_blocking(move || parser.get_page_dimensions(page))
             .await
             .map_err(|e| PdfParseError::LoadError(format!("Task join error: {}", e)))?
+    }
+
+    /// Execute a function with access to the parser
+    ///
+    /// This is useful for operations that need direct parser access,
+    /// like form field extraction or signature verification.
+    pub async fn with_parser<F, R>(&self, book_id: &str, f: F) -> Option<R>
+    where
+        F: FnOnce(&SafePdfParser) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let parser = {
+            let parsers = self.parsers.read().await;
+            parsers.get(book_id).cloned()?
+        };
+
+        tokio::task::spawn_blocking(move || f(&parser))
+            .await
+            .ok()
     }
 
     /// Remove a PDF from the cache

@@ -171,8 +171,17 @@ pub struct CharPosition {
     pub char: char,
     /// X position (in points)
     pub x: f32,
+    /// Y position (in points)
+    pub y: f32,
     /// Character width
     pub width: f32,
+    /// Character height
+    pub height: f32,
+    /// Font size
+    pub font_size: f32,
+    /// Font name (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_name: Option<String>,
 }
 
 /// Page dimensions
@@ -183,6 +192,16 @@ pub struct PageDimensions {
     pub width: f32,
     /// Height in points
     pub height: f32,
+}
+
+/// Bounding box for search result highlighting
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundingBox {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// Search result within a PDF
@@ -199,6 +218,9 @@ pub struct PdfSearchResult {
     pub suffix: Option<String>,
     /// Position on page (normalized 0-1)
     pub position: Option<NormalizedPosition>,
+    /// Bounding boxes for highlighting (normalized 0-1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<Vec<BoundingBox>>,
 }
 
 /// Normalized position on a page (0-1)
@@ -215,6 +237,181 @@ pub struct NormalizedRect {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+/// Form field type in a PDF
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FormFieldType {
+    /// Single-line or multi-line text input
+    Text,
+    /// Checkbox field
+    Checkbox,
+    /// Radio button (part of a group)
+    Radio,
+    /// Combo box / dropdown
+    Dropdown,
+    /// List box (multiple visible options)
+    ListBox,
+    /// Digital signature field
+    Signature,
+    /// Push button
+    Button,
+    /// Unknown or unsupported field type
+    Unknown,
+}
+
+impl Default for FormFieldType {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+/// A form field in a PDF document
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormField {
+    /// Field name (from /T key)
+    pub name: String,
+    /// Full field name including parent path (from /T hierarchy)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    /// Field type
+    pub field_type: FormFieldType,
+    /// Current value (text for text fields, "Yes"/"Off" for checkboxes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Default value
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+    /// Page number where the field appears (1-indexed)
+    pub page: usize,
+    /// Bounding box on the page (normalized 0-1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<NormalizedRect>,
+    /// Whether the field is read-only
+    pub read_only: bool,
+    /// Whether the field is required
+    pub required: bool,
+    /// Options for dropdown/listbox fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<FormOption>>,
+    /// Maximum length for text fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<usize>,
+    /// Whether this is a multi-line text field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiline: Option<bool>,
+    /// Whether this is a password field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<bool>,
+}
+
+/// Option for dropdown/listbox fields
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormOption {
+    /// Display text
+    pub label: String,
+    /// Export value (may differ from label)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Whether this option is currently selected
+    pub selected: bool,
+}
+
+/// Form information for a PDF
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormInfo {
+    /// Whether the PDF has an AcroForm
+    pub has_acro_form: bool,
+    /// Whether the PDF has an XFA form (requires special handling)
+    pub has_xfa_form: bool,
+    /// Total number of form fields
+    pub field_count: usize,
+    /// List of form fields
+    pub fields: Vec<FormField>,
+    /// Whether the form needs calculation (has computed fields)
+    pub needs_calculation: bool,
+}
+
+impl Default for FormInfo {
+    fn default() -> Self {
+        Self {
+            has_acro_form: false,
+            has_xfa_form: false,
+            field_count: 0,
+            fields: Vec::new(),
+            needs_calculation: false,
+        }
+    }
+}
+
+/// Request to fill a form field
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillFormRequest {
+    /// Field name or full name
+    pub field_name: String,
+    /// New value
+    pub value: String,
+}
+
+/// Result of filling form fields
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillFormResult {
+    /// Number of fields successfully updated
+    pub fields_updated: usize,
+    /// Any errors that occurred
+    pub errors: Vec<String>,
+    /// Whether the form was recalculated
+    pub recalculated: bool,
+}
+
+/// Digital signature information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureInfo {
+    /// Signer name (from /Name key)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signer_name: Option<String>,
+    /// Signing time (from /M key)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_time: Option<String>,
+    /// Location (from /Location key)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Reason for signing (from /Reason key)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Whether the signature covers the whole document
+    pub covers_whole_document: bool,
+    /// Signature validation status
+    pub validation_status: SignatureValidationStatus,
+    /// Page containing the signature (1-indexed)
+    pub page: usize,
+}
+
+/// Signature validation status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SignatureValidationStatus {
+    /// Signature is valid
+    Valid,
+    /// Signature is invalid (document modified)
+    Invalid,
+    /// Cannot verify (missing certificate chain, etc.)
+    Unknown,
+    /// Signature verification not attempted
+    NotVerified,
+}
+
+impl Default for SignatureValidationStatus {
+    fn default() -> Self {
+        Self::NotVerified
+    }
 }
 
 #[cfg(test)]

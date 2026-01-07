@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS highlights (
     user_id TEXT,
     -- Format: 'epub' or 'pdf'
     document_format TEXT NOT NULL DEFAULT 'epub',
+    -- Type: 'highlight', 'underline', 'note'
+    type TEXT NOT NULL DEFAULT 'highlight',
     -- EPUB location (CFI string)
     cfi TEXT NOT NULL DEFAULT '',
     -- PDF location (page number, 1-indexed)
@@ -110,6 +112,7 @@ CREATE INDEX IF NOT EXISTS idx_highlights_book_id ON highlights(book_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_user_id ON highlights(user_id);
 CREATE INDEX IF NOT EXISTS idx_highlights_cfi ON highlights(cfi);
 CREATE INDEX IF NOT EXISTS idx_highlights_format ON highlights(document_format);
+CREATE INDEX IF NOT EXISTS idx_highlights_type ON highlights(type);
 CREATE INDEX IF NOT EXISTS idx_highlights_page ON highlights(page);
 
 -- Reading sessions table

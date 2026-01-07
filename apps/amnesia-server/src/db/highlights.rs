@@ -62,6 +62,39 @@ pub struct PdfRect {
     pub height: f64,
 }
 
+/// Annotation type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AnnotationType {
+    #[default]
+    Highlight,
+    Underline,
+    Note,
+}
+
+impl std::fmt::Display for AnnotationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Highlight => write!(f, "highlight"),
+            Self::Underline => write!(f, "underline"),
+            Self::Note => write!(f, "note"),
+        }
+    }
+}
+
+impl std::str::FromStr for AnnotationType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "highlight" => Ok(Self::Highlight),
+            "underline" => Ok(Self::Underline),
+            "note" => Ok(Self::Note),
+            _ => Err(format!("Unknown annotation type: {}", s)),
+        }
+    }
+}
+
 /// Highlight record (supports both EPUB and PDF)
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +104,10 @@ pub struct Highlight {
     pub user_id: Option<String>,
     /// Document format: 'epub' or 'pdf'
     pub document_format: String,
+    /// Annotation type: 'highlight', 'underline', 'note'
+    #[serde(rename = "type")]
+    #[sqlx(rename = "type")]
+    pub annotation_type: String,
     /// EPUB CFI location (empty for PDF)
     pub cfi: String,
     /// PDF page number (1-indexed, None for EPUB)
@@ -134,6 +171,9 @@ pub struct CreateHighlight {
     /// Document format (default: epub)
     #[serde(default)]
     pub document_format: Option<String>,
+    /// Annotation type: highlight, underline, note (default: highlight)
+    #[serde(rename = "type")]
+    pub annotation_type: Option<String>,
     /// EPUB CFI location
     pub cfi: Option<String>,
     /// PDF page number (1-indexed)
@@ -173,7 +213,7 @@ pub struct HighlightRepository<'a> {
 
 /// All columns to select for highlights
 const HIGHLIGHT_COLUMNS: &str = r#"
-    id, book_id, user_id, document_format, cfi, page, text, chapter,
+    id, book_id, user_id, document_format, type, cfi, page, text, chapter,
     page_percent, color, annotation, text_prefix, text_suffix,
     region_x, region_y, region_width, region_height, rects_json,
     created_at, updated_at
@@ -279,6 +319,7 @@ impl<'a> HighlightRepository<'a> {
         let now = Utc::now().to_rfc3339();
         let color = data.color.as_deref().unwrap_or("yellow");
         let format = data.document_format.as_deref().unwrap_or("epub");
+        let annotation_type = data.annotation_type.as_deref().unwrap_or("highlight");
         let cfi = data.cfi.as_deref().unwrap_or("");
 
         // Serialize rects to JSON if provided
@@ -295,18 +336,19 @@ impl<'a> HighlightRepository<'a> {
         sqlx::query(
             r#"
             INSERT INTO highlights (
-                id, book_id, user_id, document_format, cfi, page, text, chapter,
+                id, book_id, user_id, document_format, type, cfi, page, text, chapter,
                 page_percent, color, annotation, text_prefix, text_suffix,
                 region_x, region_y, region_width, region_height, rects_json,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
         .bind(book_id)
         .bind(user_id)
         .bind(format)
+        .bind(annotation_type)
         .bind(cfi)
         .bind(data.page)
         .bind(&data.text)

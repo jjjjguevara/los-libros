@@ -446,11 +446,16 @@ export interface PdfTextItem {
 
 /**
  * Character position for precise text selection
+ * Enhanced with full glyph metrics from MuPDF
  */
 export interface PdfCharPosition {
   char: string;
   x: number;
+  y: number;
   width: number;
+  height: number;
+  fontSize: number;
+  fontName?: string;
 }
 
 /**
@@ -462,7 +467,7 @@ export interface PdfPageDimensions {
 }
 
 /**
- * PDF search result
+ * PDF search result with bounding boxes for highlighting
  */
 export interface PdfSearchResult {
   page: number;
@@ -470,6 +475,8 @@ export interface PdfSearchResult {
   prefix?: string;
   suffix?: string;
   position?: { x: number; y: number };
+  /** Bounding boxes for highlighting search matches (from MuPDF) */
+  bounds?: PdfRect[];
 }
 
 /**

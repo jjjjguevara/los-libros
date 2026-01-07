@@ -60,10 +60,16 @@ futures = "0.3"
 lol_html = "2.0"
 html-escape = "0.2"
 
-# PDF rendering
-pdfium-render = { version = "0.8", features = ["thread_safe"] }
+# PDF rendering (MuPDF - AGPL-3.0 licensed)
+# Migrated from pdfium-render to mupdf for:
+# - Better thread safety (no unsafe transmutes)
+# - Accurate character positions via stext API
+# - Search with bounding boxes
+# - Actual font metadata extraction
+mupdf = "0.5"
 image = "0.25"
 lru = "0.12"
+parking_lot = "0.12"  # For thread-safe context pool
 
 # OCR
 async-trait = "0.1"

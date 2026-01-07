@@ -33,6 +33,7 @@
     "minisearch": "^7.2.0",
     "nunjucks": "^3.2.4",
     "p-queue": "^8.0.1",
+    "mupdf": "^1.26.0",
     "pdfjs-dist": "^4.0.0",
     "sql.js": "^1.10.0",
     "uuid": "^9.0.0"
