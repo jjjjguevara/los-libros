@@ -2,10 +2,6 @@
 //!
 //! Provides PDF parsing functionality for metadata extraction,
 //! page rendering, and text layer generation.
-//!
-//! IMPORTANT: PDFium has global C++ state. The PdfService actor pattern is used
-//! to ensure PDFium is initialized ONCE and all operations happen on a dedicated
-//! thread. See service.rs for the Actor implementation.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -69,15 +65,21 @@ unsafe impl Send for PdfParser {}
 unsafe impl Sync for PdfParser {}
 
 impl PdfParser {
-    /// Create parser from file path using a shared Pdfium instance
-    ///
-    /// This is the preferred constructor when using the PdfService actor pattern.
-    /// The Pdfium instance is shared across all parsers on the actor thread.
-    pub fn from_path_with_pdfium<P: AsRef<Path>>(
-        path: P,
-        book_id: String,
-        pdfium: Arc<Pdfium>,
-    ) -> Result<Self, PdfParseError> {
+    /// Initialize pdfium library
+    fn init_pdfium() -> Result<Pdfium, PdfParseError> {
+        // Try to load pdfium from common locations
+        let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
+            .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("/usr/lib")))
+            .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("/usr/local/lib")))
+            .or_else(|_| Pdfium::bind_to_system_library())
+            .map_err(|e| PdfParseError::PdfiumInit(e.to_string()))?;
+
+        Ok(Pdfium::new(bindings))
+    }
+
+    /// Create parser from file path
+    pub fn from_path<P: AsRef<Path>>(path: P, book_id: String) -> Result<Self, PdfParseError> {
+        let pdfium = Arc::new(Self::init_pdfium()?);
         let path_buf = path.as_ref().to_path_buf();
 
         let document = pdfium
@@ -97,15 +99,13 @@ impl PdfParser {
         })
     }
 
-    /// Create parser from bytes using a shared Pdfium instance
+    /// Create parser from bytes
     ///
-    /// This is the preferred constructor when using the PdfService actor pattern.
-    /// The Pdfium instance is shared across all parsers on the actor thread.
-    pub fn from_bytes_with_pdfium(
-        data: &[u8],
-        book_id: String,
-        pdfium: Arc<Pdfium>,
-    ) -> Result<Self, PdfParseError> {
+    /// Takes ownership of a single clone of the data. The previous implementation
+    /// made an unnecessary extra clone - now pdfium takes the only copy directly.
+    pub fn from_bytes(data: &[u8], book_id: String) -> Result<Self, PdfParseError> {
+        let pdfium = Arc::new(Self::init_pdfium()?);
+
         // Single clone from slice to owned Vec, passed directly to pdfium
         // pdfium takes ownership internally, managing the lifetime
         let owned_data = data.to_vec();
@@ -151,23 +151,6 @@ impl PdfParser {
 
         let page_labels = self.extract_page_labels();
 
-        // Extract dimensions for all pages (supports variable page sizes)
-        let all_page_dimensions: Vec<PageDimensions> = self
-            .document
-            .pages()
-            .iter()
-            .map(|page| PageDimensions {
-                width: page.width().value,
-                height: page.height().value,
-            })
-            .collect();
-
-        // Get first page dimensions for backwards compatibility
-        let (page_width, page_height) = all_page_dimensions
-            .first()
-            .map(|d| (d.width, d.height))
-            .unwrap_or((612.0, 792.0)); // US Letter fallback
-
         Ok(ParsedPdf {
             id: self.book_id.clone(),
             metadata,
@@ -176,9 +159,6 @@ impl PdfParser {
             page_labels,
             has_text_layer,
             orientation,
-            page_width,
-            page_height,
-            page_dimensions: Some(all_page_dimensions),
         })
     }
 
@@ -332,20 +312,13 @@ impl PdfParser {
             .map_err(|e| PdfParseError::LoadError(e.to_string()))
     }
 
-    /// DPI correction factor for PDFium rendering.
-    /// PDFium returns approximately 65% of the requested dimensions, so we
-    /// multiply by 1.54 (1.0 / 0.65) to get the expected output size.
-    const DPI_CORRECTION_FACTOR: f32 = 1.54;
-
     /// Render a page to image bytes
     pub fn render_page(&self, request: &PageRenderRequest) -> Result<Vec<u8>, PdfParseError> {
         let page = self.get_page(request.page)?;
 
-        // Calculate dimensions based on scale, with DPI correction
-        // PDFium returns ~65% of requested dimensions, so we apply a correction factor
-        let corrected_scale = request.scale * Self::DPI_CORRECTION_FACTOR;
-        let width = (page.width().value * corrected_scale) as u32;
-        let height = (page.height().value * corrected_scale) as u32;
+        // Calculate dimensions based on scale
+        let width = (page.width().value * request.scale) as u32;
+        let height = (page.height().value * request.scale) as u32;
 
         // Create render config with rotation
         let rotation = match request.rotation {
@@ -367,7 +340,7 @@ impl PdfParser {
 
         // Convert to image bytes
         let image = bitmap.as_image();
-        self.encode_image(&image, request.format, request.quality)
+        self.encode_image(&image, request.format)
     }
 
     /// Render a thumbnail (low resolution)
@@ -384,7 +357,6 @@ impl PdfParser {
             scale,
             format: ImageFormat::Jpeg, // JPEG for smaller thumbnails
             rotation: 0,
-            quality: 75, // Lower quality for thumbnails to reduce size
         };
 
         self.render_page(&request)
@@ -395,31 +367,23 @@ impl PdfParser {
         &self,
         image: &image::DynamicImage,
         format: ImageFormat,
-        quality: u8,
     ) -> Result<Vec<u8>, PdfParseError> {
         use std::io::Cursor;
-        use image::codecs::jpeg::JpegEncoder;
 
         let mut output = Vec::new();
 
         match format {
             ImageFormat::Png => {
-                // PNG is lossless, quality doesn't apply
                 image
                     .write_to(&mut Cursor::new(&mut output), image::ImageFormat::Png)
                     .map_err(|e| PdfParseError::ImageError(e.to_string()))?;
             }
             ImageFormat::Jpeg => {
-                // Use JpegEncoder with quality setting
-                let mut encoder = JpegEncoder::new_with_quality(&mut output, quality);
-                encoder
-                    .encode_image(image)
+                image
+                    .write_to(&mut Cursor::new(&mut output), image::ImageFormat::Jpeg)
                     .map_err(|e| PdfParseError::ImageError(e.to_string()))?;
             }
             ImageFormat::Webp => {
-                // WebP encoder quality is set via encoder configuration
-                // The image crate's WebP encoder uses quality 80 by default
-                // For now, we use the default write_to as quality control is limited
                 image
                     .write_to(&mut Cursor::new(&mut output), image::ImageFormat::WebP)
                     .map_err(|e| PdfParseError::ImageError(e.to_string()))?;
@@ -594,7 +558,16 @@ impl PdfParser {
 
 #[cfg(test)]
 mod tests {
-    // Note: PDF parser tests should be done through PdfService
-    // which properly manages PDFium's lifecycle.
-    // See service.rs for integration tests.
+    use super::*;
+
+    // Note: These tests require a pdfium library to be installed
+    // They are marked as ignore by default
+
+    #[test]
+    #[ignore]
+    fn test_pdf_parser_init() {
+        // This test requires pdfium to be installed
+        let result = PdfParser::init_pdfium();
+        assert!(result.is_ok() || result.is_err()); // Just check it doesn't panic
+    }
 }

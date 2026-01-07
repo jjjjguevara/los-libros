@@ -70,7 +70,6 @@ export class PdfTextLayer {
 
   /**
    * Render text layer from server data
-   * Uses DocumentFragment for batched DOM insertion (better performance)
    */
   render(
     textLayer: TextLayerData,
@@ -92,10 +91,6 @@ export class PdfTextLayer {
     const isRotated = rotation === 90 || rotation === 270;
     const scaleX = displayWidth / (isRotated ? textLayer.height : textLayer.width);
     const scaleY = displayHeight / (isRotated ? textLayer.width : textLayer.height);
-
-    // Use DocumentFragment for batched DOM insertion
-    // This prevents multiple reflows and repaints
-    const fragment = document.createDocumentFragment();
 
     // Create text spans for each item
     for (const item of textLayer.items) {
@@ -130,11 +125,8 @@ export class PdfTextLayer {
         ${pos.transform ? `transform: ${pos.transform};` : ''}
       `;
 
-      fragment.appendChild(span);
+      this.textContainer.appendChild(span);
     }
-
-    // Single DOM insertion for all spans
-    this.textContainer.appendChild(fragment);
   }
 
   /**

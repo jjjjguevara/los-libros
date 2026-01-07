@@ -8,15 +8,12 @@
 export interface CanvasLayerConfig {
   /** Device pixel ratio for HiDPI displays */
   pixelRatio?: number;
-  /** Enable image smoothing/interpolation. Default: true */
-  enableImageSmoothing?: boolean;
 }
 
 export class PdfCanvasLayer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private devicePixelRatio: number;
-  private enableImageSmoothing: boolean;
 
   // Current state
   private currentWidth = 0;
@@ -42,7 +39,6 @@ export class PdfCanvasLayer {
     this.ctx = ctx;
 
     this.devicePixelRatio = config?.pixelRatio ?? window.devicePixelRatio ?? 1;
-    this.enableImageSmoothing = config?.enableImageSmoothing ?? true;
 
     container.appendChild(this.canvas);
   }
@@ -87,14 +83,8 @@ export class PdfCanvasLayer {
     const image = new Image();
 
     return new Promise((resolve, reject) => {
-      image.onload = async () => {
+      image.onload = () => {
         try {
-          // Decode image off main thread for better performance
-          // This prevents jank during image decode
-          if (image.decode) {
-            await image.decode();
-          }
-
           // Get the actual image dimensions from the server-rendered image
           // Note: The server already applies rotation, so the image dimensions
           // reflect the rotated page (e.g., portrait becomes landscape at 90°)
@@ -124,10 +114,6 @@ export class PdfCanvasLayer {
 
           // Clear canvas
           this.ctx.clearRect(0, 0, displayWidth, displayHeight);
-
-          // Apply image smoothing setting
-          this.ctx.imageSmoothingEnabled = this.enableImageSmoothing;
-          this.ctx.imageSmoothingQuality = 'high';
 
           // Draw image directly - server already applied rotation
           this.ctx.drawImage(image, 0, 0, displayWidth, displayHeight);

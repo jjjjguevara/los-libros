@@ -6,11 +6,9 @@
  * scrolled mode (vertical/horizontal continuous scrolling).
  */
 
-import { PdfPageElement, type PageRenderData, type PageHighlight, type ReadingMode, type TextLayerMode } from './pdf-page-element';
-import { PageElementPool } from './page-element-pool';
+import { PdfPageElement, type PageRenderData, type PageHighlight, type ReadingMode } from './pdf-page-element';
 import { calculateOptimalLayout, type LayoutResult, type LayoutMode } from './pdf-layout-calculator';
 import type { PdfTextLayer as TextLayerData, PdfRenderOptions } from '../types';
-import type { SvgTextLayerFetcher } from './pdf-svg-text-layer';
 
 export type DisplayMode = 'paginated' | 'scrolled';
 export type ScrollDirection = 'vertical' | 'horizontal';
@@ -30,10 +28,6 @@ export interface MultiPageConfig {
   gap: number;
   /** Padding around content */
   padding: number;
-  /** Page width in points (72 points = 1 inch). Default: 612 (US Letter) */
-  pageWidth?: number;
-  /** Page height in points (72 points = 1 inch). Default: 792 (US Letter) */
-  pageHeight?: number;
   /** Pixel ratio for HiDPI */
   pixelRatio?: number;
   /** Enable text anti-aliasing */
@@ -42,22 +36,6 @@ export interface MultiPageConfig {
   enableImageSmoothing?: boolean;
   /** Reading mode / theme (light, sepia, night) */
   readingMode?: ReadingMode;
-  /** DPI for server-side rendering. Default: 150 */
-  renderDpi?: number;
-  /** Image format for rendered pages. Default: 'png' */
-  imageFormat?: 'png' | 'jpeg' | 'webp';
-  /** Image quality for lossy formats (1-100). Default: 85 */
-  imageQuality?: number;
-  /** Enable DOM element pooling for performance. Default: true */
-  enableDomPooling?: boolean;
-  /** Use IntersectionObserver for visibility detection. Default: true */
-  useIntersectionObserver?: boolean;
-  /** Text layer rendering mode. Default: 'svg' for crisp text at any zoom */
-  textLayerMode?: TextLayerMode;
-  /** PDF identifier (required for SVG text layer mode) */
-  pdfId?: string;
-  /** Function to fetch SVG text layer (required for SVG text layer mode) */
-  svgTextLayerFetcher?: SvgTextLayerFetcher;
 }
 
 export interface PageDataProvider {
@@ -122,13 +100,6 @@ export class PdfMultiPageContainer {
   private renderVersion = 0; // Incremented on each zoom/layout change to cancel stale renders
   private isZooming = false; // Track if we're in a zoom operation
 
-  // IntersectionObserver for efficient visibility detection
-  private visibilityObserver: IntersectionObserver | null = null;
-  private observedVisiblePages: Set<number> = new Set();
-
-  // DOM element pooling for performance
-  private elementPool: PageElementPool | null = null;
-
   constructor(
     container: HTMLElement,
     provider: PageDataProvider,
@@ -136,13 +107,6 @@ export class PdfMultiPageContainer {
   ) {
     this.container = container;
     this.provider = provider;
-    console.log('[PdfMultiPageContainer] Constructor called with config:', {
-      renderDpi: config.renderDpi,
-      imageFormat: config.imageFormat,
-      imageQuality: config.imageQuality,
-      scale: config.scale,
-    });
-
     this.config = {
       displayMode: config.displayMode ?? 'paginated',
       scrollDirection: config.scrollDirection ?? 'vertical',
@@ -150,46 +114,11 @@ export class PdfMultiPageContainer {
       scale: config.scale ?? 1.5,
       gap: config.gap ?? 20,
       padding: config.padding ?? 20,
-      // Page dimensions from PDF (72 points = 1 inch)
-      pageWidth: config.pageWidth ?? 612,
-      pageHeight: config.pageHeight ?? 792,
       pixelRatio: config.pixelRatio ?? window.devicePixelRatio ?? 1,
       enableTextAntialiasing: config.enableTextAntialiasing ?? true,
       enableImageSmoothing: config.enableImageSmoothing ?? true,
       readingMode: config.readingMode ?? 'device',
-      enableDomPooling: config.enableDomPooling ?? true,
-      useIntersectionObserver: config.useIntersectionObserver ?? true,
-      textLayerMode: config.textLayerMode ?? 'svg', // Default to SVG for crisp text
-      pdfId: config.pdfId,
-      svgTextLayerFetcher: config.svgTextLayerFetcher,
-      // Render quality settings - now properly wired from settings
-      renderDpi: config.renderDpi ?? 150,
-      imageFormat: config.imageFormat ?? 'png',
-      imageQuality: config.imageQuality ?? 85,
     };
-
-    // Set page dimensions from config (for correct aspect ratio)
-    this.pageWidth = this.config.pageWidth!;
-    this.pageHeight = this.config.pageHeight!;
-
-    console.log('[PdfMultiPageContainer] Final config:', {
-      renderDpi: this.config.renderDpi,
-      imageFormat: this.config.imageFormat,
-      imageQuality: this.config.imageQuality,
-    });
-
-    // Create DOM element pool if enabled
-    if (this.config.enableDomPooling) {
-      this.elementPool = new PageElementPool({
-        maxPoolSize: 20,
-        pixelRatio: this.config.pixelRatio,
-        enableTextAntialiasing: this.config.enableTextAntialiasing,
-        enableImageSmoothing: this.config.enableImageSmoothing,
-        textLayerMode: this.config.textLayerMode,
-        pdfId: this.config.pdfId,
-        svgTextLayerFetcher: this.config.svgTextLayerFetcher,
-      });
-    }
 
     // Create scroll container
     this.scrollContainer = document.createElement('div');
@@ -208,11 +137,6 @@ export class PdfMultiPageContainer {
 
     // Setup wheel listener for paginated mode dampening
     this.setupWheelListener();
-
-    // Setup IntersectionObserver for visibility detection (if enabled)
-    if (this.config.useIntersectionObserver) {
-      this.setupVisibilityObserver();
-    }
   }
 
   /**
@@ -222,23 +146,6 @@ export class PdfMultiPageContainer {
     this.pageCount = pageCount;
     this.calculateLayout();
     this.updatePagesContainerSize();
-  }
-
-  /**
-   * Set page dimensions (called after document loads with actual PDF dimensions)
-   * This is necessary because the container is created before the document is loaded
-   */
-  setPageDimensions(width: number, height: number): void {
-    this.pageWidth = width;
-    this.pageHeight = height;
-
-    // Recalculate layout with new dimensions if already initialized
-    if (this.pageCount > 0) {
-      this.calculateLayout();
-      this.updatePagesContainerSize();
-      // Re-render visible pages with new aspect ratio
-      this.renderVisiblePages();
-    }
   }
 
   /**
@@ -329,8 +236,6 @@ export class PdfMultiPageContainer {
           box-sizing: border-box;
           min-width: 100%;
           min-height: 100%;
-          contain: layout;
-          will-change: transform;
         `;
       } else {
         // Vertical scroll: pages wrap into rows, centered
@@ -346,8 +251,6 @@ export class PdfMultiPageContainer {
           padding: ${this.config.padding}px;
           box-sizing: border-box;
           min-width: 100%;
-          contain: layout;
-          will-change: transform;
         `;
       }
     } else {
@@ -364,8 +267,6 @@ export class PdfMultiPageContainer {
         min-height: 100%;
         min-width: 100%;
         box-sizing: border-box;
-        contain: layout;
-        will-change: transform;
       `;
     }
   }
@@ -444,11 +345,10 @@ export class PdfMultiPageContainer {
       clearTimeout(this.zoomDebounceTimeout);
     }
 
-    this.zoomDebounceTimeout = window.setTimeout(async () => {
+    this.zoomDebounceTimeout = window.setTimeout(() => {
+      this.isZooming = false;
       this.zoomDebounceTimeout = null;
-      // Keep isZooming=true until render completes to prevent page removal during render
-      await this.renderVisiblePages();
-      this.isZooming = false; // Only reset AFTER render completes
+      this.renderVisiblePages();
     }, 150); // Wait 150ms after last zoom change before rendering
   }
 
@@ -559,87 +459,6 @@ export class PdfMultiPageContainer {
         }, 300); // Match page turn animation duration
       }
     }, { passive: false });
-  }
-
-  /**
-   * Setup IntersectionObserver for efficient visibility detection
-   * Uses browser-native visibility detection instead of manual bounds checking
-   */
-  private setupVisibilityObserver(): void {
-    // Only use IntersectionObserver in scrolled mode
-    // Paginated mode uses explicit page navigation
-    if (typeof IntersectionObserver === 'undefined') {
-      console.warn('[PdfContainer] IntersectionObserver not supported, using fallback');
-      return;
-    }
-
-    this.visibilityObserver = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          const pageNumber = parseInt(entry.target.getAttribute('data-page') || '0', 10);
-          if (pageNumber === 0) continue;
-
-          if (entry.isIntersecting) {
-            this.observedVisiblePages.add(pageNumber);
-          } else {
-            this.observedVisiblePages.delete(pageNumber);
-          }
-        }
-      },
-      {
-        root: this.scrollContainer,
-        // Render buffer: pre-render pages before they're visible
-        rootMargin: '200px 0px 200px 0px',
-        // Trigger at multiple thresholds for granular visibility info
-        threshold: [0, 0.1, 0.5, 1.0],
-      }
-    );
-  }
-
-  /**
-   * Observe a page element for visibility changes
-   */
-  private observePageElement(element: HTMLElement, pageNumber: number): void {
-    if (this.visibilityObserver) {
-      element.setAttribute('data-page', String(pageNumber));
-      this.visibilityObserver.observe(element);
-    }
-  }
-
-  /**
-   * Unobserve a page element
-   */
-  private unobservePageElement(element: HTMLElement): void {
-    if (this.visibilityObserver) {
-      this.visibilityObserver.unobserve(element);
-      const pageNumber = parseInt(element.getAttribute('data-page') || '0', 10);
-      if (pageNumber > 0) {
-        this.observedVisiblePages.delete(pageNumber);
-      }
-    }
-  }
-
-  /**
-   * Release a page element back to the pool or destroy it
-   * This is the central method for disposing of page elements
-   */
-  private releasePageElement(element: PdfPageElement): void {
-    this.unobservePageElement(element.getElement());
-
-    if (this.elementPool) {
-      // Release back to pool for reuse
-      this.elementPool.release(element);
-    } else {
-      // No pool, destroy directly
-      element.destroy();
-    }
-  }
-
-  /**
-   * Get currently visible pages from IntersectionObserver
-   */
-  getVisiblePages(): number[] {
-    return Array.from(this.observedVisiblePages).sort((a, b) => a - b);
   }
 
   /**
@@ -760,7 +579,7 @@ export class PdfMultiPageContainer {
       // Be more conservative about removing pages to prevent visual glitches
       for (const [page, element] of this.pageElements) {
         if (page < start - keepBuffer || page > end + keepBuffer) {
-          this.releasePageElement(element);
+          element.destroy();
           this.pageElements.delete(page);
         }
       }
@@ -773,7 +592,7 @@ export class PdfMultiPageContainer {
       return Math.abs(a - midPage) - Math.abs(b - midPage);
     });
 
-    const CONCURRENT_RENDERS = 6; // Increased from 4 for better parallelism on modern CPUs
+    const CONCURRENT_RENDERS = 4;
     for (let i = 0; i < sortedPagesToRender.length; i += CONCURRENT_RENDERS) {
       // Check if render version changed (zoom/layout changed) - abort if stale
       if (this.renderVersion !== currentRenderVersion) {
@@ -827,22 +646,11 @@ export class PdfMultiPageContainer {
     // Create the request promise and store it for deduplication
     const requestPromise = (async () => {
       try {
-        const renderOptions = {
+        const imageBlob = await this.provider.getPageImage(page, {
           scale: fetchScale,
-          dpi: this.config.renderDpi ?? 150,
-          format: this.config.imageFormat ?? 'png',
-          quality: this.config.imageQuality ?? 85,
-        };
-        console.log('[PdfMultiPageContainer] getCachedPageImage requesting:', {
-          page,
-          targetScale,
-          fetchScale,
-          configRenderDpi: this.config.renderDpi,
-          configImageFormat: this.config.imageFormat,
-          configImageQuality: this.config.imageQuality,
-          renderOptions,
+          dpi: 150,
+          format: 'png',
         });
-        const imageBlob = await this.provider.getPageImage(page, renderOptions);
 
         // Add to cache with scale info
         this.pageImageCache.set(page, imageBlob);
@@ -897,12 +705,6 @@ export class PdfMultiPageContainer {
 
   /**
    * Render a single page
-   *
-   * Uses progressive rendering strategy:
-   * 1. If page already rendered and cache has good quality, skip
-   * 2. If cache has any image, show it immediately (instant feedback)
-   * 3. Then fetch higher quality if needed (background upgrade)
-   *
    * @param page Page number to render
    * @param renderVersion Version to check for staleness (optional)
    */
@@ -915,25 +717,16 @@ export class PdfMultiPageContainer {
     }
 
     const { pageDisplayWidth, pageDisplayHeight } = this.currentLayout;
-    const targetScale = this.config.scale * (this.config.pixelRatio ?? 1);
 
     // Get or create page element
     let pageElement = this.pageElements.get(page);
     if (!pageElement) {
-      // Use pool if available, otherwise create directly
-      if (this.elementPool) {
-        pageElement = this.elementPool.acquire(page);
-      } else {
-        pageElement = new PdfPageElement({
-          pageNumber: page,
-          pixelRatio: this.config.pixelRatio,
-          enableTextAntialiasing: this.config.enableTextAntialiasing,
-          enableImageSmoothing: this.config.enableImageSmoothing,
-          textLayerMode: this.config.textLayerMode,
-          pdfId: this.config.pdfId,
-          svgTextLayerFetcher: this.config.svgTextLayerFetcher,
-        });
-      }
+      pageElement = new PdfPageElement({
+        pageNumber: page,
+        pixelRatio: this.config.pixelRatio,
+        enableTextAntialiasing: this.config.enableTextAntialiasing,
+        enableImageSmoothing: this.config.enableImageSmoothing,
+      });
 
       // Apply reading mode
       if (this.config.readingMode) {
@@ -958,25 +751,15 @@ export class PdfMultiPageContainer {
       // Position element
       this.positionPageElement(pageElement, page);
       this.pagesContainer.appendChild(pageElement.getElement());
-
-      // Observe for visibility (IntersectionObserver)
-      this.observePageElement(pageElement.getElement(), page);
     }
 
     // Set dimensions
     pageElement.setDimensions(pageDisplayWidth, pageDisplayHeight);
 
-    // Check if page already has acceptable quality content - skip if so
-    if (pageElement.getIsRendered()) {
-      const cachedScale = this.pageCacheScales.get(page) ?? 0;
-      // If cached quality is within 90% of target, skip re-render
-      if (cachedScale >= targetScale * 0.9) {
-        return;
-      }
+    // Don't show loading if page is already rendered (just resizing)
+    if (!pageElement.getIsRendered()) {
+      pageElement.showLoading();
     }
-
-    // Show loading indicator (subtle spinner, doesn't hide content)
-    pageElement.showLoading();
 
     try {
       // Check version again before expensive fetch
@@ -985,15 +768,7 @@ export class PdfMultiPageContainer {
         return;
       }
 
-      // Quick path: if we have ANY cached image, show it immediately
-      // This provides instant visual feedback during fast scrolling
-      const cachedBlob = this.pageImageCache.get(page);
-      if (cachedBlob && !pageElement.getIsRendered()) {
-        // Render cached version first for immediate feedback
-        await pageElement.render({ imageBlob: cachedBlob }, this.config.scale);
-      }
-
-      // Get cached or fetch page image (may be same as cachedBlob, may be upgrade)
+      // Get cached or fetch page image
       const imageBlob = await this.getCachedPageImage(page);
 
       // Check version after fetch - layout may have changed
@@ -1018,11 +793,8 @@ export class PdfMultiPageContainer {
         return;
       }
 
-      // Only re-render if we got a different (better) image
-      if (imageBlob !== cachedBlob) {
-        await pageElement.render({ imageBlob, textLayerData }, this.config.scale);
-      }
-
+      // Render
+      await pageElement.render({ imageBlob, textLayerData }, this.config.scale);
       pageElement.hideLoading();
     } catch (error) {
       // Silently ignore abort errors - they happen during rapid zoom/scroll
@@ -1108,12 +880,11 @@ export class PdfMultiPageContainer {
    * Clear and render paginated view
    */
   private async clearAndRenderPaginatedView(): Promise<void> {
-    // Clear existing pages - release to pool for reuse
+    // Clear existing pages
     for (const element of this.pageElements.values()) {
-      this.releasePageElement(element);
+      element.destroy();
     }
     this.pageElements.clear();
-    this.observedVisiblePages.clear();
 
     // Render current page(s)
     await this.renderVisiblePages();
@@ -1180,12 +951,13 @@ export class PdfMultiPageContainer {
     const newScale = config.scale ?? oldScale;
     const scaleChanged = config.scale !== undefined && Math.abs(config.scale - oldScale) > 0.01;
     const userZoomChanged = config.userZoom !== undefined && config.userZoom !== oldUserZoom;
+    const isZoomingIn = newScale > oldScale;
 
-    // NOTE: We no longer clear the image cache on zoom-in.
-    // The quality tolerance check in getCachedPageImage() (line ~754) handles this:
-    // - If cached image is >= 80% of target scale, it's reused
-    // - If cached image is too low quality, a higher-res version is fetched automatically
-    // Clearing the cache was causing blank placeholders during zoom transitions.
+    // Only clear image cache if zooming IN (need higher resolution)
+    // When zooming OUT, existing images can be scaled down without quality loss
+    if ((scaleChanged || userZoomChanged) && isZoomingIn) {
+      this.clearImageCache();
+    }
 
     // Handle reading mode changes - apply to all existing pages without re-rendering
     if (config.readingMode !== undefined) {
@@ -1196,12 +968,11 @@ export class PdfMultiPageContainer {
 
     // Re-render if mode or layout changed, but for scale changes just resize elements
     if (config.displayMode !== oldDisplayMode || config.pageLayout !== oldPageLayout) {
-      // Clear and re-render for mode/layout changes - release to pool for reuse
+      // Clear and re-render for mode/layout changes
       for (const element of this.pageElements.values()) {
-        this.releasePageElement(element);
+        element.destroy();
       }
       this.pageElements.clear();
-      this.observedVisiblePages.clear();
       await this.renderVisiblePages();
     } else if (scaleChanged || userZoomChanged) {
       // For scale changes, resize existing elements without destroying them
@@ -1291,24 +1062,10 @@ export class PdfMultiPageContainer {
    * Destroy container
    */
   destroy(): void {
-    // Disconnect IntersectionObserver
-    if (this.visibilityObserver) {
-      this.visibilityObserver.disconnect();
-      this.visibilityObserver = null;
-    }
-    this.observedVisiblePages.clear();
-
-    // Destroy all page elements directly (not via pool - we're tearing down)
     for (const element of this.pageElements.values()) {
       element.destroy();
     }
     this.pageElements.clear();
-
-    // Destroy the element pool
-    if (this.elementPool) {
-      this.elementPool.destroy();
-      this.elementPool = null;
-    }
 
     // Clear caches
     this.pageImageCache.clear();

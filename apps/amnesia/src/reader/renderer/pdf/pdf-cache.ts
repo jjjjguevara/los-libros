@@ -1,15 +1,13 @@
 /**
- * PDF Page Cache with Byte-Based Memory Management
+ * PDF Page Cache using IndexedDB
  *
- * Provides two-tier caching of rendered PDF pages:
- * - L1 (Memory): Fast, byte-limited, LRU eviction
- * - L2 (IndexedDB): Persistent, time-based eviction
+ * Provides persistent caching of rendered PDF pages to avoid
+ * re-fetching from the server on page reloads.
  *
  * Features:
- * - Byte-based memory quota (not entry count)
- * - True LRU with access tracking
- * - Automatic promotion from L2 to L1 on access
- * - Background eviction of stale L2 entries
+ * - Two-tier cache: Memory (hot) + IndexedDB (persistent)
+ * - Automatic eviction of entries older than 7 days
+ * - LRU-like behavior in memory tier
  */
 
 interface CacheEntry {
@@ -18,119 +16,30 @@ interface CacheEntry {
   pdfId: string;
   page: number;
   scale: number;
-  dpi: number;
-  format: string;
-  quality: number;
-  sizeBytes: number;
-}
-
-/** Render options for cache key generation */
-export interface CacheRenderOptions {
-  /** @deprecated Use dpi instead. Ignored for cache key. */
-  scale?: number;
-  dpi?: number;
-  format?: 'png' | 'jpeg' | 'webp';
-  quality?: number;
-}
-
-/**
- * Standard DPI tiers for caching
- * Cache keys snap to these tiers for better cache hit rate
- * Higher tiers (600) support crisp rendering at high zoom levels
- * Note: 800+ DPI causes server failures on large pages (images too large to encode)
- */
-export const DPI_TIERS = [72, 96, 150, 200, 300, 600] as const;
-export type DpiTier = typeof DPI_TIERS[number];
-
-/**
- * Select the nearest DPI tier for a target DPI value
- * Uses a 90% threshold to allow for slight underrequests
- */
-export function selectDpiTier(targetDpi: number): DpiTier {
-  for (const tier of DPI_TIERS) {
-    if (tier >= targetDpi * 0.9) return tier;
-  }
-  return DPI_TIERS[DPI_TIERS.length - 1]; // Return highest tier
-}
-
-interface MemoryCacheEntry {
-  blob: Blob;
-  sizeBytes: number;
-}
-
-export interface CacheConfig {
-  /** Maximum memory usage in bytes. Default: 100MB */
-  maxMemoryBytes?: number;
-  /** Maximum age for L2 entries in ms. Default: 7 days */
-  maxAgeMs?: number;
-  /** Enable L2 (IndexedDB) persistence. Default: true */
-  enableL2?: boolean;
-}
-
-export interface CacheStats {
-  /** Current L1 memory usage in bytes */
-  memoryBytes: number;
-  /** Maximum L1 memory in bytes */
-  maxMemoryBytes: number;
-  /** Number of entries in L1 */
-  memoryEntries: number;
-  /** Memory usage as percentage (0-100) */
-  memoryUsagePercent: number;
 }
 
 export class PdfPageCache {
   private dbName = 'amnesia-pdf-cache';
   private storeName = 'pages';
-  private dbVersion = 4; // Bumped: scale removed from cache key, DPI tiers used
+  private dbVersion = 1;
   private db: IDBDatabase | null = null;
-
-  // L1 Memory Cache - byte-limited with LRU
-  private memoryCache: Map<string, MemoryCacheEntry> = new Map();
-  private accessOrder: string[] = []; // LRU tracking: oldest first
-  private currentMemoryBytes = 0;
-  private maxMemoryBytes: number;
-
-  // Configuration
-  private maxAgeMs: number;
-  private enableL2: boolean;
+  private memoryCache: Map<string, Blob> = new Map();
+  private maxMemoryEntries = 20;
+  private maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
   private initialized = false;
 
-  constructor(config: CacheConfig = {}) {
-    this.maxMemoryBytes = config.maxMemoryBytes ?? 100 * 1024 * 1024; // 100MB default
-    this.maxAgeMs = config.maxAgeMs ?? 7 * 24 * 60 * 60 * 1000; // 7 days
-    this.enableL2 = config.enableL2 ?? true;
-  }
-
   /**
-   * Legacy constructor support - converts entry count to byte estimate
-   * @deprecated Use CacheConfig object instead
-   */
-  static fromEntryCount(maxEntries: number): PdfPageCache {
-    // Estimate ~500KB per page at 150 DPI
-    const estimatedBytesPerPage = 500 * 1024;
-    return new PdfPageCache({
-      maxMemoryBytes: maxEntries * estimatedBytesPerPage,
-    });
-  }
-
-  /**
-   * Initialize the cache (opens IndexedDB if enabled)
+   * Initialize the cache (opens IndexedDB)
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
-
-    if (!this.enableL2) {
-      this.initialized = true;
-      return;
-    }
 
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(this.dbName, this.dbVersion);
 
       request.onerror = () => {
         console.warn('[PdfCache] Failed to open IndexedDB:', request.error);
-        // Continue without L2 persistence
-        this.enableL2 = false;
+        // Continue without persistence
         this.initialized = true;
         resolve();
       };
@@ -145,49 +54,35 @@ export class PdfPageCache {
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-
-        // Delete old store if exists (schema change)
-        if (db.objectStoreNames.contains(this.storeName)) {
-          db.deleteObjectStore(this.storeName);
+        if (!db.objectStoreNames.contains(this.storeName)) {
+          const store = db.createObjectStore(this.storeName);
+          // Create indexes for efficient queries
+          store.createIndex('pdfId', 'pdfId', { unique: false });
+          store.createIndex('timestamp', 'timestamp', { unique: false });
         }
-
-        const store = db.createObjectStore(this.storeName);
-        store.createIndex('pdfId', 'pdfId', { unique: false });
-        store.createIndex('timestamp', 'timestamp', { unique: false });
       };
     });
   }
 
   /**
-   * Generate cache key from page parameters including render options
-   *
-   * Note: Scale is ignored (deprecated). Only DPI is used for quality.
-   * DPI is snapped to nearest tier (72, 96, 150, 200, 300) for better cache hits.
+   * Generate cache key from page parameters
    */
-  private getCacheKey(pdfId: string, page: number, options: CacheRenderOptions = {}): string {
-    // Snap to nearest DPI tier for better cache reuse
-    const dpi = selectDpiTier(options.dpi ?? 150);
-    const format = options.format ?? 'png';
-    const quality = options.quality ?? 85;
-    // Scale is deprecated and not included in cache key
-    return `${pdfId}-${page}-d${dpi}-${format}-q${quality}`;
+  private getCacheKey(pdfId: string, page: number, scale: number): string {
+    return `${pdfId}-${page}-${scale.toFixed(2)}`;
   }
 
   /**
    * Get a cached page blob
    */
-  async get(pdfId: string, page: number, options: CacheRenderOptions = {}): Promise<Blob | null> {
-    const key = this.getCacheKey(pdfId, page, options);
+  async get(pdfId: string, page: number, scale: number): Promise<Blob | null> {
+    const key = this.getCacheKey(pdfId, page, scale);
 
-    // Check L1 (memory) first
-    const memoryEntry = this.memoryCache.get(key);
-    if (memoryEntry) {
-      // Update access order (move to end = most recently used)
-      this.updateAccessOrder(key);
-      return memoryEntry.blob;
+    // Check memory cache first (hot tier)
+    if (this.memoryCache.has(key)) {
+      return this.memoryCache.get(key)!;
     }
 
-    // Check L2 (IndexedDB)
+    // Check IndexedDB (persistent tier)
     if (!this.db) return null;
 
     return new Promise((resolve) => {
@@ -199,8 +94,8 @@ export class PdfPageCache {
         request.onsuccess = () => {
           const entry = request.result as CacheEntry | undefined;
           if (entry && Date.now() - entry.timestamp < this.maxAgeMs) {
-            // Promote to L1
-            this.addToMemory(key, entry.blob, entry.sizeBytes);
+            // Promote to memory cache
+            this.addToMemory(key, entry.blob);
             resolve(entry.blob);
           } else {
             resolve(null);
@@ -208,11 +103,11 @@ export class PdfPageCache {
         };
 
         request.onerror = () => {
-          console.warn('[PdfCache] Failed to read from L2:', request.error);
+          console.warn('[PdfCache] Failed to read from IndexedDB:', request.error);
           resolve(null);
         };
       } catch (error) {
-        console.warn('[PdfCache] L2 transaction error:', error);
+        console.warn('[PdfCache] IndexedDB transaction error:', error);
         resolve(null);
       }
     });
@@ -221,21 +116,13 @@ export class PdfPageCache {
   /**
    * Cache a page blob
    */
-  async set(pdfId: string, page: number, options: CacheRenderOptions, blob: Blob): Promise<void> {
-    // Reject invalid blobs at cache level (triple defense)
-    const validImageTypes = ['image/png', 'image/jpeg', 'image/webp'];
-    if (!validImageTypes.includes(blob.type) || blob.size === 0) {
-      console.warn(`[PdfCache] Rejecting invalid blob for page ${page}: type=${blob.type}, size=${blob.size}`);
-      return;
-    }
+  async set(pdfId: string, page: number, scale: number, blob: Blob): Promise<void> {
+    const key = this.getCacheKey(pdfId, page, scale);
 
-    const key = this.getCacheKey(pdfId, page, options);
-    const sizeBytes = blob.size;
+    // Always add to memory cache
+    this.addToMemory(key, blob);
 
-    // Add to L1 (memory)
-    this.addToMemory(key, blob, sizeBytes);
-
-    // Persist to L2 (IndexedDB)
+    // Persist to IndexedDB
     if (!this.db) return;
 
     const entry: CacheEntry = {
@@ -243,11 +130,7 @@ export class PdfPageCache {
       timestamp: Date.now(),
       pdfId,
       page,
-      scale: options.scale ?? 1.5,
-      dpi: options.dpi ?? 150,
-      format: options.format ?? 'png',
-      quality: options.quality ?? 85,
-      sizeBytes,
+      scale,
     };
 
     return new Promise((resolve) => {
@@ -258,28 +141,28 @@ export class PdfPageCache {
 
         tx.oncomplete = () => resolve();
         tx.onerror = () => {
-          console.warn('[PdfCache] Failed to write to L2:', tx.error);
+          console.warn('[PdfCache] Failed to write to IndexedDB:', tx.error);
           resolve();
         };
       } catch (error) {
-        console.warn('[PdfCache] L2 write error:', error);
+        console.warn('[PdfCache] IndexedDB write error:', error);
         resolve();
       }
     });
   }
 
   /**
-   * Check if a page is cached (L1 or L2)
+   * Check if a page is cached (memory or disk)
    */
-  async has(pdfId: string, page: number, options: CacheRenderOptions = {}): Promise<boolean> {
-    const key = this.getCacheKey(pdfId, page, options);
+  async has(pdfId: string, page: number, scale: number): Promise<boolean> {
+    const key = this.getCacheKey(pdfId, page, scale);
 
-    // Check L1 first
+    // Check memory first
     if (this.memoryCache.has(key)) {
       return true;
     }
 
-    // Check L2
+    // Check IndexedDB
     if (!this.db) return false;
 
     return new Promise((resolve) => {
@@ -297,56 +180,27 @@ export class PdfPageCache {
   }
 
   /**
-   * Add to L1 memory cache with byte-based LRU eviction
+   * Add to memory cache with LRU eviction
    */
-  private addToMemory(key: string, blob: Blob, sizeBytes: number): void {
-    // If already exists, remove first (will re-add with updated access)
+  private addToMemory(key: string, blob: Blob): void {
+    // If already exists, move to end (most recently used)
     if (this.memoryCache.has(key)) {
-      this.removeFromMemory(key);
-    }
-
-    // Evict until we have space
-    while (this.currentMemoryBytes + sizeBytes > this.maxMemoryBytes && this.accessOrder.length > 0) {
-      const oldestKey = this.accessOrder[0];
-      this.removeFromMemory(oldestKey);
-    }
-
-    // Add new entry
-    this.memoryCache.set(key, { blob, sizeBytes });
-    this.accessOrder.push(key);
-    this.currentMemoryBytes += sizeBytes;
-  }
-
-  /**
-   * Remove from L1 memory cache
-   */
-  private removeFromMemory(key: string): void {
-    const entry = this.memoryCache.get(key);
-    if (entry) {
-      this.currentMemoryBytes -= entry.sizeBytes;
       this.memoryCache.delete(key);
+    }
 
-      // Remove from access order
-      const idx = this.accessOrder.indexOf(key);
-      if (idx !== -1) {
-        this.accessOrder.splice(idx, 1);
+    this.memoryCache.set(key, blob);
+
+    // Evict oldest if over limit
+    if (this.memoryCache.size > this.maxMemoryEntries) {
+      const firstKey = this.memoryCache.keys().next().value;
+      if (firstKey) {
+        this.memoryCache.delete(firstKey);
       }
     }
   }
 
   /**
-   * Update access order for LRU (move to end = most recent)
-   */
-  private updateAccessOrder(key: string): void {
-    const idx = this.accessOrder.indexOf(key);
-    if (idx !== -1) {
-      this.accessOrder.splice(idx, 1);
-      this.accessOrder.push(key);
-    }
-  }
-
-  /**
-   * Evict L2 entries older than maxAgeMs
+   * Evict entries older than maxAgeMs
    */
   private async evictOldEntries(): Promise<void> {
     if (!this.db) return;
@@ -361,20 +215,16 @@ export class PdfPageCache {
         const range = IDBKeyRange.upperBound(cutoffTime);
         const request = index.openCursor(range);
 
-        let evictedCount = 0;
         request.onsuccess = () => {
           const cursor = request.result;
           if (cursor) {
             cursor.delete();
-            evictedCount++;
             cursor.continue();
           }
         };
 
         tx.oncomplete = () => {
-          if (evictedCount > 0) {
-            console.log(`[PdfCache] Evicted ${evictedCount} stale L2 entries`);
-          }
+          console.log('[PdfCache] Evicted old entries');
           resolve();
         };
         tx.onerror = () => resolve();
@@ -388,18 +238,14 @@ export class PdfPageCache {
    * Clear all cached pages for a specific PDF
    */
   async clearPdf(pdfId: string): Promise<void> {
-    // Clear from L1
-    const keysToRemove: string[] = [];
+    // Clear from memory
     for (const key of this.memoryCache.keys()) {
       if (key.startsWith(`${pdfId}-`)) {
-        keysToRemove.push(key);
+        this.memoryCache.delete(key);
       }
     }
-    for (const key of keysToRemove) {
-      this.removeFromMemory(key);
-    }
 
-    // Clear from L2
+    // Clear from IndexedDB
     if (!this.db) return;
 
     return new Promise((resolve) => {
@@ -426,15 +272,11 @@ export class PdfPageCache {
   }
 
   /**
-   * Clear the entire cache (L1 and L2)
+   * Clear the entire cache
    */
   async clear(): Promise<void> {
-    // Clear L1
     this.memoryCache.clear();
-    this.accessOrder = [];
-    this.currentMemoryBytes = 0;
 
-    // Clear L2
     if (!this.db) return;
 
     return new Promise((resolve) => {
@@ -454,26 +296,11 @@ export class PdfPageCache {
   /**
    * Get cache statistics
    */
-  getStats(): CacheStats {
+  getStats(): { memorySize: number; maxMemory: number } {
     return {
-      memoryBytes: this.currentMemoryBytes,
-      maxMemoryBytes: this.maxMemoryBytes,
-      memoryEntries: this.memoryCache.size,
-      memoryUsagePercent: Math.round((this.currentMemoryBytes / this.maxMemoryBytes) * 100),
+      memorySize: this.memoryCache.size,
+      maxMemory: this.maxMemoryEntries,
     };
-  }
-
-  /**
-   * Update memory budget at runtime
-   */
-  setMemoryBudget(bytes: number): void {
-    this.maxMemoryBytes = bytes;
-
-    // Evict if over new limit
-    while (this.currentMemoryBytes > this.maxMemoryBytes && this.accessOrder.length > 0) {
-      const oldestKey = this.accessOrder[0];
-      this.removeFromMemory(oldestKey);
-    }
   }
 
   /**
@@ -481,9 +308,6 @@ export class PdfPageCache {
    */
   destroy(): void {
     this.memoryCache.clear();
-    this.accessOrder = [];
-    this.currentMemoryBytes = 0;
-
     if (this.db) {
       this.db.close();
       this.db = null;

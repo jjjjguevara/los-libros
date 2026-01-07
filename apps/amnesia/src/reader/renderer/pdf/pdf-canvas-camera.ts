@@ -37,8 +37,8 @@ export interface CameraConstraints {
 }
 
 const DEFAULT_CONSTRAINTS: CameraConstraints = {
-  minZoom: 0.05,  // Extended for overview mode (0.05x = 5%)
-  maxZoom: 16,    // Extended for character-level inspection (16x = 1600%)
+  minZoom: 0.1,
+  maxZoom: 10,
   constrainToBounds: false,
 };
 

@@ -17,9 +17,9 @@ export interface GestureCallbacks {
 }
 
 export interface GestureHandlerConfig {
-  /** Minimum zoom scale. Default varies by mode (paginated: 0.25, scrolled: 0.05) */
+  /** Minimum zoom scale. Default: 0.25 */
   minScale?: number;
-  /** Maximum zoom scale. Default varies by mode (paginated: 5, scrolled: 16) */
+  /** Maximum zoom scale. Default: 5.0 */
   maxScale?: number;
   /** Zoom sensitivity for wheel events. Default: 0.002 */
   wheelSensitivity?: number;
@@ -29,19 +29,13 @@ export interface GestureHandlerConfig {
   smoothZoom?: boolean;
   /** Enable zoom gestures. Default: true */
   enableZoom?: boolean;
-  /** Display mode - affects zoom constraints (paginated: 0.25-5x, scrolled: 0.05-16x) */
+  /** Display mode - affects zoom behavior */
   displayMode?: 'paginated' | 'scrolled';
 }
 
-// Mode-specific zoom constraints
-const ZOOM_CONSTRAINTS = {
-  paginated: { minScale: 0.25, maxScale: 5.0 },   // Fit-to-page paradigm
-  scrolled: { minScale: 0.05, maxScale: 16.0 },   // Extended for character-level inspection
-};
-
 const DEFAULT_CONFIG: Required<GestureHandlerConfig> = {
-  minScale: 0.05,   // Will be overridden based on displayMode
-  maxScale: 16.0,   // Will be overridden based on displayMode
+  minScale: 0.25,
+  maxScale: 5.0,
   wheelSensitivity: 0.002,
   pinchSensitivity: 1.0,
   smoothZoom: true,
@@ -77,21 +71,7 @@ export class PdfGestureHandler {
   ) {
     this.container = container;
     this.callbacks = callbacks;
-
-    // Merge config with defaults
-    const mergedConfig = { ...DEFAULT_CONFIG, ...config };
-
-    // Apply mode-specific zoom constraints if not explicitly set
-    const mode = mergedConfig.displayMode;
-    const modeConstraints = ZOOM_CONSTRAINTS[mode];
-    if (!config?.minScale) {
-      mergedConfig.minScale = modeConstraints.minScale;
-    }
-    if (!config?.maxScale) {
-      mergedConfig.maxScale = modeConstraints.maxScale;
-    }
-
-    this.config = mergedConfig;
+    this.config = { ...DEFAULT_CONFIG, ...config };
 
     // Bind handlers
     this.boundWheelHandler = this.handleWheel.bind(this);

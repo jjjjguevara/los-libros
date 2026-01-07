@@ -85,10 +85,8 @@ async fn main() {
         .expect("Failed to initialize database");
     tracing::info!("Database initialized at {}", config.database.url);
 
-    // Create application state (starts PDF service actor)
-    let app_state = AppState::new(config.clone(), s3_client.clone(), db_pool.clone())
-        .await
-        .expect("Failed to initialize application state (PDFium not found?)");
+    // Create application state
+    let app_state = AppState::new(config.clone(), s3_client.clone(), db_pool.clone()).await;
 
     // Create library cache and initial scan
     let library_cache = LibraryCache::new();
@@ -117,9 +115,6 @@ async fn main() {
     // Start upload session cleanup task
     upload_state.session_manager.clone().start_cleanup_task();
 
-    // Keep a clone for shutdown
-    let app_state_for_shutdown = app_state.clone();
-
     // Build router
     let app = Router::new()
         .route("/health", get(health_check))
@@ -147,11 +142,6 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
-
-    // Shutdown PDF service actor (ensures PDFium is properly cleaned up)
-    if let Err(e) = app_state_for_shutdown.shutdown().await {
-        tracing::warn!("PDF service shutdown error: {}", e);
-    }
 
     tracing::info!("Server shutdown complete");
 }

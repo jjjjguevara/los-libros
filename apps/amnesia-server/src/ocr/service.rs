@@ -154,7 +154,6 @@ impl OcrService {
             scale: 2.0, // Higher resolution for better OCR
             rotation: 0,
             format: crate::pdf::ImageFormat::Png,
-            quality: 95, // High quality for OCR
         };
 
         let page_image = pdf_cache
