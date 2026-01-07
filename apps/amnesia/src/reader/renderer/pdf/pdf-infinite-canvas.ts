@@ -25,6 +25,7 @@ import {
   centerOnPoint,
   lerpCamera,
 } from './pdf-canvas-camera';
+import { SpatialPrefetcher } from './spatial-prefetcher';
 import type { PdfTextLayer as TextLayerData, PdfRenderOptions } from '../types';
 
 export interface PageLayout {
@@ -82,6 +83,10 @@ export interface InfiniteCanvasConfig {
 export interface PageDataProvider {
   getPageImage(page: number, options: PdfRenderOptions): Promise<Blob>;
   getPageTextLayer(page: number): Promise<TextLayerData>;
+  /** Optional: Notify provider of current page (for linear prefetching) */
+  notifyPageChange?(page: number): void;
+  /** Optional: Prefetch specific pages (for spatial prefetching) */
+  prefetchPages?(pages: number[]): Promise<void>;
 }
 
 const DEFAULT_CONFIG: InfiniteCanvasConfig = {
@@ -166,6 +171,9 @@ export class PdfInfiniteCanvas {
   private onZoomChangeCallback?: (zoom: number) => void;
   private onSelectionCallback?: (page: number, text: string, rects: DOMRect[]) => void;
   private onHighlightClickCallback?: (annotationId: string, position: { x: number; y: number }) => void;
+
+  // Spatial prefetcher for grid-based modes (auto-grid, canvas)
+  private spatialPrefetcher = new SpatialPrefetcher();
 
   constructor(
     container: HTMLElement,
@@ -895,6 +903,48 @@ export class PdfInfiniteCanvas {
 
     // Queue visible pages for rendering
     this.queueRender([...newVisiblePages]);
+
+    // Prefetch pages based on display mode:
+    // - Spatial modes (auto-grid, canvas): 2D ripple prefetch based on grid distance
+    // - Linear modes (paginated, vertical-scroll, horizontal-scroll): page ± N prefetch
+    if (newVisiblePages.size > 0) {
+      const centerPage = this.getCurrentPage();
+      this.triggerPrefetch(centerPage);
+    }
+  }
+
+  /**
+   * Trigger prefetch based on current display mode
+   * - Spatial modes use 2D ripple prefetch (SpatialPrefetcher)
+   * - Linear modes use linear page ± N prefetch (via notifyPageChange)
+   */
+  private triggerPrefetch(centerPage: number): void {
+    const isSpatialMode =
+      this.config.displayMode === 'auto-grid' ||
+      this.config.displayMode === 'canvas';
+
+    if (isSpatialMode && this.provider.prefetchPages) {
+      // SPATIAL: Ripple prefetch based on grid position
+      const spatialPages = this.spatialPrefetcher.getSpatialPrefetchList({
+        centerPage,
+        radius: 3,
+        columns: this.currentColumns,
+        pageCount: this.pageCount,
+      });
+
+      // Filter out already-visible pages (they're already loading/loaded)
+      const pagesToPrefetch = spatialPages.filter((p: number) => !this.visiblePages.has(p));
+
+      if (pagesToPrefetch.length > 0) {
+        // Background prefetch - don't await, let it run async
+        this.provider.prefetchPages(pagesToPrefetch).catch(err => {
+          console.warn('[PdfInfiniteCanvas] Spatial prefetch failed:', err);
+        });
+      }
+    } else if (this.provider.notifyPageChange) {
+      // LINEAR: Standard page ± N prefetch via provider
+      this.provider.notifyPageChange(centerPage);
+    }
   }
 
   /**

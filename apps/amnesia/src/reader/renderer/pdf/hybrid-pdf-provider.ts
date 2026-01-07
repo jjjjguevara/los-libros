@@ -422,6 +422,40 @@ export class HybridPdfProvider {
     this.isPrefetching = false;
   }
 
+  /** Whether prefetching is paused (e.g., during mode transitions) */
+  private prefetchPaused = false;
+
+  /**
+   * Pause prefetching (e.g., during mode transitions)
+   * Preserves the queue but stops processing
+   */
+  pausePrefetch(): void {
+    this.prefetchPaused = true;
+    if (this.prefetchTimeoutId) {
+      clearTimeout(this.prefetchTimeoutId);
+      this.prefetchTimeoutId = null;
+    }
+  }
+
+  /**
+   * Resume prefetching after pause
+   */
+  resumePrefetch(): void {
+    this.prefetchPaused = false;
+    // Restart queue processing if there are pending items
+    if (this.prefetchQueue.length > 0 && !this.isPrefetching) {
+      const scale = 1.5; // Default scale for prefetch
+      this.processPrefetchQueue(scale);
+    }
+  }
+
+  /**
+   * Check if prefetching is currently paused
+   */
+  isPrefetchPaused(): boolean {
+    return this.prefetchPaused;
+  }
+
   private blobToImage(blob: Blob): Promise<HTMLImageElement> {
     return new Promise((resolve, reject) => {
       const img = new Image();

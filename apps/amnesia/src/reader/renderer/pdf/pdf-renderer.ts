@@ -328,6 +328,19 @@ export class PdfRenderer implements DocumentRenderer {
         if (!this.document) throw new Error('No document loaded');
         return this.provider.getPdfTextLayer(this.document.id, page);
       },
+      // Prefetch methods for spatial/linear prefetching
+      notifyPageChange: (page: number) => {
+        // Linear prefetch: provider handles page ± N prefetch
+        if ('notifyPageChange' in this.provider && typeof (this.provider as any).notifyPageChange === 'function') {
+          (this.provider as any).notifyPageChange(page);
+        }
+      },
+      prefetchPages: async (pages: number[]) => {
+        // Spatial prefetch: explicit page list
+        if ('prefetchPages' in this.provider && typeof (this.provider as any).prefetchPages === 'function') {
+          await (this.provider as any).prefetchPages(pages);
+        }
+      },
     };
 
     this.infiniteCanvas = new PdfInfiniteCanvas(
@@ -1406,14 +1419,30 @@ export class PdfRenderer implements DocumentRenderer {
   /**
    * Set display mode (paginated or scrolled)
    * Switches between infinite canvas (scrolled) and multi-page container (paginated)
+   *
+   * Implements seamless transitions:
+   * 1. Pause prefetch to prevent race conditions
+   * 2. Store current state (page position)
+   * 3. Swap containers (provider cache persists)
+   * 4. Restore position
+   * 5. Resume prefetch
    */
   setMode(mode: 'paginated' | 'scrolled'): void {
     if (this.config.mode === mode) return;
 
+    const startTime = performance.now();
     const previousPage = this.currentPage;
+    const previousZoom = this.config.scale ?? 1.5;
+
+    // 1. Pause prefetch during transition
+    this.pausePrefetch();
+
     this.config.mode = mode;
 
     // Switch container type based on mode
+    // NOTE: Provider cache (IndexedDB) persists across switches - only container's
+    // in-memory state is lost, which is acceptable since pages will be fetched
+    // from the provider's cache on the new container initialization.
     if (this.useInfiniteCanvas && mode === 'scrolled') {
       // Switch to infinite canvas for scrolled mode
       if (this.multiPageContainer) {
@@ -1451,6 +1480,16 @@ export class PdfRenderer implements DocumentRenderer {
         this.multiPageContainer.initialize(this.document.pageCount);
         this.multiPageContainer.goToPage(previousPage);
       }
+    }
+
+    // 5. Resume prefetch
+    this.resumePrefetch();
+
+    // Log transition time for performance monitoring
+    const duration = performance.now() - startTime;
+    console.log(`[PdfRenderer] Mode transition to '${mode}' took ${duration.toFixed(1)}ms`);
+    if (duration > 100) {
+      console.warn(`[PdfRenderer] Mode transition exceeded 100ms target (${duration.toFixed(1)}ms)`);
     }
   }
 
@@ -1744,5 +1783,24 @@ export class PdfRenderer implements DocumentRenderer {
    */
   getCacheSize(): number {
     return this.pageCache.size;
+  }
+
+  /**
+   * Pause prefetching (e.g., during mode transitions)
+   * Preserves the queue but stops processing
+   */
+  private pausePrefetch(): void {
+    if ('pausePrefetch' in this.provider && typeof (this.provider as any).pausePrefetch === 'function') {
+      (this.provider as any).pausePrefetch();
+    }
+  }
+
+  /**
+   * Resume prefetching after pause
+   */
+  private resumePrefetch(): void {
+    if ('resumePrefetch' in this.provider && typeof (this.provider as any).resumePrefetch === 'function') {
+      (this.provider as any).resumePrefetch();
+    }
   }
 }
