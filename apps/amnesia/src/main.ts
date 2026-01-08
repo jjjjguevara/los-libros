@@ -57,6 +57,7 @@ import { ServerManager, type ServerState } from './server/server-manager';
 // PDF WASM Worker Path Configuration
 import { setMuPDFPluginPath } from './reader/renderer/pdf/mupdf-bridge';
 import { getTelemetry } from './reader/renderer/pdf/pdf-telemetry';
+import { initializeTestHarness } from './reader/renderer/pdf/mcp-test-harness';
 
 // HUD System
 import { AmnesiaHUD, AmnesiaHUDProvider, isDocDoctorAvailable, getDocDoctorRegistry, onDocDoctorHUDReady } from './hud';
@@ -136,6 +137,10 @@ export default class AmnesiaPlugin extends Plugin {
 		// Start periodic memory tracking (every 5 seconds)
 		const telemetry = getTelemetry();
 		telemetry.startPeriodicMemoryTracking(5000);
+
+		// Initialize PDF lifecycle test harness for MCP access
+		// Exposes window.pdfLifecycleTests for interactive testing
+		initializeTestHarness();
 
 		// Load settings
 		await this.loadSettings();

@@ -31,6 +31,7 @@ import type { PdfTextLayer as TextLayerData, PdfRenderOptions } from '../types';
 import type { TileCoordinate, TileRenderEngine } from './tile-render-engine';
 import { getTileEngine, TILE_SIZE } from './tile-render-engine';
 import type { RenderCoordinator, RenderMode, RenderPriority } from './render-coordinator';
+import { getTelemetry } from './pdf-telemetry';
 
 export interface PageLayout {
   /** Page number (1-indexed) */
@@ -188,6 +189,10 @@ export class PdfInfiniteCanvas {
   // Zoom-dependent re-rendering
   private zoomRerenderTimeout: ReturnType<typeof setTimeout> | null = null;
   private readonly ZOOM_RERENDER_DEBOUNCE = 150; // ms to wait after zoom stops
+
+  // Scroll-specific re-rendering (much shorter debounce for responsiveness)
+  private scrollRerenderTimeout: ReturnType<typeof setTimeout> | null = null;
+  private readonly SCROLL_RERENDER_DEBOUNCE = 32; // ms - ~2 frames for smooth scroll rendering
   private readonly MIN_EFFECTIVE_RATIO = 2.0; // Minimum buffer pixels per screen pixel (Retina)
   private pendingImageRequests: Map<number, Promise<Blob>> = new Map();
 
@@ -1814,8 +1819,10 @@ export class PdfInfiniteCanvas {
     // Target scale for crisp rendering
     const idealScale = zoom * pixelRatio;
 
-    // Cap at 8x to prevent memory crashes
-    const MAX_SCALE = 8.0;
+    // Cap at 16x for HiDPI + high zoom scenarios
+    // At zoom 8x with pixelRatio 2: idealScale = 16, now achievable
+    // This enables sharp full-page rendering matching tile quality
+    const MAX_SCALE = 16.0;
 
     return Math.min(idealScale, MAX_SCALE);
   }
@@ -1870,6 +1877,43 @@ export class PdfInfiniteCanvas {
         this.queueRender(pagesToRerender);
       }
     }, this.ZOOM_RERENDER_DEBOUNCE);
+  }
+
+  /**
+   * Schedule re-render for scroll events at high zoom.
+   * Uses a much shorter debounce than zoom to maintain responsiveness during scroll.
+   *
+   * Unlike scheduleZoomRerender (150ms debounce for zoom gestures),
+   * this fires after ~2 frames (32ms) to render tiles continuously during scroll.
+   */
+  private scheduleScrollRerender(): void {
+    // Clear existing timeout
+    if (this.scrollRerenderTimeout) {
+      clearTimeout(this.scrollRerenderTimeout);
+    }
+
+    this.scrollRerenderTimeout = setTimeout(() => {
+      // Find pages that need re-rendering at current zoom
+      const pagesToRerender: number[] = [];
+      for (const page of this.visiblePages) {
+        if (this.needsZoomRerender(page)) {
+          pagesToRerender.push(page);
+        }
+      }
+
+      if (pagesToRerender.length > 0) {
+        // Mark pages as needing re-render
+        for (const page of pagesToRerender) {
+          const element = this.pageElements.get(page);
+          if (element) {
+            element.clearRendered();
+          }
+        }
+
+        // Queue for re-render
+        this.queueRender(pagesToRerender);
+      }
+    }, this.SCROLL_RERENDER_DEBOUNCE);
   }
 
   /**
@@ -2131,6 +2175,15 @@ export class PdfInfiniteCanvas {
 
       if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) return;
 
+      // Track velocity for adaptive rendering decisions
+      const now = performance.now();
+      const dt = Math.max(1, now - this.lastWheelTime);
+      this.velocity = {
+        x: deltaX / dt * 16, // Normalize to ~60fps frame time
+        y: deltaY / dt * 16,
+      };
+      this.lastWheelTime = now;
+
       // Apply direct pan - panCamera handles zoom-adjusted movement
       this.camera = panCamera(this.camera, deltaX, deltaY);
       this.constrainCameraPosition();
@@ -2140,6 +2193,12 @@ export class PdfInfiniteCanvas {
 
       // Defer visible pages update to next frame to keep scroll smooth
       this.scheduleVisiblePagesUpdate();
+
+      // CRITICAL: Schedule re-render at correct scale when scrolling at high zoom
+      // Uses shorter debounce (32ms) than zoom (150ms) for responsive scroll rendering
+      if (this.camera.z > this.tileZoomThreshold) {
+        this.scheduleScrollRerender();
+      }
     }
   }
 
@@ -2203,7 +2262,17 @@ export class PdfInfiniteCanvas {
       return;
     }
 
+    let lastFrameTime = performance.now();
+
     const animate = () => {
+      const now = performance.now();
+      const frameTime = now - lastFrameTime;
+      lastFrameTime = now;
+
+      // Track scroll frame for telemetry
+      const currentSpeed = Math.sqrt(this.velocity.x ** 2 + this.velocity.y ** 2);
+      getTelemetry().trackScrollFrame(currentSpeed, frameTime);
+
       // Apply velocity
       this.camera = panCamera(this.camera, this.velocity.x, this.velocity.y);
       this.constrainCameraPosition();
@@ -2246,6 +2315,9 @@ export class PdfInfiniteCanvas {
     this.camera = zoomCameraToPoint(this.camera, point, delta, constraints);
 
     if (this.camera.z !== oldZoom) {
+      // Track zoom change for telemetry
+      getTelemetry().trackZoomChange(oldZoom, this.camera.z);
+
       // Check if we need to relayout (only for auto-grid mode)
       // Pass the focus point so the page under cursor stays stationary
       if (this.shouldRelayout()) {
@@ -2790,6 +2862,12 @@ export class PdfInfiniteCanvas {
     if (this.zoomRerenderTimeout) {
       clearTimeout(this.zoomRerenderTimeout);
       this.zoomRerenderTimeout = null;
+    }
+
+    // Clear scroll re-render timeout
+    if (this.scrollRerenderTimeout) {
+      clearTimeout(this.scrollRerenderTimeout);
+      this.scrollRerenderTimeout = null;
     }
 
     for (const element of this.pageElements.values()) {

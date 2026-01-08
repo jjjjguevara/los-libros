@@ -122,3 +122,28 @@ export type { RenderRequest, RenderResult, RenderMode, RenderPriority } from './
 export { PaginatedStrategy, getPaginatedStrategy } from './paginated-strategy';
 export { ScrollStrategy, getScrollStrategy } from './scroll-strategy';
 export { GridStrategy, getGridStrategy } from './grid-strategy';
+
+// Lifecycle testing (Phase C & D)
+export { LifecycleTestRunner, formatTestResults } from './lifecycle-test-runner';
+export type {
+  LifecycleTestStep,
+  LifecycleTestResult,
+  LifecycleTestStepResult,
+  StepMetrics,
+  TestStepType,
+  TestStepParams,
+} from './lifecycle-test-runner';
+
+export {
+  STANDARD_SCENARIOS,
+  SCENARIO_DESCRIPTIONS,
+  listScenarios,
+  getScenario,
+  createScenario,
+} from './standard-scenarios';
+
+export {
+  exposeLifecycleTests,
+  initializeTestHarness,
+} from './mcp-test-harness';
+export type { ComparisonScreenshotResult, McpTestHarness } from './mcp-test-harness';

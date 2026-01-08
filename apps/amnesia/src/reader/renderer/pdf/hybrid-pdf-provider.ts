@@ -362,10 +362,10 @@ export class HybridPdfProvider {
     }
 
     // The incoming scale may already include DPR (from containers like PdfInfiniteCanvas)
-    // Balance quality vs memory: 8x scale = ~3500x5300 pixels for typical page
-    // This gives crisp rendering up to zoom 4x with 2x DPR
+    // Increased cap to 12x for better HiDPI + high zoom quality
+    // At zoom 6x with 2x DPR: idealScale = 12, now achievable
     const baseScale = options?.scale ?? 1.5;
-    const maxScale = 8.0; // 8x max - higher causes OOM crashes
+    const maxScale = 12.0; // Increased from 8x to support higher zoom levels
     const scale = Math.min(baseScale, maxScale);
 
     // Check cache first (regardless of render source)
@@ -468,9 +468,9 @@ export class HybridPdfProvider {
     }
 
     // The incoming scale may already include DPR (from containers like PdfInfiniteCanvas)
-    // Use scale directly, with reasonable cap to prevent memory issues
+    // Increased cap to 12x for better HiDPI + high zoom quality
     const baseScale = options?.scale ?? 1.5;
-    const maxScale = 6.0; // Cap to prevent excessive memory usage
+    const maxScale = 12.0; // Increased from 6x to support higher zoom levels
     const requestedScale = Math.min(baseScale, maxScale);
 
     // 1. Check for best available cached version
@@ -572,8 +572,9 @@ export class HybridPdfProvider {
     }
 
     // The incoming scale may already include DPR
+    // Increased cap to 12x for better HiDPI + high zoom quality
     const baseScale = options?.scale ?? 1.5;
-    const maxScale = 6.0;
+    const maxScale = 12.0; // Increased from 6x to support higher zoom levels
     const scale = Math.min(baseScale, maxScale);
     const renderOptions: PdfRenderOptions = { ...options, scale };
 

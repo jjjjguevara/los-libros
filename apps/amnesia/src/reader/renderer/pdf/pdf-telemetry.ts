@@ -22,6 +22,26 @@
  * ```
  */
 
+/** Zoom change entry for tracking user zoom patterns */
+export interface ZoomChange {
+  timestamp: number;
+  from: number;
+  to: number;
+  duration: number; // Time spent at this zoom (calculated on next change)
+}
+
+/** Scroll metrics for tracking scroll performance */
+export interface ScrollMetrics {
+  totalScrollDistance: number;
+  averageVelocity: number;
+  maxVelocity: number;
+  scrollEvents: number;
+  framesDropped: number;
+  averageFps: number;
+  jankEvents: number; // Frames > 16.67ms
+  frameTimes: number[]; // Rolling window of frame times
+}
+
 export interface TelemetryMetrics {
   // Cache metrics (tier-specific - overall computed from these in getStats())
   l1Hits: number;
@@ -53,6 +73,17 @@ export interface TelemetryMetrics {
   sessionStartTime: number;
   totalRenders: number;
   totalTileRenders: number;
+
+  // Zoom metrics (NEW)
+  zoomChanges: ZoomChange[];
+  zoomDistribution: Map<number, number>; // zoom level (bucketed) → count
+  currentZoom: number;
+
+  // Scroll metrics (NEW)
+  scrollMetrics: ScrollMetrics;
+
+  // Scale distribution (NEW)
+  scaleDistribution: Map<string, number>; // "type-scale-bucket" → count
 }
 
 export interface ModeTransition {
@@ -97,6 +128,24 @@ export interface TelemetryStats {
   totalTileRenders: number;
   rendersPerSecond: number;
 
+  // Zoom statistics (NEW)
+  currentZoom: number;
+  totalZoomChanges: number;
+  avgTimeAtZoomLevel: number;
+  mostUsedZoomLevel: number | null;
+
+  // Scroll statistics (NEW)
+  scrollTotalDistance: number;
+  scrollMaxVelocity: number;
+  scrollAvgFps: number;
+  scrollJankEvents: number;
+  scrollFrameDropRate: number;
+
+  // Scale statistics (NEW)
+  avgRenderScale: number;
+  maxRenderScale: number;
+  scaleDistributionSummary: Record<string, number>;
+
   // Legacy compat
   hitRate: number;
   cacheHits: number;
@@ -132,6 +181,23 @@ export class PdfTelemetry {
       sessionStartTime: Date.now(),
       totalRenders: 0,
       totalTileRenders: 0,
+      // Zoom metrics
+      zoomChanges: [],
+      zoomDistribution: new Map(),
+      currentZoom: 1.0,
+      // Scroll metrics
+      scrollMetrics: {
+        totalScrollDistance: 0,
+        averageVelocity: 0,
+        maxVelocity: 0,
+        scrollEvents: 0,
+        framesDropped: 0,
+        averageFps: 60,
+        jankEvents: 0,
+        frameTimes: [],
+      },
+      // Scale distribution
+      scaleDistribution: new Map(),
     };
   }
 
@@ -236,6 +302,92 @@ export class PdfTelemetry {
   }
 
   /**
+   * Track zoom level change
+   * @param from Previous zoom level
+   * @param to New zoom level
+   */
+  trackZoomChange(from: number, to: number): void {
+    const now = Date.now();
+
+    // Update duration of previous entry if exists
+    if (this.metrics.zoomChanges.length > 0) {
+      const prev = this.metrics.zoomChanges[this.metrics.zoomChanges.length - 1];
+      prev.duration = now - prev.timestamp;
+    }
+
+    // Add new entry
+    this.metrics.zoomChanges.push({
+      timestamp: now,
+      from,
+      to,
+      duration: 0, // Will be calculated on next change
+    });
+
+    this.metrics.currentZoom = to;
+
+    // Update distribution (bucket to 0.5 increments)
+    const bucket = Math.round(to * 2) / 2;
+    this.metrics.zoomDistribution.set(
+      bucket,
+      (this.metrics.zoomDistribution.get(bucket) ?? 0) + 1
+    );
+
+    // Keep last 100 zoom changes
+    if (this.metrics.zoomChanges.length > 100) {
+      this.metrics.zoomChanges.shift();
+    }
+  }
+
+  /**
+   * Track scroll frame for performance analysis
+   * @param velocity Current scroll velocity (px/s)
+   * @param frameTime Frame duration in ms (16.67ms = 60fps)
+   */
+  trackScrollFrame(velocity: number, frameTime: number): void {
+    const scroll = this.metrics.scrollMetrics;
+
+    scroll.scrollEvents++;
+    scroll.totalScrollDistance += Math.abs(velocity * (frameTime / 1000));
+    scroll.maxVelocity = Math.max(scroll.maxVelocity, Math.abs(velocity));
+
+    // Track frame time for FPS calculation
+    scroll.frameTimes.push(frameTime);
+    if (scroll.frameTimes.length > this.maxSamples) {
+      scroll.frameTimes.shift();
+    }
+
+    // Track jank (frame time > 16.67ms = sub-60fps)
+    if (frameTime > 16.67) {
+      scroll.jankEvents++;
+      scroll.framesDropped++;
+    }
+
+    // Update rolling averages
+    if (scroll.frameTimes.length > 0) {
+      const avgFrameTime = this.average(scroll.frameTimes);
+      scroll.averageFps = avgFrameTime > 0 ? 1000 / avgFrameTime : 60;
+      scroll.averageVelocity =
+        scroll.scrollEvents > 0
+          ? scroll.totalScrollDistance / (scroll.scrollEvents * (avgFrameTime / 1000))
+          : 0;
+    }
+  }
+
+  /**
+   * Track render scale used for a render operation
+   * @param scale The scale factor used (e.g., 2, 4, 8, 16, 32)
+   * @param type 'page' for full page renders, 'tile' for tile renders
+   */
+  trackRenderScale(scale: number, type: 'page' | 'tile'): void {
+    const bucket = Math.ceil(scale);
+    const key = `${type}-scale-${bucket}`;
+    this.metrics.scaleDistribution.set(
+      key,
+      (this.metrics.scaleDistribution.get(key) ?? 0) + 1
+    );
+  }
+
+  /**
    * Track worker task started (legacy compat)
    */
   trackWorkerTaskStart(): void {
@@ -332,6 +484,41 @@ export class PdfTelemetry {
     const totalCacheMisses = this.metrics.l1Misses + this.metrics.l2Misses + this.metrics.l3Misses;
     const overallHitRate = this.hitRate(totalCacheHits, totalCacheMisses);
 
+    // Compute zoom statistics
+    const avgTimeAtZoomLevel =
+      this.metrics.zoomChanges.length > 0
+        ? this.average(this.metrics.zoomChanges.map((z) => z.duration).filter((d) => d > 0))
+        : 0;
+
+    // Find most used zoom level
+    let mostUsedZoomLevel: number | null = null;
+    let maxCount = 0;
+    for (const [level, count] of this.metrics.zoomDistribution) {
+      if (count > maxCount) {
+        maxCount = count;
+        mostUsedZoomLevel = level;
+      }
+    }
+
+    // Compute scroll statistics
+    const scroll = this.metrics.scrollMetrics;
+    const scrollFrameDropRate =
+      scroll.scrollEvents > 0 ? scroll.framesDropped / scroll.scrollEvents : 0;
+
+    // Compute scale statistics
+    const scaleValues: number[] = [];
+    const scaleDistSummary: Record<string, number> = {};
+    for (const [key, count] of this.metrics.scaleDistribution) {
+      scaleDistSummary[key] = count;
+      const match = key.match(/scale-(\d+)/);
+      if (match) {
+        const scale = parseInt(match[1], 10);
+        for (let i = 0; i < count; i++) {
+          scaleValues.push(scale);
+        }
+      }
+    }
+
     return {
       // Cache statistics
       overallHitRate,
@@ -372,6 +559,24 @@ export class PdfTelemetry {
           ? (this.metrics.totalRenders + this.metrics.totalTileRenders) / sessionDuration
           : 0,
 
+      // Zoom statistics (NEW)
+      currentZoom: this.metrics.currentZoom,
+      totalZoomChanges: this.metrics.zoomChanges.length,
+      avgTimeAtZoomLevel,
+      mostUsedZoomLevel,
+
+      // Scroll statistics (NEW)
+      scrollTotalDistance: scroll.totalScrollDistance,
+      scrollMaxVelocity: scroll.maxVelocity,
+      scrollAvgFps: scroll.averageFps,
+      scrollJankEvents: scroll.jankEvents,
+      scrollFrameDropRate,
+
+      // Scale statistics (NEW)
+      avgRenderScale: this.average(scaleValues),
+      maxRenderScale: scaleValues.length > 0 ? Math.max(...scaleValues) : 0,
+      scaleDistributionSummary: scaleDistSummary,
+
       // Legacy compat - use computed totals
       hitRate: overallHitRate,
       cacheHits: totalCacheHits,
@@ -410,6 +615,9 @@ export class PdfTelemetry {
       `  Cache: ${(stats.overallHitRate * 100).toFixed(1)}% hit rate (L1: ${(stats.l1HitRate * 100).toFixed(1)}%, L2: ${(stats.l2HitRate * 100).toFixed(1)}%)`,
       `  Render: avg ${stats.avgRenderTime.toFixed(1)}ms, p95 ${stats.p95RenderTime.toFixed(1)}ms`,
       `  Tiles: avg ${stats.avgTileRenderTime.toFixed(1)}ms, first ${stats.firstTileTime?.toFixed(1) ?? 'N/A'}ms`,
+      `  Scale: avg ${stats.avgRenderScale.toFixed(1)}x, max ${stats.maxRenderScale}x`,
+      `  Zoom: current ${stats.currentZoom.toFixed(1)}x, ${stats.totalZoomChanges} changes, most used: ${stats.mostUsedZoomLevel?.toFixed(1) ?? 'N/A'}x`,
+      `  Scroll: ${stats.scrollAvgFps.toFixed(0)} FPS, ${stats.scrollJankEvents} jank events, ${(stats.scrollFrameDropRate * 100).toFixed(1)}% dropped`,
       `  Workers: ${(stats.avgWorkerUtilization * 100).toFixed(0)}% utilization, ${stats.currentPendingTasks} pending`,
       `  Memory: ${stats.currentMemoryMB.toFixed(1)}MB current, ${stats.peakMemoryMB.toFixed(1)}MB peak`,
       `  Session: ${stats.sessionDuration.toFixed(1)}s, ${stats.totalRenders + stats.totalTileRenders} renders`,

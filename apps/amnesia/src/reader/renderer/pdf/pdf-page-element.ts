@@ -337,9 +337,10 @@ export class PdfPageElement {
 
     this.isRendered = true;
 
-    // Track render time
+    // Track render time and scale
     const renderTime = performance.now() - startTime;
-    telemetry.trackRenderTime(renderTime);
+    telemetry.trackRenderTime(renderTime, 'page');
+    telemetry.trackRenderScale(scale, 'page');
 
     // Apply reading mode styles now that we have content
     // This enables canvas-based dark mode for better quality
@@ -450,9 +451,14 @@ export class PdfPageElement {
 
     this.isRendered = true;
 
-    // Track render time
+    // Track render time and scale
     const renderTime = performance.now() - startTime;
-    telemetry.trackRenderTime(renderTime);
+    telemetry.trackRenderTime(renderTime, 'tile');
+
+    // Track render scale (use first tile's scale as representative)
+    if (tiles.length > 0) {
+      telemetry.trackRenderScale(tiles[0].tile.scale, 'tile');
+    }
 
     // Apply reading mode styles now that we have content
     this.applyReadingModeStyles();
