@@ -28,7 +28,7 @@
 import type { TileCoordinate } from './tile-render-engine';
 import { getTileCacheManager } from './tile-cache-manager';
 import { getPaginatedStrategy } from './paginated-strategy';
-import { getScrollStrategy } from './scroll-strategy';
+import { getScrollStrategy, type PrioritizedTile, type SpeedZone } from './scroll-strategy';
 import { getGridStrategy } from './grid-strategy';
 import { getTelemetry } from './pdf-telemetry';
 
@@ -305,6 +305,53 @@ export class RenderCoordinator {
 
     // For paginated/grid, get visible tiles only (prefetch handled at page level)
     return [];
+  }
+
+  /**
+   * Get prefetch tiles with priority information.
+   *
+   * Returns tiles sorted by priority (0 = critical, 3 = background).
+   * Uses velocity-based adaptive lookahead in scroll mode.
+   *
+   * Priority zones (in viewport units):
+   * - Critical (0-0.5): Priority 0 - must render immediately
+   * - High (0.5-1.5): Priority 1 - prefetch soon
+   * - Medium (1.5-2.5): Priority 2 - opportunistic
+   * - Low (2.5-lookahead): Priority 3 - background
+   */
+  getPrefetchTilesWithPriority(
+    viewport: { x: number; y: number; width: number; height: number },
+    pageLayouts: Array<{ page: number; x: number; y: number; width: number; height: number }>,
+    velocity: { x: number; y: number },
+    zoom: number,
+    pixelRatio: number = 1
+  ): PrioritizedTile[] {
+    if (this.currentMode !== 'scroll') {
+      // Only scroll mode supports prioritized prefetching
+      return [];
+    }
+
+    const scrollStrategy = this.getCurrentStrategy() as ReturnType<typeof getScrollStrategy>;
+    return scrollStrategy.getPrefetchTilesWithPriority(
+      viewport,
+      velocity,
+      pageLayouts,
+      zoom,
+      pixelRatio
+    );
+  }
+
+  /**
+   * Get the current speed zone based on velocity.
+   * Used for adaptive quality/prefetch decisions.
+   */
+  getSpeedZone(velocity: { x: number; y: number }): SpeedZone {
+    if (this.currentMode !== 'scroll') {
+      return 'stationary';
+    }
+
+    const scrollStrategy = this.getCurrentStrategy() as ReturnType<typeof getScrollStrategy>;
+    return scrollStrategy.getSpeedZone(velocity);
   }
 
   /**

@@ -121,6 +121,7 @@ export type { RenderRequest, RenderResult, RenderMode, RenderPriority } from './
 // Mode-specific strategies
 export { PaginatedStrategy, getPaginatedStrategy } from './paginated-strategy';
 export { ScrollStrategy, getScrollStrategy } from './scroll-strategy';
+export type { PrioritizedTile, SpeedZone, SpeedZoneConfig } from './scroll-strategy';
 export { GridStrategy, getGridStrategy } from './grid-strategy';
 
 // Lifecycle testing (Phase C & D)

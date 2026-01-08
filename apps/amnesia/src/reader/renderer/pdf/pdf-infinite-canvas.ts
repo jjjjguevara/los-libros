@@ -193,6 +193,9 @@ export class PdfInfiniteCanvas {
   // Scroll-specific re-rendering (much shorter debounce for responsiveness)
   private scrollRerenderTimeout: ReturnType<typeof setTimeout> | null = null;
   private readonly SCROLL_RERENDER_DEBOUNCE = 32; // ms - ~2 frames for smooth scroll rendering
+  // Camera snapshot for scroll re-rendering - captures camera at schedule time
+  // so tile visibility is calculated based on where user was, not where camera moved to
+  private scrollRenderCameraSnapshot: Camera | null = null;
   private readonly MIN_EFFECTIVE_RATIO = 2.0; // Minimum buffer pixels per screen pixel (Retina)
   private pendingImageRequests: Map<number, Promise<Blob>> = new Map();
 
@@ -1507,6 +1510,10 @@ export class PdfInfiniteCanvas {
     }
 
     this.isRendering = false;
+
+    // Clear scroll camera snapshot after all renders complete
+    // This ensures the snapshot is only used for the render batch it was created for
+    this.scrollRenderCameraSnapshot = null;
   }
 
   /**
@@ -1569,12 +1576,18 @@ export class PdfInfiniteCanvas {
       // At lower zoom, render all tiles for the page (for smooth panning)
       let tiles: TileCoordinate[];
       if (zoom > 4.0) {
+        // CRITICAL: Use camera snapshot if available (from scroll rerender)
+        // This ensures we calculate visibility based on where the user was when scroll
+        // rerender was scheduled, not where the camera has moved to during debounce.
+        // This fixes the "0 visible tiles" issue during continuous scroll.
+        const effectiveCamera = this.scrollRenderCameraSnapshot ?? this.camera;
+
         // Get viewport in WORLD coordinates (not screen coordinates!)
         const screenRect = this.getViewportRect();
-        const viewport = getVisibleBounds(this.camera, screenRect.width, screenRect.height);
+        const viewport = getVisibleBounds(effectiveCamera, screenRect.width, screenRect.height);
         tiles = this.tileEngine!.getVisibleTiles(viewport, [layout], zoom, tileScale);
         const totalTiles = this.tileEngine!.getPageTileGrid(page, tileScale).length;
-        console.log(`[PdfInfiniteCanvas] High zoom ${zoom.toFixed(1)}x: rendering ${tiles.length} visible tiles (vs ${totalTiles} total for page)`);
+        console.log(`[PdfInfiniteCanvas] High zoom ${zoom.toFixed(1)}x: rendering ${tiles.length} visible tiles (vs ${totalTiles} total for page)${this.scrollRenderCameraSnapshot ? ' [using camera snapshot]' : ''}`);
       } else {
         // At normal zoom, get all tiles for smooth pan/zoom
         tiles = this.tileEngine!.getPageTileGrid(page, tileScale);
@@ -1585,8 +1598,9 @@ export class PdfInfiniteCanvas {
         if (zoom > 4.0) {
           // At high zoom, if page doesn't overlap viewport, skip rendering
           // This preserves any existing canvas content from previous renders
+          const effectiveCamera = this.scrollRenderCameraSnapshot ?? this.camera;
           const screenRect = this.getViewportRect();
-          const viewport = getVisibleBounds(this.camera, screenRect.width, screenRect.height);
+          const viewport = getVisibleBounds(effectiveCamera, screenRect.width, screenRect.height);
           const overlaps = this.rectsOverlap(viewport, layout);
           if (!overlaps) {
             // Page is not visible - keep existing content, don't clear canvas
@@ -1891,6 +1905,13 @@ export class PdfInfiniteCanvas {
     if (this.scrollRerenderTimeout) {
       clearTimeout(this.scrollRerenderTimeout);
     }
+
+    // CRITICAL: Snapshot camera NOW, not when debounce fires
+    // During fast scroll, the camera moves 100s of pixels between schedule and render.
+    // If we use the current camera at render time, it may have moved past all page layouts,
+    // resulting in "0 visible tiles". By snapshotting at schedule time, we ensure
+    // tile visibility is calculated based on where the user actually is.
+    this.scrollRenderCameraSnapshot = { ...this.camera };
 
     this.scrollRerenderTimeout = setTimeout(() => {
       // Find pages that need re-rendering at current zoom
@@ -2864,11 +2885,12 @@ export class PdfInfiniteCanvas {
       this.zoomRerenderTimeout = null;
     }
 
-    // Clear scroll re-render timeout
+    // Clear scroll re-render timeout and camera snapshot
     if (this.scrollRerenderTimeout) {
       clearTimeout(this.scrollRerenderTimeout);
       this.scrollRerenderTimeout = null;
     }
+    this.scrollRenderCameraSnapshot = null;
 
     for (const element of this.pageElements.values()) {
       element.destroy();
