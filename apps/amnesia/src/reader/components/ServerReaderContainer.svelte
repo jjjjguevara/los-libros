@@ -1287,6 +1287,18 @@
           async searchPdf(id: string, query: string, limit?: number) {
             return pdfProvider!.search(query, limit);
           },
+          // Tile rendering methods for CATiledLayer-style rendering at high zoom
+          renderTile: typeof pdfProvider?.renderTile === 'function'
+            ? async (tile: { page: number; tileX: number; tileY: number; scale: number }) => {
+                return pdfProvider!.renderTile(tile);
+              }
+            : undefined,
+          getRenderCoordinator: typeof pdfProvider?.getRenderCoordinator === 'function'
+            ? () => pdfProvider!.getRenderCoordinator()
+            : undefined,
+          isTileRenderingAvailable: typeof pdfProvider?.isTileRenderingAvailable === 'function'
+            ? () => pdfProvider!.isTileRenderingAvailable()
+            : undefined,
         };
 
         // Create PDF renderer config with all optimization settings

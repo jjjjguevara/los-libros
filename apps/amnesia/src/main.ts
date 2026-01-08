@@ -54,6 +54,10 @@ import {
 // Server Management
 import { ServerManager, type ServerState } from './server/server-manager';
 
+// PDF WASM Worker Path Configuration
+import { setMuPDFPluginPath } from './reader/renderer/pdf/mupdf-bridge';
+import { getTelemetry } from './reader/renderer/pdf/pdf-telemetry';
+
 // HUD System
 import { AmnesiaHUD, AmnesiaHUDProvider, isDocDoctorAvailable, getDocDoctorRegistry, onDocDoctorHUDReady } from './hud';
 
@@ -120,6 +124,18 @@ export default class AmnesiaPlugin extends Plugin {
 
 	async onload() {
 		console.log('Loading Amnesia plugin');
+
+		// Configure MuPDF worker path for PDF WASM rendering
+		// Must be done before any PDF operations
+		const vaultPath = (this.app.vault.adapter as { basePath?: string }).basePath;
+		if (vaultPath) {
+			setMuPDFPluginPath(vaultPath);
+		}
+
+		// Initialize PDF telemetry for performance monitoring
+		// Start periodic memory tracking (every 5 seconds)
+		const telemetry = getTelemetry();
+		telemetry.startPeriodicMemoryTracking(5000);
 
 		// Load settings
 		await this.loadSettings();
@@ -1037,6 +1053,32 @@ export default class AmnesiaPlugin extends Plugin {
 
 				if (isBookNote) {
 					this.regenerateBookNote(activeFile);
+				}
+				return true;
+			}
+		});
+
+		// Command to reveal current book in Finder (macOS) / Explorer (Windows)
+		this.addCommand({
+			id: 'reveal-book-in-finder',
+			name: 'Reveal Book in Finder',
+			checkCallback: (checking: boolean) => {
+				// Get the currently active/focused reader view (not just any reader)
+				const activeView = this.app.workspace.getActiveViewOfType(ReaderView);
+				if (!activeView) return false;
+
+				const bookPath = activeView.getState?.()?.bookPath;
+				if (!bookPath) return false;
+
+				if (checking) return true;
+
+				// Use Electron's shell to reveal the file
+				try {
+					const { shell } = require('electron');
+					shell.showItemInFolder(bookPath);
+				} catch (error) {
+					console.error('[Amnesia] Failed to reveal in Finder:', error);
+					new Notice(`Failed to reveal book: ${error instanceof Error ? error.message : 'Unknown error'}`);
 				}
 				return true;
 			}

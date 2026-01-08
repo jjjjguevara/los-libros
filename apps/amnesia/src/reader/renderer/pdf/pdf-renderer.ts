@@ -357,6 +357,18 @@ export class PdfRenderer implements DocumentRenderer {
           isFullQuality: true,
         };
       },
+      // Tile rendering methods for CATiledLayer-style rendering at high zoom
+      renderTile: 'renderTile' in this.provider && typeof (this.provider as any).renderTile === 'function'
+        ? async (tile: { page: number; tileX: number; tileY: number; scale: number }) => {
+            return (this.provider as any).renderTile(tile);
+          }
+        : undefined,
+      getRenderCoordinator: 'getRenderCoordinator' in this.provider && typeof (this.provider as any).getRenderCoordinator === 'function'
+        ? () => (this.provider as any).getRenderCoordinator()
+        : undefined,
+      isTileRenderingAvailable: 'isTileRenderingAvailable' in this.provider && typeof (this.provider as any).isTileRenderingAvailable === 'function'
+        ? () => (this.provider as any).isTileRenderingAvailable()
+        : undefined,
     };
 
     this.infiniteCanvas = new PdfInfiniteCanvas(
@@ -366,7 +378,7 @@ export class PdfRenderer implements DocumentRenderer {
         gap: 20,
         padding: this.config.margin ?? 20,
         minZoom: 0.1,
-        maxZoom: 5,
+        maxZoom: 16, // Increased from 5 to 16 for high zoom capability
         pageWidth: 612,
         pageHeight: 792,
         renderScale: this.config.scale ?? 1.5,
@@ -532,6 +544,8 @@ export class PdfRenderer implements DocumentRenderer {
       // Initialize the appropriate container with page count
       if (this.infiniteCanvas) {
         this.infiniteCanvas.initialize(this.document.pageCount);
+        // Update layouts with actual PDF dimensions (from tile engine if available)
+        this.infiniteCanvas.updatePageDimensions();
         this.infiniteCanvas.goToPage(1);
       } else if (this.multiPageContainer) {
         this.multiPageContainer.initialize(this.document.pageCount);
@@ -557,6 +571,8 @@ export class PdfRenderer implements DocumentRenderer {
       // Initialize the appropriate container with page count
       if (this.infiniteCanvas) {
         this.infiniteCanvas.initialize(this.document.pageCount);
+        // Update layouts with actual PDF dimensions (from tile engine if available)
+        this.infiniteCanvas.updatePageDimensions();
         this.infiniteCanvas.goToPage(1);
       } else if (this.multiPageContainer) {
         this.multiPageContainer.initialize(this.document.pageCount);
@@ -1474,6 +1490,8 @@ export class PdfRenderer implements DocumentRenderer {
 
       if (this.document && this.infiniteCanvas) {
         this.infiniteCanvas.initialize(this.document.pageCount);
+        // Update layouts with actual PDF dimensions (from tile engine if available)
+        this.infiniteCanvas.updatePageDimensions();
         this.infiniteCanvas.goToPage(previousPage);
       }
     } else {

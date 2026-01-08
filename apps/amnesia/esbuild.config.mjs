@@ -138,6 +138,87 @@ if (prod && !skipServer) {
   }
 }
 
+// =============================================================================
+// MUPDF WORKER BUNDLING
+// =============================================================================
+
+// Copy MuPDF WASM file to plugin directory
+const mupdfWasmSource = "../../node_modules/.pnpm/mupdf@1.27.0/node_modules/mupdf/dist/mupdf-wasm.wasm";
+const mupdfWasmDest = path.join(pluginDir, "mupdf-wasm.wasm");
+if (fs.existsSync(mupdfWasmSource)) {
+  fs.copyFileSync(mupdfWasmSource, mupdfWasmDest);
+  console.log(`Copied MuPDF WASM: ${mupdfWasmSource} -> ${mupdfWasmDest}`);
+} else {
+  console.warn("⚠️  MuPDF WASM file not found at:", mupdfWasmSource);
+}
+
+// Build MuPDF worker as separate bundle
+console.log("📦 Building MuPDF worker...");
+try {
+  await esbuild.build({
+    entryPoints: ["src/reader/renderer/pdf/mupdf-worker.ts"],
+    bundle: true,
+    format: "esm", // ESM required for top-level await in mupdf
+    target: "esnext", // mupdf uses top-level await
+    outfile: path.join(pluginDir, "mupdf-worker.js"),
+    minify: prod,
+    sourcemap: false,
+    // Platform is browser for worker
+    platform: "browser",
+    // Use browser conditions for package resolution
+    conditions: ["browser", "worker"],
+    // Mark Node.js modules as external - they will error at runtime but that's OK
+    // because mupdf conditionally imports them only in Node.js environment
+    external: ["node:fs", "node:path", "fs", "path", "module"],
+    // Define to help mupdf detect browser environment
+    define: {
+      "process.env.NODE_ENV": prod ? '"production"' : '"development"',
+    },
+    // Banner to set up browser-like environment in worker
+    // mupdf checks for Node.js via: typeof process === "object" && process.versions?.node
+    banner: {
+      js: `
+// Shim browser environment for mupdf detection in worker context
+// mupdf checks multiple conditions for Node.js detection:
+// 1. typeof window === 'undefined'
+// 2. typeof process === "object" && process.versions?.node
+if (typeof window === 'undefined') {
+  globalThis.window = self;
+}
+// Override process to prevent Node.js detection
+globalThis.process = { env: {}, versions: {} };
+
+// Configure mupdf WASM loading - the WASM binary will be provided by the main thread
+// The bridge reads the WASM file and passes it via message before loading mupdf
+globalThis.$libmupdf_wasm_Module = {
+  // wasmBinary will be set by the main thread before mupdf loads
+  wasmBinary: null,
+  locateFile: function(filename) {
+    // This shouldn't be called if wasmBinary is provided, but handle it gracefully
+    console.warn('[MuPDF Worker] locateFile called, but wasmBinary should be provided');
+    return filename;
+  }
+};
+
+// Wait for WASM binary from main thread before allowing mupdf to initialize
+let wasmBinaryResolve = null;
+globalThis.__MUPDF_WASM_READY__ = new Promise(resolve => { wasmBinaryResolve = resolve; });
+self.addEventListener('message', function initHandler(event) {
+  if (event.data && event.data.type === 'INIT_WASM' && event.data.wasmBinary) {
+    globalThis.$libmupdf_wasm_Module.wasmBinary = event.data.wasmBinary;
+    wasmBinaryResolve();
+    self.removeEventListener('message', initHandler);
+  }
+}, { once: false });
+`,
+    },
+  });
+  console.log("✅ MuPDF worker built");
+} catch (error) {
+  console.warn("⚠️  MuPDF worker build failed:", error.message);
+  console.warn("   WASM PDF rendering will fall back to server-side rendering.");
+}
+
 const context = await esbuild.context({
   banner: {
     js: banner,

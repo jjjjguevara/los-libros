@@ -32,6 +32,9 @@ import type {
 } from '../types';
 import { PdfPageCache } from './pdf-cache';
 import { WasmPdfRenderer, getSharedWasmRenderer, destroySharedWasmRenderer } from './wasm-renderer';
+import { getRenderCoordinator, type RenderCoordinator } from './render-coordinator';
+import type { TileCoordinate } from './tile-render-engine';
+import { TILE_SIZE, getTileEngine } from './tile-render-engine';
 
 export type PdfProviderMode = 'server' | 'wasm' | 'auto';
 
@@ -97,6 +100,9 @@ export class HybridPdfProvider {
   private wasmAvailable: boolean = false;
   private wasmDocumentId: string | null = null;
 
+  // Render coordinator for tile-based rendering
+  private renderCoordinator: RenderCoordinator | null = null;
+
   // Caching
   private pageCache: PdfPageCache;
 
@@ -105,6 +111,14 @@ export class HybridPdfProvider {
   private isPrefetching: boolean = false;
   private prefetchTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private isDestroyed: boolean = false;
+
+  // Global in-flight tracking to prevent duplicate requests across all prefetch systems
+  // Key format: "${pdfId}-${page}-${scale.toFixed(1)}"
+  private globalInFlight = new Set<string>();
+
+  // Pending render requests - allows multiple callers to await the same in-flight render
+  // Key format same as globalInFlight
+  private pendingRenderRequests = new Map<string, Promise<Blob>>();
 
   constructor(config: HybridPdfProviderConfig = {}) {
     this.config = {
@@ -291,6 +305,21 @@ export class HybridPdfProvider {
       const result = await this.wasmRenderer.loadDocument(data.slice(0)); // Clone to avoid transfer issues
       this.wasmDocumentId = result.id;
       console.log(`[HybridPdfProvider] WASM loaded document (${result.pageCount} pages) in ${(performance.now() - startTime).toFixed(1)}ms`);
+
+      // Set up render coordinator now that WASM document is loaded
+      if (this.renderCoordinator) {
+        this.setupCoordinatorCallbacks();
+      }
+
+      // Set up tile engine with document info and render callback
+      const tileEngine = getTileEngine();
+      const pageDimensions = await this.getPageDimensionsMap(result.pageCount);
+      tileEngine.setDocument(this.wasmDocumentId!, result.pageCount, pageDimensions);
+      tileEngine.setRenderCallback(async (tile: TileCoordinate, _docId: string) => {
+        return this.renderTile(tile);
+      });
+      console.log(`[HybridPdfProvider] TileEngine configured for ${result.pageCount} pages`);
+
       return result;
     } catch (error) {
       console.warn('[HybridPdfProvider] WASM document load failed:', error);
@@ -321,13 +350,23 @@ export class HybridPdfProvider {
   /**
    * Render a page to a blob (with caching)
    * Uses WASM renderer when available for faster local rendering.
+   *
+   * DPI-Aware: Automatically scales by devicePixelRatio for crisp text on HiDPI displays.
+   *
+   * Request Deduplication: Multiple concurrent requests for the same page/scale
+   * will share a single in-flight request, preventing duplicate work.
    */
   async renderPage(pageNumber: number, options?: PdfRenderOptions): Promise<Blob> {
     if (!this.documentId && !this.wasmDocumentId) {
       throw new Error('No document loaded');
     }
 
-    const scale = options?.scale ?? 1.5;
+    // The incoming scale may already include DPR (from containers like PdfInfiniteCanvas)
+    // Balance quality vs memory: 8x scale = ~3500x5300 pixels for typical page
+    // This gives crisp rendering up to zoom 4x with 2x DPR
+    const baseScale = options?.scale ?? 1.5;
+    const maxScale = 8.0; // 8x max - higher causes OOM crashes
+    const scale = Math.min(baseScale, maxScale);
 
     // Check cache first (regardless of render source)
     if (this.config.enableCache && this.documentId) {
@@ -341,16 +380,48 @@ export class HybridPdfProvider {
       }
     }
 
+    // Request deduplication: check if same request is already in flight
+    const inFlightKey = this.getInFlightKey(pageNumber, scale);
+    const pendingRequest = this.pendingRenderRequests.get(inFlightKey);
+    if (pendingRequest) {
+      // Reuse existing in-flight request
+      return pendingRequest;
+    }
+
+    // Create render promise and track it
+    const renderPromise = this.doRenderPage(pageNumber, scale, options);
+    this.pendingRenderRequests.set(inFlightKey, renderPromise);
+
+    try {
+      const blob = await renderPromise;
+      return blob;
+    } finally {
+      // Clean up tracking after request completes (success or failure)
+      this.pendingRenderRequests.delete(inFlightKey);
+    }
+  }
+
+  /**
+   * Internal render implementation (called by renderPage after deduplication)
+   */
+  private async doRenderPage(
+    pageNumber: number,
+    scale: number,
+    options?: PdfRenderOptions
+  ): Promise<Blob> {
     let blob: Blob;
+
+    // Create render options with DPI-adjusted scale
+    const renderOptions: PdfRenderOptions = { ...options, scale };
 
     // Use WASM renderer if available and enabled
     if (this.shouldUseWasm() && this.wasmRenderer && this.wasmDocumentId) {
       const startTime = performance.now();
-      blob = await this.wasmRenderer.renderPage(pageNumber, options);
+      blob = await this.wasmRenderer.renderPage(pageNumber, renderOptions);
       console.log(`[HybridPdfProvider] WASM rendered page ${pageNumber} @ ${scale}x in ${(performance.now() - startTime).toFixed(1)}ms`);
     } else if (this.apiClient && this.documentId) {
       // Fallback to server rendering
-      blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
+      blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, renderOptions);
     } else {
       throw new Error('No rendering backend available');
     }
@@ -396,7 +467,11 @@ export class HybridPdfProvider {
       throw new Error('No document loaded');
     }
 
-    const requestedScale = options?.scale ?? 1.5;
+    // The incoming scale may already include DPR (from containers like PdfInfiniteCanvas)
+    // Use scale directly, with reasonable cap to prevent memory issues
+    const baseScale = options?.scale ?? 1.5;
+    const maxScale = 6.0; // Cap to prevent excessive memory usage
+    const requestedScale = Math.min(baseScale, maxScale);
 
     // 1. Check for best available cached version
     const cached = await this.pageCache.getBestAvailable(
@@ -485,6 +560,7 @@ export class HybridPdfProvider {
 
   /**
    * Render page directly to a canvas element
+   * DPI-Aware: Automatically scales by devicePixelRatio for crisp rendering.
    */
   async renderPageToCanvas(
     pageNumber: number,
@@ -495,7 +571,13 @@ export class HybridPdfProvider {
       throw new Error('No document loaded');
     }
 
-    const blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, options);
+    // The incoming scale may already include DPR
+    const baseScale = options?.scale ?? 1.5;
+    const maxScale = 6.0;
+    const scale = Math.min(baseScale, maxScale);
+    const renderOptions: PdfRenderOptions = { ...options, scale };
+
+    const blob = await this.apiClient.getPdfPage(this.documentId, pageNumber, renderOptions);
     const img = await this.blobToImage(blob);
 
     const ctx = canvas.getContext('2d')!;
@@ -543,6 +625,99 @@ export class HybridPdfProvider {
     // TODO: Add server API endpoint to get per-page dimensions
     // For now, return standard US Letter size
     return { width: 612, height: 792 }; // US Letter at 72 DPI
+  }
+
+  /**
+   * Get page dimensions for all pages as a Map
+   * Used to initialize the TileRenderEngine with document layout.
+   */
+  private async getPageDimensionsMap(
+    pageCount: number
+  ): Promise<Map<number, { width: number; height: number }>> {
+    const dimensions = new Map<number, { width: number; height: number }>();
+
+    // Get dimensions for all pages (can be parallelized if needed)
+    // For now, batch in groups to avoid overwhelming the worker
+    const batchSize = 10;
+    for (let start = 1; start <= pageCount; start += batchSize) {
+      const end = Math.min(start + batchSize - 1, pageCount);
+      const promises: Promise<void>[] = [];
+
+      for (let page = start; page <= end; page++) {
+        promises.push(
+          this.getPageDimensions(page).then((dim) => {
+            dimensions.set(page, dim);
+          })
+        );
+      }
+
+      await Promise.all(promises);
+    }
+
+    return dimensions;
+  }
+
+  /**
+   * Render a tile (256x256 region) of a page
+   * Uses WASM renderer for fast local tile rendering.
+   *
+   * @param tile Tile coordinate (page, tileX, tileY, scale)
+   * @returns PNG blob of the tile
+   */
+  async renderTile(tile: TileCoordinate): Promise<Blob> {
+    if (!this.wasmRenderer || !this.wasmDocumentId) {
+      throw new Error('WASM renderer not available for tile rendering');
+    }
+
+    return this.wasmRenderer.renderTile(
+      tile.page,
+      tile.tileX,
+      tile.tileY,
+      { scale: tile.scale, tileSize: TILE_SIZE }
+    );
+  }
+
+  /**
+   * Get the render coordinator for tile-based rendering.
+   * The coordinator manages tile caching, deduplication, and mode-specific strategies.
+   */
+  getRenderCoordinator(): RenderCoordinator {
+    if (!this.renderCoordinator) {
+      this.renderCoordinator = getRenderCoordinator();
+
+      // Set up callbacks if document is loaded
+      if (this.wasmDocumentId) {
+        this.setupCoordinatorCallbacks();
+      }
+    }
+    return this.renderCoordinator;
+  }
+
+  /**
+   * Set up render coordinator callbacks to use this provider
+   */
+  private setupCoordinatorCallbacks(): void {
+    if (!this.renderCoordinator || !this.wasmDocumentId) return;
+
+    const docId = this.wasmDocumentId;
+
+    this.renderCoordinator.setRenderCallbacks({
+      renderTile: async (tile: TileCoordinate, _docId: string) => {
+        return this.renderTile(tile);
+      },
+      renderPage: async (page: number, scale: number, _docId: string) => {
+        return this.renderPage(page, { scale });
+      },
+    });
+
+    this.renderCoordinator.setDocument(docId);
+  }
+
+  /**
+   * Check if tile rendering is available (WASM initialized)
+   */
+  isTileRenderingAvailable(): boolean {
+    return this.wasmAvailable && this.wasmDocumentId !== null;
   }
 
   /**
@@ -606,6 +781,10 @@ export class HybridPdfProvider {
     // Destroy page cache
     this.pageCache.destroy();
 
+    // Clear in-flight tracking
+    this.globalInFlight.clear();
+    this.pendingRenderRequests.clear();
+
     this.documentId = null;
     this.wasmDocumentId = null;
     this.parsedPdf = null;
@@ -668,34 +847,121 @@ export class HybridPdfProvider {
   }
 
   /**
-   * Process the prefetch queue sequentially
+   * Process the prefetch queue with streaming concurrency
+   *
+   * Performance optimization: Uses streaming pattern to maintain constant concurrent
+   * requests. Unlike batch processing, this starts a new request immediately when
+   * any one completes, eliminating the "convoy effect" where slow requests block others.
+   *
+   * Key improvements:
+   * - No convoy effect: slow pages don't block fast pages
+   * - Constant throughput: always MAX_CONCURRENT requests in flight
+   * - Better utilization: immediate start for next request on completion
    */
   private async processPrefetchQueue(scale: number): Promise<void> {
     if (this.isDestroyed || this.isPrefetching || this.prefetchQueue.length === 0) return;
     if (!this.apiClient || !this.documentId) return;
+    if (this.prefetchPaused) return;
 
     this.isPrefetching = true;
-    const page = this.prefetchQueue.shift()!;
 
-    try {
-      // Check if already cached (might have been loaded by user navigation)
-      const isCached = await this.pageCache.has(this.documentId, page, scale);
-      if (!isCached) {
-        const blob = await this.apiClient.getPdfPage(this.documentId, page, { scale });
-        await this.pageCache.set(this.documentId, page, scale, blob);
-        console.log(`[PDF] Prefetched page ${page}`);
+    // Maximum concurrent prefetch requests
+    const MAX_CONCURRENT = 4;
+    const activeRequests = new Map<number, Promise<void>>();
+
+    /**
+     * Start prefetching the next page from the queue
+     * Called initially and whenever a request completes
+     */
+    const startNextPrefetch = (): void => {
+      // Keep starting new requests until we hit the limit or queue is empty
+      while (
+        this.prefetchQueue.length > 0 &&
+        activeRequests.size < MAX_CONCURRENT &&
+        !this.isDestroyed &&
+        !this.prefetchPaused
+      ) {
+        const page = this.prefetchQueue.shift()!;
+
+        // Skip if already in flight
+        if (activeRequests.has(page)) continue;
+
+        // Create and track the prefetch promise
+        const prefetchPromise = this.prefetchSinglePage(page, scale)
+          .finally(() => {
+            activeRequests.delete(page);
+            // Immediately start next prefetch when this one completes
+            // This is the key to avoiding convoy effects
+            if (!this.isDestroyed && !this.prefetchPaused) {
+              startNextPrefetch();
+            }
+          });
+
+        activeRequests.set(page, prefetchPromise);
       }
-    } catch (error) {
-      console.warn(`[PDF] Prefetch failed for page ${page}:`, error);
+    };
+
+    // Start initial batch of concurrent requests
+    startNextPrefetch();
+
+    // Wait for all in-flight requests to complete
+    while (activeRequests.size > 0 && !this.isDestroyed && !this.prefetchPaused) {
+      await Promise.race(activeRequests.values());
     }
 
     this.isPrefetching = false;
+  }
 
-    // Process next with delay to avoid overwhelming server
-    if (this.prefetchQueue.length > 0) {
-      this.prefetchTimeoutId = setTimeout(() => {
-        this.processPrefetchQueue(scale);
-      }, 200);
+  /**
+   * Generate key for in-flight tracking
+   * Uses scale.toFixed(1) for tolerance grouping (e.g., 1.95 and 2.05 → "2.0")
+   */
+  private getInFlightKey(page: number, scale: number): string {
+    const pdfId = this.documentId ?? this.wasmDocumentId ?? 'unknown';
+    return `${pdfId}-${page}-${scale.toFixed(1)}`;
+  }
+
+  /**
+   * Check if a request is currently in flight
+   */
+  isRequestInFlight(page: number, scale: number): boolean {
+    return this.globalInFlight.has(this.getInFlightKey(page, scale));
+  }
+
+  /**
+   * Prefetch a single page (helper for streaming prefetch)
+   *
+   * Uses global deduplication to prevent duplicate requests from multiple
+   * prefetch systems (adaptive, spatial, adjacent).
+   */
+  private async prefetchSinglePage(page: number, scale: number): Promise<void> {
+    if (!this.apiClient || !this.documentId || this.isDestroyed) return;
+
+    const key = this.getInFlightKey(page, scale);
+
+    // Global deduplication - skip if already in flight
+    if (this.globalInFlight.has(key)) {
+      return;
+    }
+
+    try {
+      const isCached = await this.pageCache.has(this.documentId, page, scale);
+      if (!isCached && !this.isDestroyed) {
+        // Mark as in-flight before starting request
+        this.globalInFlight.add(key);
+
+        try {
+          const blob = await this.apiClient.getPdfPage(this.documentId, page, { scale });
+          await this.pageCache.set(this.documentId, page, scale, blob);
+          console.log(`[PDF] Prefetched page ${page}`);
+        } finally {
+          // Always remove from in-flight when done
+          this.globalInFlight.delete(key);
+        }
+      }
+    } catch (error) {
+      this.globalInFlight.delete(key);
+      console.warn(`[PDF] Prefetch failed for page ${page}:`, error);
     }
   }
 
@@ -753,13 +1019,16 @@ export class HybridPdfProvider {
 
   /**
    * Generate thumbnails for all pages in the background.
-   * This runs non-blocking and yields to the main thread between batches.
+   * Uses a two-phase approach for perceived instant PDF open:
+   *
+   * Phase 1: First 20 pages with minimal delay (critical for initial view)
+   * Phase 2: Remaining pages with yields to avoid UI blocking
    *
    * Benefits:
    * - Thumbnails are cached and available instantly when pages come into view
    * - Never shows blank pages - thumbnail is displayed while full-res loads
+   * - First 20 pages load fast for immediate perceived responsiveness
    * - Batched processing prevents memory spikes
-   * - setTimeout yields prevent UI freezing
    */
   private async generateThumbnails(pageCount: number): Promise<void> {
     if (this.isGeneratingThumbnails) {
@@ -774,7 +1043,10 @@ export class HybridPdfProvider {
 
     this.isGeneratingThumbnails = true;
     const startTime = performance.now();
-    const BATCH_SIZE = 5;
+
+    // Two-phase thumbnail generation
+    const IMMEDIATE_BATCH = 20;  // First 20 for instant perceived load
+    const BACKGROUND_BATCH = 5;  // Rest in smaller batches with yields
     const THUMBNAIL_OPTIONS: PdfRenderOptions = {
       dpi: HybridPdfProvider.THUMBNAIL_DPI,
       format: 'png',
@@ -784,14 +1056,49 @@ export class HybridPdfProvider {
     let skipped = 0;
 
     try {
-      for (let i = 0; i < pageCount; i += BATCH_SIZE) {
+      // PHASE 1: First 20 pages without delay (critical for initial view)
+      const phase1End = Math.min(IMMEDIATE_BATCH, pageCount);
+      const phase1Batch: number[] = [];
+
+      for (let page = 1; page <= phase1End; page++) {
+        if (!this.documentId) break; // Document changed
+
+        const isCached = await this.pageCache.has(
+          this.documentId,
+          page,
+          THUMBNAIL_OPTIONS.dpi! / 72
+        );
+        if (isCached) {
+          skipped++;
+        } else {
+          phase1Batch.push(page);
+        }
+      }
+
+      // Render first 20 in parallel for maximum speed
+      if (phase1Batch.length > 0 && this.documentId) {
+        await Promise.all(
+          phase1Batch.map(async (page) => {
+            try {
+              await this.renderPage(page, THUMBNAIL_OPTIONS);
+              generated++;
+            } catch (err) {
+              console.warn(`[HybridPdfProvider] Thumbnail failed for page ${page}:`, err);
+            }
+          })
+        );
+        console.log(`[HybridPdfProvider] Phase 1 complete: ${generated} thumbnails in ${(performance.now() - startTime).toFixed(0)}ms`);
+      }
+
+      // PHASE 2: Remaining pages with yields to avoid UI blocking
+      for (let i = IMMEDIATE_BATCH; i < pageCount; i += BACKGROUND_BATCH) {
         // Check if we should stop (e.g., document changed)
         if (!this.documentId) {
           console.log('[HybridPdfProvider] Thumbnail generation stopped - document unloaded');
           break;
         }
 
-        const batchEnd = Math.min(i + BATCH_SIZE, pageCount);
+        const batchEnd = Math.min(i + BACKGROUND_BATCH, pageCount);
         const batch: number[] = [];
 
         // Build batch of pages that need thumbnails

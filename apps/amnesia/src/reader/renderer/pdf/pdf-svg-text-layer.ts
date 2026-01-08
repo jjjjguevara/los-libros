@@ -2,14 +2,40 @@
  * PDF SVG Text Layer
  *
  * Renders text layer using SVG for crisp text at any zoom level.
- * The server generates SVG with transparent text elements positioned
- * to match the PDF layout, enabling text selection at all zoom levels.
+ * Supports two rendering modes:
+ * 1. Server SVG: Fetch pre-generated SVG from server
+ * 2. Local data: Render text layer data (from WASM/MuPDF) directly as SVG
  *
  * Key benefits over HTML text layer:
- * - Vector rendering: text stays crisp at 16x zoom
+ * - Vector rendering: text stays crisp at 16x zoom (infinite zoom)
  * - Simpler positioning: SVG viewBox handles coordinate transformation
  * - Better text selection: native SVG text elements
+ * - DPI-independent: always sharp regardless of devicePixelRatio
+ *
+ * Sharpness optimizations:
+ * - Uses crispEdges shape-rendering for sharp vector edges
+ * - Pixel-snapped coordinates at low zoom for reduced anti-aliasing blur
+ * - ViewBox scaling at extreme zoom to prevent premature rasterization
+ * - Subpixel anti-aliasing CSS properties for macOS/WebKit
  */
+
+import type { PdfTextLayerData, PdfTextItem } from '../types';
+
+/**
+ * CSS for crisp SVG text rendering
+ * These properties optimize text sharpness across different browsers and platforms
+ */
+const CRISP_SVG_CSS = `
+  display: block;
+  overflow: visible;
+  max-width: 100%;
+  max-height: 100%;
+  shape-rendering: crispEdges;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: subpixel-antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "kern" 1;
+`;
 
 /** Function to fetch SVG text layer from server */
 export type SvgTextLayerFetcher = (pdfId: string, page: number) => Promise<string>;
@@ -17,6 +43,8 @@ export type SvgTextLayerFetcher = (pdfId: string, page: number) => Promise<strin
 export interface SvgTextLayerConfig {
   /** Show text layer for debugging (makes text visible) */
   debug?: boolean;
+  /** Default font family fallback chain */
+  fontFamily?: string;
 }
 
 export interface SvgTextSelection {
@@ -33,6 +61,42 @@ export class PdfSvgTextLayer {
   private currentPage = 0;
   // Store viewBox aspect ratio for dimension adjustments
   private viewBoxAspectRatio: number | null = null;
+  // Current display scale for pixel-snapping decisions
+  private currentScale = 1.0;
+  // Store original PDF dimensions for viewBox updates during zoom
+  private originalPdfWidth: number | null = null;
+  private originalPdfHeight: number | null = null;
+
+  /**
+   * Pixel-snap a coordinate value at low zoom levels
+   * At zoom <= 1.5, snap to nearest pixel to reduce anti-aliasing blur
+   * At higher zoom, preserve sub-pixel precision for smooth scaling
+   */
+  private pixelSnap(value: number, scale: number): number {
+    if (scale <= 1.5) {
+      // At low zoom, snap to nearest 0.5 pixel for sharper edges
+      return Math.round(value * 2) / 2;
+    }
+    return value;
+  }
+
+  /**
+   * Calculate viewBox scaling factor for high zoom levels
+   * At extreme zoom (>4x), scale viewBox to prevent premature rasterization
+   * This keeps SVG coordinates in a reasonable range for the browser's renderer
+   */
+  private getViewBoxScale(displayScale: number): number {
+    // At zoom > 4x, start scaling the viewBox to prevent rasterization
+    // This essentially renders the SVG at a smaller coordinate space
+    // while the CSS transform handles the visual scaling
+    if (displayScale > 8) {
+      return displayScale / 8; // Cap effective SVG scale at 8x
+    }
+    if (displayScale > 4) {
+      return displayScale / 4; // Gradual transition from 4x to 8x
+    }
+    return 1.0;
+  }
 
   constructor(parent: HTMLElement, config?: SvgTextLayerConfig) {
     this.config = config ?? {};
@@ -176,6 +240,165 @@ export class PdfSvgTextLayer {
       // Re-throw so caller can fall back to HTML text layer
       throw error;
     }
+  }
+
+  /**
+   * Render text layer from local data (WASM/MuPDF structured text)
+   *
+   * Creates SVG text elements with precise positioning from character bounding boxes.
+   * This enables instant text layer rendering without server round-trip.
+   *
+   * @param textLayer - Text layer data from MuPDF structured text extraction
+   * @param displayWidth - Display width in pixels
+   * @param displayHeight - Display height in pixels
+   * @param scale - Current display scale for pixel-snapping decisions (default 1.0)
+   */
+  renderFromTextData(
+    textLayer: PdfTextLayerData,
+    displayWidth: number,
+    displayHeight: number,
+    scale: number = 1.0
+  ): void {
+    this.currentPage = textLayer.page;
+    this.currentScale = scale;
+
+    // Calculate viewBox scaling for high zoom levels
+    const viewBoxScale = this.getViewBoxScale(scale);
+
+    // Original PDF dimensions - store for viewBox updates during zoom
+    const pdfWidth = textLayer.width;
+    const pdfHeight = textLayer.height;
+    this.originalPdfWidth = pdfWidth;
+    this.originalPdfHeight = pdfHeight;
+
+    // At high zoom, scale down the viewBox to prevent premature rasterization
+    // The CSS dimensions remain the same, so visual size is unchanged
+    const scaledViewBoxWidth = pdfWidth / viewBoxScale;
+    const scaledViewBoxHeight = pdfHeight / viewBoxScale;
+
+    // Create SVG with viewBox (possibly scaled for high zoom)
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${scaledViewBoxWidth} ${scaledViewBoxHeight}`);
+    svg.setAttribute('width', `${displayWidth}px`);
+    svg.setAttribute('height', `${displayHeight}px`);
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+
+    // Store aspect ratio for dimension updates
+    this.viewBoxAspectRatio = pdfWidth / pdfHeight;
+
+    // Style SVG for vector-crisp rendering
+    // Use crispEdges at low zoom for pixel-aligned text, geometricPrecision at high zoom
+    const shapeRendering = scale <= 1.5 ? 'crispEdges' : 'geometricPrecision';
+    svg.style.cssText = `
+      display: block;
+      overflow: visible;
+      max-width: 100%;
+      max-height: 100%;
+      shape-rendering: ${shapeRendering};
+      text-rendering: geometricPrecision;
+      -webkit-font-smoothing: subpixel-antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    `;
+
+    // Add style element for text rendering
+    const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+    style.textContent = `
+      text {
+        fill: ${this.config.debug ? 'rgba(0, 0, 255, 0.3)' : 'transparent'};
+        stroke: none;
+        white-space: pre;
+        pointer-events: auto;
+        cursor: text;
+      }
+    `;
+    svg.appendChild(style);
+
+    // Create text group for all text elements
+    // Apply inverse scale transform when using viewBox scaling
+    const textGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    textGroup.setAttribute('class', 'text-layer-items');
+    if (viewBoxScale > 1) {
+      // Scale down text coordinates to match the scaled viewBox
+      textGroup.setAttribute('transform', `scale(${1 / viewBoxScale})`);
+    }
+
+    // Render each text item with pixel-snapping
+    for (const item of textLayer.items) {
+      const textEl = this.createTextElement(item, pdfHeight, scale);
+      textGroup.appendChild(textEl);
+    }
+
+    svg.appendChild(textGroup);
+
+    // Clear and insert new SVG
+    this.clear();
+    this.svgContainer.appendChild(svg);
+    this.currentSvg = svg;
+  }
+
+  /**
+   * Create an SVG text element from a text item
+   *
+   * @param item - Text item with position and content
+   * @param pageHeight - Page height for coordinate transformation (PDF uses bottom-left origin)
+   * @param scale - Current display scale for pixel-snapping decisions
+   */
+  private createTextElement(item: PdfTextItem, pageHeight: number, scale: number = 1.0): SVGTextElement {
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+
+    // PDF coordinate system: origin at bottom-left, Y increases upward
+    // SVG coordinate system: origin at top-left, Y increases downward
+    // Transform: svgY = pageHeight - pdfY - itemHeight
+    const rawSvgY = pageHeight - item.y;
+
+    // Apply pixel-snapping at low zoom for crisp edges
+    const snappedX = this.pixelSnap(item.x, scale);
+    const snappedY = this.pixelSnap(rawSvgY, scale);
+    const snappedFontSize = this.pixelSnap(item.fontSize, scale);
+
+    text.setAttribute('x', String(snappedX));
+    text.setAttribute('y', String(snappedY));
+    text.setAttribute('font-size', String(snappedFontSize));
+    text.setAttribute('font-family', this.config.fontFamily ?? 'sans-serif');
+
+    // Store bounding box as data attribute for selection/search
+    text.dataset.bbox = JSON.stringify({
+      x: item.x,
+      y: item.y,
+      width: item.width,
+      height: item.height,
+    });
+
+    // If we have character-level positions, use tspan elements for precise positioning
+    if (item.charPositions && item.charPositions.length > 0) {
+      for (const char of item.charPositions) {
+        const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+        const charRawSvgY = pageHeight - char.y;
+
+        // Apply pixel-snapping to character positions
+        const charSnappedX = this.pixelSnap(char.x, scale);
+        const charSnappedY = this.pixelSnap(charRawSvgY, scale);
+
+        tspan.setAttribute('x', String(charSnappedX));
+        tspan.setAttribute('y', String(charSnappedY));
+
+        if (char.fontSize !== item.fontSize) {
+          const charSnappedFontSize = this.pixelSnap(char.fontSize, scale);
+          tspan.setAttribute('font-size', String(charSnappedFontSize));
+        }
+        if (char.fontName) {
+          tspan.setAttribute('font-family', char.fontName);
+        }
+
+        tspan.textContent = char.char;
+        text.appendChild(tspan);
+      }
+    } else {
+      // Fallback: use text content directly
+      text.textContent = item.text;
+    }
+
+    return text;
   }
 
   /**
@@ -323,6 +546,64 @@ export class PdfSvgTextLayer {
         }
       }
     }
+  }
+
+  /**
+   * Update for zoom changes (useful in tiled rendering mode)
+   *
+   * At high zoom in tiled mode, we may need to adjust the text layer
+   * positioning to align with the visible tiles.
+   *
+   * @param zoom - Current zoom level
+   * @param displayWidth - Display width in pixels
+   * @param displayHeight - Display height in pixels
+   */
+  updateForZoom(zoom: number, displayWidth: number, displayHeight: number): void {
+    this.currentScale = zoom;
+
+    if (this.currentSvg) {
+      // Update dimensions
+      this.setDimensions(displayWidth, displayHeight);
+
+      // Update shape rendering based on zoom level
+      const shapeRendering = zoom <= 1.5 ? 'crispEdges' : 'geometricPrecision';
+      this.currentSvg.style.shapeRendering = shapeRendering;
+
+      // At very high zoom (>8x), the text layer may need viewBox adjustment
+      // to prevent premature rasterization
+      const viewBoxScale = this.getViewBoxScale(zoom);
+
+      // Update viewBox if we have original PDF dimensions stored
+      if (this.originalPdfWidth !== null && this.originalPdfHeight !== null) {
+        const scaledViewBoxWidth = this.originalPdfWidth / viewBoxScale;
+        const scaledViewBoxHeight = this.originalPdfHeight / viewBoxScale;
+        this.currentSvg.setAttribute('viewBox', `0 0 ${scaledViewBoxWidth} ${scaledViewBoxHeight}`);
+      }
+
+      // Update text group transform to match viewBox scale
+      const textGroup = this.currentSvg.querySelector('.text-layer-items');
+      if (textGroup) {
+        if (viewBoxScale > 1) {
+          textGroup.setAttribute('transform', `scale(${1 / viewBoxScale})`);
+        } else {
+          textGroup.removeAttribute('transform');
+        }
+      }
+    }
+  }
+
+  /**
+   * Set visibility of the text layer
+   */
+  setVisible(visible: boolean): void {
+    this.container.style.display = visible ? 'block' : 'none';
+  }
+
+  /**
+   * Check if the text layer has content
+   */
+  hasContent(): boolean {
+    return this.currentSvg !== null;
   }
 
   /**

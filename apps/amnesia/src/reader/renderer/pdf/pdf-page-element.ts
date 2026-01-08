@@ -11,6 +11,10 @@ import type { HighlightColor } from '../types';
 import { extractAsMarkdown, extractAsPlainText, prepareCopyData } from './smart-copy';
 import { DarkModeRenderer } from './dark-mode-renderer';
 import { MobileReflowRenderer, type ReflowConfig } from './mobile-reflow';
+import { PdfSvgTextLayer, type SvgTextLayerConfig } from './pdf-svg-text-layer';
+import { getCanvasPool } from './pdf-canvas-pool';
+import { getTelemetry } from './pdf-telemetry';
+import { TILE_SIZE, type TileCoordinate } from './tile-render-engine';
 
 export type ReadingMode = 'device' | 'light' | 'sepia' | 'dark' | 'night';
 export type RenderMode = 'page' | 'reflow';
@@ -29,6 +33,10 @@ export interface PdfPageElementConfig {
   enableTextAntialiasing?: boolean;
   /** Enable image smoothing */
   enableImageSmoothing?: boolean;
+  /** Use SVG text layer for vector-crisp text at any zoom (default: true) */
+  useSvgTextLayer?: boolean;
+  /** Debug mode for SVG text layer (makes text visible) */
+  debugTextLayer?: boolean;
 }
 
 export interface PageHighlight {
@@ -59,6 +67,9 @@ export class PdfPageElement {
   // Text layer data for smart copy
   private textLayerData: PdfTextLayerData | null = null;
 
+  // Current zoom level for tile rendering decisions
+  private currentZoom = 1.0;
+
   // Smart copy enabled (converts to Markdown on copy)
   private smartCopyEnabled = true;
 
@@ -68,20 +79,39 @@ export class PdfPageElement {
   // Track if smart dark mode needs to be reapplied after renders
   private smartDarkModeApplied = false;
 
+  // Use HSL lightness inversion instead of CSS filters (experimental)
+  // This preserves anti-aliasing better but is computationally more expensive
+  private useHslDarkMode = false;
+
   // Mobile reflow renderer
   private reflowRenderer: MobileReflowRenderer | null = null;
+
+  // SVG text layer for vector-crisp text rendering at any zoom level
+  private svgTextLayer: PdfSvgTextLayer | null = null;
+  private useSvgTextLayer = true;
 
   // Callbacks
   private onSelectionCallback?: (page: number, text: string, rects: DOMRect[]) => void;
   private onHighlightClickCallback?: (annotationId: string, position: { x: number; y: number }) => void;
 
   constructor(config: PdfPageElementConfig) {
+    // Determine pixelRatio at runtime to handle cases where passed config captured incorrect value
+    let pixelRatio = config.pixelRatio ?? window.devicePixelRatio ?? 1;
+    if (pixelRatio === 1 && window.devicePixelRatio > 1) {
+      pixelRatio = window.devicePixelRatio;
+    }
+
     this.config = {
       pageNumber: config.pageNumber,
-      pixelRatio: config.pixelRatio ?? window.devicePixelRatio ?? 1,
+      pixelRatio,
       enableTextAntialiasing: config.enableTextAntialiasing ?? true,
       enableImageSmoothing: config.enableImageSmoothing ?? true,
+      useSvgTextLayer: config.useSvgTextLayer ?? true,
+      debugTextLayer: config.debugTextLayer ?? false,
     };
+
+    // Set SVG text layer preference
+    this.useSvgTextLayer = this.config.useSvgTextLayer;
 
     // Create container
     this.container = document.createElement('div');
@@ -89,7 +119,7 @@ export class PdfPageElement {
     this.container.dataset.page = String(config.pageNumber);
     this.container.style.cssText = `
       position: relative;
-      background: white;
+      background: transparent;
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
       overflow: hidden;
       flex-shrink: 0;
@@ -157,6 +187,16 @@ export class PdfPageElement {
     `;
     this.container.appendChild(this.reflowLayerEl);
 
+    // Create SVG text layer for vector-crisp text rendering
+    // This is above the HTML text layer (z-index 3) for proper selection
+    if (this.useSvgTextLayer) {
+      this.svgTextLayer = new PdfSvgTextLayer(this.container, {
+        debug: this.config.debugTextLayer,
+      });
+      // Hide HTML text layer when using SVG
+      this.textLayerEl.style.display = 'none';
+    }
+
     // Setup selection listener
     this.setupSelectionListener();
 
@@ -186,7 +226,20 @@ export class PdfPageElement {
   }
 
   /**
-   * Set dimensions
+   * Clear the rendered flag without clearing the canvas.
+   * Used for zoom-dependent re-rendering where we want to keep
+   * the current content visible while fetching higher resolution.
+   */
+  clearRendered(): void {
+    this.isRendered = false;
+  }
+
+  /**
+   * Set dimensions and show immediate placeholder
+   *
+   * This ensures the page NEVER appears blank - as soon as dimensions
+   * are set, a styled placeholder is displayed. This eliminates the
+   * flash of empty content during scrolling.
    */
   setDimensions(width: number, height: number): void {
     this.currentWidth = width;
@@ -194,12 +247,86 @@ export class PdfPageElement {
 
     this.container.style.width = `${width}px`;
     this.container.style.height = `${height}px`;
+
+    // Update SVG text layer dimensions for proper scaling
+    if (this.svgTextLayer) {
+      this.svgTextLayer.setDimensions(width, height);
+    }
+
+    // CRITICAL: Show placeholder immediately after dimensions are set
+    // This prevents blank pages during scroll/zoom
+    if (!this.isRendered) {
+      this.showPlaceholder();
+    }
+  }
+
+  /**
+   * Show placeholder content while loading.
+   *
+   * PERFORMANCE: Uses CSS-only placeholder instead of canvas drawing.
+   * Previous implementation drew 25+ roundRect operations per page, causing
+   * 160ms+ main thread blocking during fast scroll with 20+ new pages.
+   * CSS background is GPU-accelerated and non-blocking.
+   */
+  private showPlaceholder(): void {
+    if (this.currentWidth <= 0 || this.currentHeight <= 0) return;
+
+    // Transparent placeholder - cleaner loading experience
+    // The canvas is transparent, showing the viewport background
+    this.canvas.style.background = 'transparent';
+    this.canvas.style.backgroundSize = '';
+    this.canvas.style.backgroundPosition = '';
+    this.canvas.style.backgroundRepeat = '';
+
+    // Set canvas size for proper display (minimal operation)
+    this.canvas.style.width = `${this.currentWidth}px`;
+    this.canvas.style.height = `${this.currentHeight}px`;
+  }
+
+  /**
+   * Update for zoom changes
+   *
+   * Updates dimensions and text layer positioning for the current zoom level.
+   * Used in tiled rendering mode where zoom affects tile resolution.
+   *
+   * @param zoom - Current zoom level
+   * @param width - Display width in pixels
+   * @param height - Display height in pixels
+   */
+  updateForZoom(zoom: number, width: number, height: number): void {
+    this.currentZoom = zoom;
+    this.setDimensions(width, height);
+
+    // Update SVG text layer for zoom changes
+    if (this.svgTextLayer) {
+      this.svgTextLayer.updateForZoom(zoom, width, height);
+    }
+  }
+
+  /**
+   * Get current zoom level
+   */
+  getZoom(): number {
+    return this.currentZoom;
+  }
+
+  /**
+   * Clear placeholder styles when real content is rendered
+   */
+  private clearPlaceholder(): void {
+    this.canvas.style.background = '';
+    this.canvas.style.backgroundSize = '';
+    this.canvas.style.backgroundPosition = '';
+    this.canvas.style.backgroundRepeat = '';
   }
 
   /**
    * Render page content
    */
   async render(data: PageRenderData, scale: number): Promise<void> {
+    const startTime = performance.now();
+    const telemetry = getTelemetry();
+
     // Render canvas
     await this.renderCanvas(data.imageBlob);
 
@@ -210,40 +337,215 @@ export class PdfPageElement {
 
     this.isRendered = true;
 
-    // Re-apply smart dark mode if it was previously active
-    if (this.smartDarkModeApplied && this.useSmartDarkMode) {
-      await this.applySmartDarkMode();
+    // Track render time
+    const renderTime = performance.now() - startTime;
+    telemetry.trackRenderTime(renderTime);
+
+    // Apply reading mode styles now that we have content
+    // This enables canvas-based dark mode for better quality
+    this.applyReadingModeStyles();
+  }
+
+  /**
+   * Render page using tile-based rendering (CATiledLayer-style)
+   * Used for high-zoom scenarios where tiles provide crisper rendering
+   *
+   * @param tiles Array of tile coordinates and their rendered bitmaps
+   * @param textLayerData Optional text layer data for text selection
+   * @param zoom Current zoom level
+   * @param pdfDimensions Native PDF page dimensions (tiles are in this coordinate space)
+   */
+  async renderTiles(
+    tiles: Array<{ tile: TileCoordinate; bitmap: ImageBitmap }>,
+    textLayerData: TextLayerData | undefined,
+    zoom: number,
+    pdfDimensions?: { width: number; height: number }
+  ): Promise<void> {
+    const startTime = performance.now();
+    const telemetry = getTelemetry();
+
+    // Clear CSS placeholder before drawing actual content
+    this.clearPlaceholder();
+
+    // Calculate canvas size based on current dimensions, zoom, and pixel ratio
+    // For tiled rendering, we draw at the zoom-adjusted resolution with HiDPI support
+    const pixelRatio = this.config.pixelRatio;
+    const canvasWidth = Math.ceil(this.currentWidth * zoom * pixelRatio);
+    const canvasHeight = Math.ceil(this.currentHeight * zoom * pixelRatio);
+
+    // Resize canvas if needed
+    if (this.canvas.width !== canvasWidth || this.canvas.height !== canvasHeight) {
+      this.canvas.width = canvasWidth;
+      this.canvas.height = canvasHeight;
     }
+
+    // CSS display size remains the logical size (browser will scale canvas buffer to fit)
+    this.canvas.style.width = `${this.currentWidth}px`;
+    this.canvas.style.height = `${this.currentHeight}px`;
+
+    // Reset transform
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.imageSmoothingEnabled = true;
+    this.ctx.imageSmoothingQuality = 'high';
+
+    // Clear canvas
+    this.ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+    // Calculate coordinate transform from PDF space to layout space
+    // Tiles are rendered in PDF coordinates (e.g., 612×792 for US Letter)
+    // Layout dimensions (currentWidth, currentHeight) may be scaled to fit display
+    // We need to transform tile positions from PDF space to layout space
+    const pdfWidth = pdfDimensions?.width ?? this.currentWidth;
+    const pdfHeight = pdfDimensions?.height ?? this.currentHeight;
+    const scaleX = this.currentWidth / pdfWidth;
+    const scaleY = this.currentHeight / pdfHeight;
+
+    // Draw each tile at its correct position
+    // Use integer pixel positions to avoid sub-pixel gaps between tiles
+    for (const { tile, bitmap } of tiles) {
+      // Page units (PDF coordinates) covered by one tile at this scale
+      const pdfTileSize = TILE_SIZE / tile.scale;
+
+      // Position in PDF coordinates
+      const pdfX = tile.tileX * pdfTileSize;
+      const pdfY = tile.tileY * pdfTileSize;
+
+      // Transform to layout coordinates, then to canvas pixels (including pixelRatio for HiDPI)
+      // Use Math.round for consistent integer positioning to eliminate seams
+      const canvasX = Math.round(pdfX * scaleX * zoom * pixelRatio);
+      const canvasY = Math.round(pdfY * scaleY * zoom * pixelRatio);
+
+      // Calculate next tile position to determine exact draw size (eliminates gaps)
+      const nextPdfX = (tile.tileX + 1) * pdfTileSize;
+      const nextPdfY = (tile.tileY + 1) * pdfTileSize;
+      const nextCanvasX = Math.round(Math.min(nextPdfX, pdfWidth) * scaleX * zoom * pixelRatio);
+      const nextCanvasY = Math.round(Math.min(nextPdfY, pdfHeight) * scaleY * zoom * pixelRatio);
+
+      // Draw size: difference between positions ensures no gaps
+      const drawWidth = nextCanvasX - canvasX;
+      const drawHeight = nextCanvasY - canvasY;
+
+      // Skip tiles with zero size (can happen at page edges)
+      if (drawWidth <= 0 || drawHeight <= 0) {
+        bitmap.close();
+        continue;
+      }
+
+      this.ctx.drawImage(
+        bitmap,
+        canvasX,
+        canvasY,
+        drawWidth,
+        drawHeight
+      );
+
+      // Close bitmap to free memory - we own it (created fresh from cache)
+      bitmap.close();
+    }
+
+    // Render text layer if available
+    if (textLayerData) {
+      this.renderTextLayer(textLayerData, zoom);
+    }
+
+    this.isRendered = true;
+
+    // Track render time
+    const renderTime = performance.now() - startTime;
+    telemetry.trackRenderTime(renderTime);
+
+    // Apply reading mode styles now that we have content
+    this.applyReadingModeStyles();
   }
 
   /**
    * Render canvas from image blob
+   *
+   * Canvas Buffer Strategy:
+   * - Canvas is sized to display size × DPR (capped at 2048px for performance)
+   * - High-res image from server is drawn scaled to fit canvas buffer
+   * - Browser handles high-quality downsampling during drawImage
+   * - This prevents massive 20+ megapixel canvases that cause:
+   *   - Slow rendering (250ms+ per page)
+   *   - GPU memory exhaustion
+   *   - Limited page virtualization
+   *
+   * Performance optimization: Uses worker pool for image decoding when available.
+   * This moves createImageBitmap off the main thread for smoother scrolling.
    */
   private async renderCanvas(imageBlob: Blob): Promise<void> {
+    // Clear CSS placeholder before drawing actual content
+    this.clearPlaceholder();
+
+    const pool = getCanvasPool();
+
+    try {
+      // Try to use worker pool for off-main-thread image decoding
+      if (pool.isAvailable()) {
+        const result = await pool.processImage(
+          imageBlob,
+          this.currentWidth,
+          this.currentHeight,
+          this.config.pageNumber
+        );
+
+        // Use the actual image dimensions for sharp rendering
+        // The request scale cap in pdf-infinite-canvas ensures we don't fetch
+        // unnecessarily large images, so use whatever resolution we receive
+        this.canvas.width = result.naturalWidth;
+        this.canvas.height = result.naturalHeight;
+
+        // CSS display size is the logical size
+        this.canvas.style.width = `${this.currentWidth}px`;
+        this.canvas.style.height = `${this.currentHeight}px`;
+
+        // Reset transform and draw at native resolution
+        this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        this.ctx.imageSmoothingEnabled = true;
+        this.ctx.imageSmoothingQuality = 'high';
+
+        this.ctx.clearRect(0, 0, result.naturalWidth, result.naturalHeight);
+        this.ctx.drawImage(result.imageBitmap, 0, 0);
+
+        // Close the ImageBitmap to free memory
+        result.imageBitmap.close();
+        return;
+      }
+    } catch (error) {
+      console.warn('[PdfPageElement] Worker pool failed, falling back:', error);
+    }
+
+    // Fallback: main thread rendering
+    await this.renderCanvasFallback(imageBlob);
+  }
+
+  /**
+   * Fallback canvas rendering on main thread
+   * Used when worker pool is not available
+   */
+  private async renderCanvasFallback(imageBlob: Blob): Promise<void> {
     const imageUrl = URL.createObjectURL(imageBlob);
     const image = new Image();
 
     return new Promise((resolve, reject) => {
       image.onload = () => {
         try {
-          const pixelRatio = this.config.pixelRatio;
+          // Use actual image dimensions for sharp rendering
+          // Request scale capping ensures we don't fetch unnecessarily large images
+          this.canvas.width = image.naturalWidth;
+          this.canvas.height = image.naturalHeight;
 
-          // Set canvas size with pixel ratio
-          this.canvas.width = Math.floor(this.currentWidth * pixelRatio);
-          this.canvas.height = Math.floor(this.currentHeight * pixelRatio);
+          // CSS display size is the logical size
           this.canvas.style.width = `${this.currentWidth}px`;
           this.canvas.style.height = `${this.currentHeight}px`;
 
-          // Scale context for HiDPI
-          this.ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-
-          // Apply smoothing
-          this.ctx.imageSmoothingEnabled = this.config.enableImageSmoothing;
+          // Reset transform and draw at native resolution
+          this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+          this.ctx.imageSmoothingEnabled = true;
           this.ctx.imageSmoothingQuality = 'high';
 
-          // Clear and draw
-          this.ctx.clearRect(0, 0, this.currentWidth, this.currentHeight);
-          this.ctx.drawImage(image, 0, 0, this.currentWidth, this.currentHeight);
+          this.ctx.clearRect(0, 0, image.naturalWidth, image.naturalHeight);
+          this.ctx.drawImage(image, 0, 0);
 
           URL.revokeObjectURL(imageUrl);
           resolve();
@@ -264,14 +566,23 @@ export class PdfPageElement {
 
   /**
    * Render text layer for selection
+   * Uses SVG text layer for vector-crisp rendering when available,
+   * falls back to HTML text layer otherwise.
    */
   private renderTextLayer(data: TextLayerData, scale: number): void {
-    this.textLayerEl.innerHTML = '';
-
     // Store text layer data for smart copy
     this.textLayerData = data;
 
     if (!data.items || data.items.length === 0) return;
+
+    // Use SVG text layer if available (vector-crisp at any zoom)
+    if (this.svgTextLayer) {
+      this.svgTextLayer.renderFromTextData(data, this.currentWidth, this.currentHeight, scale);
+      return;
+    }
+
+    // Fallback: HTML text layer
+    this.textLayerEl.innerHTML = '';
 
     // Use page dimensions from data instead of hardcoded values
     const pageWidth = data.width || 612;  // Fallback to US Letter
@@ -499,6 +810,12 @@ export class PdfPageElement {
 
   /**
    * Apply reading mode styles to container and canvas
+   *
+   * Supports two dark mode implementations:
+   * 1. CSS filters (default): Fast, slightly degrades sharpness measurements
+   * 2. HSL lightness inversion: Preserves anti-aliasing, requires canvas manipulation
+   *
+   * HSL mode can be enabled with setHslDarkMode(true).
    */
   private applyReadingModeStyles(): void {
     // Handle reflow mode separately
@@ -507,6 +824,18 @@ export class PdfPageElement {
       return;
     }
 
+    // Check if we need dark mode
+    const needsDark = this.currentReadingMode === 'dark' ||
+                      this.currentReadingMode === 'night' ||
+                      (this.currentReadingMode === 'device' && document.body.classList.contains('theme-dark'));
+
+    // Use HSL lightness inversion if enabled and dark mode is needed
+    if (this.useHslDarkMode && needsDark && this.isRendered) {
+      this.applyHslDarkModeInternal();
+      return;
+    }
+
+    // Default: CSS filter approach
     switch (this.currentReadingMode) {
       case 'device':
         // Match Obsidian theme - detect from body class
@@ -548,6 +877,27 @@ export class PdfPageElement {
   }
 
   /**
+   * Apply HSL lightness inversion dark mode to canvas
+   * This method preserves anti-aliasing better than CSS filters
+   */
+  private applyHslDarkModeInternal(): void {
+    if (!this.darkModeRenderer) {
+      this.darkModeRenderer = new DarkModeRenderer();
+    }
+
+    // Remove any CSS filter first
+    this.canvas.style.filter = 'none';
+    this.container.style.background = this.currentReadingMode === 'night' ? '#1a1a1a' : '#1e1e1e';
+
+    // Apply HSL lightness inversion
+    const success = this.darkModeRenderer.applyHslDarkMode(this.canvas);
+    if (!success) {
+      // Fallback to CSS filter if HSL processing fails
+      this.canvas.style.filter = 'invert(0.9) hue-rotate(180deg)';
+    }
+  }
+
+  /**
    * Enable or disable smart dark mode
    * When enabled, dark/night modes will preserve images from inversion
    */
@@ -563,6 +913,37 @@ export class PdfPageElement {
     if (this.currentReadingMode === 'dark' || this.currentReadingMode === 'night') {
       this.applyReadingModeStyles();
     }
+  }
+
+  /**
+   * Enable or disable HSL lightness inversion for dark mode
+   *
+   * When enabled, uses canvas-based HSL lightness inversion instead of CSS filters.
+   * This approach:
+   * - Preserves anti-aliasing better (no sharpness degradation from CSS filters)
+   * - Maintains hue and saturation (colors stay recognizable)
+   * - Is more computationally expensive (processes every pixel)
+   *
+   * CSS filters are faster but can slightly degrade sharpness measurement.
+   * HSL inversion maintains sharpness but requires canvas manipulation.
+   */
+  setHslDarkMode(enabled: boolean): void {
+    this.useHslDarkMode = enabled;
+    if (enabled && !this.darkModeRenderer) {
+      this.darkModeRenderer = new DarkModeRenderer();
+    }
+    // Re-apply current reading mode with new setting
+    if (this.currentReadingMode === 'dark' || this.currentReadingMode === 'night' ||
+        (this.currentReadingMode === 'device' && document.body.classList.contains('theme-dark'))) {
+      this.applyReadingModeStyles();
+    }
+  }
+
+  /**
+   * Check if HSL dark mode is enabled
+   */
+  isHslDarkModeEnabled(): boolean {
+    return this.useHslDarkMode;
   }
 
   /**
@@ -753,16 +1134,20 @@ export class PdfPageElement {
 
   /**
    * Show loading state
+   * Note: Placeholder is already shown by setDimensions(), so we just add
+   * the loading class for CSS-based loading indicators (e.g., spinner overlay)
    */
   showLoading(): void {
-    this.container.style.opacity = '0.7';
+    this.container.classList.add('pdf-page-loading');
+    // The placeholder is already drawn by setDimensions() - no need to redraw
+    // This prevents flickering during the render cycle
   }
 
   /**
    * Hide loading state
    */
   hideLoading(): void {
-    this.container.style.opacity = '1';
+    this.container.classList.remove('pdf-page-loading');
   }
 
   /**
@@ -775,6 +1160,11 @@ export class PdfPageElement {
     this.reflowLayerEl.innerHTML = '';
     this.isRendered = false;
     this.smartDarkModeApplied = false;
+
+    // Clear SVG text layer
+    if (this.svgTextLayer) {
+      this.svgTextLayer.clear();
+    }
   }
 
   /**
@@ -782,6 +1172,29 @@ export class PdfPageElement {
    */
   destroy(): void {
     this.clear();
+
+    // Destroy SVG text layer
+    if (this.svgTextLayer) {
+      this.svgTextLayer.destroy();
+      this.svgTextLayer = null;
+    }
+
     this.container.remove();
+  }
+
+  /**
+   * Get selection from SVG text layer (if using SVG)
+   */
+  getSvgSelection(): { text: string; page: number; rects: DOMRect[] } | null {
+    return this.svgTextLayer?.getSelection() ?? null;
+  }
+
+  /**
+   * Toggle SVG text layer debug mode
+   */
+  setTextLayerDebug(debug: boolean): void {
+    if (this.svgTextLayer) {
+      this.svgTextLayer.setDebug(debug);
+    }
   }
 }

@@ -84,12 +84,12 @@ export class AdaptivePrefetcher {
   constructor(config: AdaptivePrefetcherConfig = {}) {
     this.config = {
       strategy: config.strategy ?? 'adaptive',
-      basePrefetchCount: config.basePrefetchCount ?? 2,
-      maxPrefetchCount: config.maxPrefetchCount ?? 8,
-      minPrefetchCount: config.minPrefetchCount ?? 1,
+      basePrefetchCount: config.basePrefetchCount ?? 3, // Increased from 2
+      maxPrefetchCount: config.maxPrefetchCount ?? 12,  // Increased from 8 for fast scrolling
+      minPrefetchCount: config.minPrefetchCount ?? 2,   // Increased from 1
       fastScrollThreshold: config.fastScrollThreshold ?? 2,
       velocityWindow: config.velocityWindow ?? 500,
-      queueProcessDelay: config.queueProcessDelay ?? 50,
+      queueProcessDelay: config.queueProcessDelay ?? 30, // Reduced from 50ms for faster response
     };
   }
 
@@ -491,8 +491,8 @@ export class AdaptivePrefetcher {
   private async processQueue(): Promise<void> {
     if (this.isPaused || !this.fetchCallback) return;
 
-    // Process up to 3 pages concurrently
-    const CONCURRENT_FETCHES = 3;
+    // Process up to 5 pages concurrently for faster prefetching
+    const CONCURRENT_FETCHES = 5;
     const promises: Promise<void>[] = [];
 
     for (let i = 0; i < CONCURRENT_FETCHES; i++) {

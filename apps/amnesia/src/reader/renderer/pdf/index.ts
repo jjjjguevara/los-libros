@@ -87,3 +87,38 @@ export {
   canvasToScreen,
 } from './pdf-canvas-camera';
 export type { Camera, Point, CameraConstraints } from './pdf-canvas-camera';
+
+// Canvas worker pool for off-main-thread image processing
+export {
+  PdfCanvasPool,
+  getCanvasPool,
+  initializeCanvasPool,
+} from './pdf-canvas-pool';
+
+// Telemetry for performance monitoring
+export {
+  PdfTelemetry,
+  getTelemetry,
+  trackCacheAccess,
+  trackRenderTime,
+} from './pdf-telemetry';
+export type { TelemetryMetrics, TelemetryStats } from './pdf-telemetry';
+
+// SVG text layer for vector-crisp text rendering
+export { PdfSvgTextLayer } from './pdf-svg-text-layer';
+export type { SvgTextLayerConfig, SvgTextSelection, SvgTextLayerFetcher } from './pdf-svg-text-layer';
+
+// Tile rendering infrastructure (CATiledLayer-style)
+export { TileRenderEngine, TILE_SIZE } from './tile-render-engine';
+export type { TileCoordinate, TileScale, TileRenderRequest, PageLayout as TilePageLayout, Rect } from './tile-render-engine';
+
+export { TileCacheManager, getTileCacheManager } from './tile-cache-manager';
+export type { PageMetadata } from './tile-cache-manager';
+
+export { RenderCoordinator, getRenderCoordinator, resetRenderCoordinator } from './render-coordinator';
+export type { RenderRequest, RenderResult, RenderMode, RenderPriority } from './render-coordinator';
+
+// Mode-specific strategies
+export { PaginatedStrategy, getPaginatedStrategy } from './paginated-strategy';
+export { ScrollStrategy, getScrollStrategy } from './scroll-strategy';
+export { GridStrategy, getGridStrategy } from './grid-strategy';

@@ -161,6 +161,127 @@ export class DarkModeRenderer {
   }
 
   /**
+   * HSL Lightness Inversion - Inverts only the lightness component
+   *
+   * This approach preserves:
+   * - Anti-aliasing (each pixel processed individually)
+   * - Hue and saturation (colors stay recognizable)
+   * - Smooth gradients (no block-based artifacts)
+   *
+   * The algorithm:
+   * 1. Convert RGB to HSL
+   * 2. Invert L: L_new = 1 - L_old
+   * 3. Convert back to RGB
+   *
+   * This is superior to simple RGB inversion because it maintains
+   * color relationships while reversing perceived brightness.
+   */
+  private hslLightnessInvert(data: Uint8ClampedArray): void {
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i] / 255;
+      const g = data[i + 1] / 255;
+      const b = data[i + 2] / 255;
+
+      // Convert RGB to HSL
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const l = (max + min) / 2;
+
+      // Skip fully transparent pixels
+      if (data[i + 3] === 0) continue;
+
+      // Invert lightness
+      const newL = 1 - l;
+
+      // If achromatic (grayscale), simplified calculation
+      if (max === min) {
+        const gray = Math.round(newL * 255);
+        data[i] = gray;
+        data[i + 1] = gray;
+        data[i + 2] = gray;
+        continue;
+      }
+
+      // Calculate hue and saturation
+      const d = max - min;
+      const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+
+      let h: number;
+      if (max === r) {
+        h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+      } else if (max === g) {
+        h = ((b - r) / d + 2) / 6;
+      } else {
+        h = ((r - g) / d + 4) / 6;
+      }
+
+      // Convert back to RGB with inverted lightness
+      const newRgb = this.hslToRgb(h, s, newL);
+      data[i] = Math.round(newRgb.r * 255);
+      data[i + 1] = Math.round(newRgb.g * 255);
+      data[i + 2] = Math.round(newRgb.b * 255);
+      // Alpha unchanged
+    }
+  }
+
+  /**
+   * Convert HSL to RGB
+   * @param h Hue (0-1)
+   * @param s Saturation (0-1)
+   * @param l Lightness (0-1)
+   */
+  private hslToRgb(h: number, s: number, l: number): { r: number; g: number; b: number } {
+    if (s === 0) {
+      // Achromatic
+      return { r: l, g: l, b: l };
+    }
+
+    const hue2rgb = (p: number, q: number, t: number): number => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+
+    return {
+      r: hue2rgb(p, q, h + 1/3),
+      g: hue2rgb(p, q, h),
+      b: hue2rgb(p, q, h - 1/3),
+    };
+  }
+
+  /**
+   * Apply HSL lightness inversion dark mode to canvas
+   * This is the recommended approach for dark mode as it:
+   * - Preserves anti-aliasing and text sharpness
+   * - Maintains color relationships
+   * - Avoids block-based artifacts from variance detection
+   *
+   * @returns true if successful, false if failed
+   */
+  applyHslDarkMode(canvas: HTMLCanvasElement): boolean {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+
+    try {
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      this.hslLightnessInvert(imageData.data);
+      ctx.putImageData(imageData, 0, 0);
+      return true;
+    } catch (error) {
+      console.error('[DarkModeRenderer] Failed to apply HSL dark mode:', error);
+      // Fall back to CSS filter
+      canvas.style.filter = 'invert(0.9) hue-rotate(180deg)';
+      return false;
+    }
+  }
+
+  /**
    * Invert colors while preserving image regions
    * Uses local variance detection to identify photos/diagrams
    */

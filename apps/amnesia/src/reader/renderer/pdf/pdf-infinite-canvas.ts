@@ -26,7 +26,11 @@ import {
   lerpCamera,
 } from './pdf-canvas-camera';
 import { SpatialPrefetcher } from './spatial-prefetcher';
+import { initializeCanvasPool, getCanvasPool } from './pdf-canvas-pool';
 import type { PdfTextLayer as TextLayerData, PdfRenderOptions } from '../types';
+import type { TileCoordinate, TileRenderEngine } from './tile-render-engine';
+import { getTileEngine, TILE_SIZE } from './tile-render-engine';
+import type { RenderCoordinator, RenderMode, RenderPriority } from './render-coordinator';
 
 export interface PageLayout {
   /** Page number (1-indexed) */
@@ -103,18 +107,27 @@ export interface PageDataProvider {
   prefetchPages?(pages: number[]): Promise<void>;
   /** Optional: Get page image with dual-resolution (thumbnail first, upgrade later) */
   getPageImageDualRes?(page: number, options: PdfRenderOptions): Promise<DualResPageResult>;
+  /** Optional: Render a tile (256x256 region) of a page */
+  renderTile?(tile: TileCoordinate): Promise<Blob>;
+  /** Optional: Get the render coordinator for tile-based rendering */
+  getRenderCoordinator?(): RenderCoordinator;
+  /** Optional: Check if tile rendering is available */
+  isTileRenderingAvailable?(): boolean;
 }
 
+// Note: pixelRatio is intentionally set to 1 here as a fallback.
+// The actual runtime value should be passed via config or set in constructor.
+// This avoids capturing window.devicePixelRatio at module load time when it may be incorrect.
 const DEFAULT_CONFIG: InfiniteCanvasConfig = {
   displayMode: 'auto-grid',
   gap: 16,
   padding: 24,
   minZoom: 0.1,
-  maxZoom: 10,
+  maxZoom: 16, // Allow high zoom for detailed viewing
   pageWidth: 612,
   pageHeight: 792,
   renderScale: 1.5,
-  pixelRatio: window.devicePixelRatio ?? 1,
+  pixelRatio: 1, // Fallback only - runtime value should override this
   readingMode: 'device',
   canvasColumns: 10,
   layoutMode: 'vertical',
@@ -151,17 +164,31 @@ export class PdfInfiniteCanvas {
   private pageElements: Map<number, PdfPageElement> = new Map();
   private canvasBounds = { width: 0, height: 0 };
 
+  // Layout constants for O(1) page visibility calculation
+  private layoutBaseWidth = 400;
+  private layoutBaseHeight = 518; // Will be recalculated based on aspect ratio
+  private layoutPadding = 24;
+  private layoutGap = 16;
+
   // Rendering
   private visiblePages: Set<number> = new Set();
   private renderQueue: number[] = [];
   private isRendering = false;
   private renderVersion = 0;
 
+  // Priority rendering - immediate neighbors get rendered first
+  private priorityRenderQueue: number[] = [];
+
   // Image cache
   private readonly PAGE_CACHE_SIZE = 100;
   private pageImageCache: Map<number, Blob> = new Map();
   private pageCacheScales: Map<number, number> = new Map();
   private cacheOrder: number[] = [];
+
+  // Zoom-dependent re-rendering
+  private zoomRerenderTimeout: ReturnType<typeof setTimeout> | null = null;
+  private readonly ZOOM_RERENDER_DEBOUNCE = 150; // ms to wait after zoom stops
+  private readonly MIN_EFFECTIVE_RATIO = 2.0; // Minimum buffer pixels per screen pixel (Retina)
   private pendingImageRequests: Map<number, Promise<Blob>> = new Map();
 
   // Gesture state
@@ -179,6 +206,10 @@ export class PdfInfiniteCanvas {
   private readonly INERTIA_START_THRESHOLD = 3; // Only start inertia if velocity exceeds this (fling detection)
   private readonly VELOCITY_SCALE = 0.15; // Scale factor for velocity tracking
 
+  // Cached viewport rect - updated on resize, avoids layout thrashing
+  private cachedViewportRect: DOMRect | null = null;
+  private pendingVisiblePagesUpdate = false;
+
   // Animation
   private animationFrame: number | null = null;
 
@@ -191,6 +222,12 @@ export class PdfInfiniteCanvas {
   // Spatial prefetcher for grid-based modes (auto-grid, canvas)
   private spatialPrefetcher = new SpatialPrefetcher();
 
+  // Tile rendering infrastructure (CATiledLayer-style)
+  private tileEngine: TileRenderEngine | null = null;
+  private renderCoordinator: RenderCoordinator | null = null;
+  private useTiledRendering = false;
+  private tileZoomThreshold = 2.0; // Use tiles when zoom > 2x
+
   constructor(
     container: HTMLElement,
     provider: PageDataProvider,
@@ -199,6 +236,12 @@ export class PdfInfiniteCanvas {
     this.container = container;
     this.provider = provider;
     this.config = { ...DEFAULT_CONFIG, ...config };
+
+    // Ensure pixelRatio uses runtime window.devicePixelRatio if not explicitly overridden
+    // This handles cases where the passed config also captured an incorrect value at module load
+    if (this.config.pixelRatio === 1 && window.devicePixelRatio > 1) {
+      this.config.pixelRatio = window.devicePixelRatio;
+    }
 
     // Initialize camera at 100% zoom
     this.camera = createCamera(1);
@@ -242,6 +285,20 @@ export class PdfInfiniteCanvas {
     this.setupWheelEvents();
     this.setupKeyboardEvents();
     this.setupDoubleClickHandler();
+
+    // Initialize canvas worker pool for off-main-thread image processing
+    // Fire-and-forget, workers will be ready by first render
+    initializeCanvasPool().catch(err => {
+      console.warn('[PdfInfiniteCanvas] Failed to initialize canvas pool:', err);
+    });
+
+    // Initialize tile rendering if provider supports it
+    if (this.provider.isTileRenderingAvailable?.()) {
+      this.useTiledRendering = true;
+      this.renderCoordinator = this.provider.getRenderCoordinator?.() ?? null;
+      this.tileEngine = getTileEngine();
+      console.log('[PdfInfiniteCanvas] Tile rendering enabled');
+    }
   }
 
   /**
@@ -264,6 +321,47 @@ export class PdfInfiniteCanvas {
     };
 
     // Initial view setup based on mode
+    this.setupInitialView();
+  }
+
+  /**
+   * Update page dimensions after document load.
+   * Should be called when tile engine has actual PDF dimensions available.
+   * This recalculates layouts to match the actual PDF aspect ratio.
+   */
+  updatePageDimensions(): void {
+    if (!this.tileEngine) return;
+
+    const dims = this.tileEngine.pageDimensions.get(1);
+    if (!dims) return;
+
+    // Skip if dimensions already match
+    if (this.config.pageWidth === dims.width && this.config.pageHeight === dims.height) {
+      return;
+    }
+
+    console.log(`[PdfInfiniteCanvas] Updating page dimensions: ${dims.width}x${dims.height}`);
+
+    // Update config
+    this.config.pageWidth = dims.width;
+    this.config.pageHeight = dims.height;
+
+    // Recalculate display mode columns (affects paginated mode)
+    this.initializeDisplayMode();
+
+    // Recalculate all page layouts
+    this.calculatePageLayouts();
+    this.updateCanvasSize();
+
+    // Update page element dimensions to match new layout
+    for (const [page, element] of this.pageElements) {
+      const layout = this.pageLayouts.get(page);
+      if (layout) {
+        element.setDimensions(layout.width, layout.height);
+      }
+    }
+
+    // Re-setup view to maintain proper fit
     this.setupInitialView();
   }
 
@@ -318,7 +416,17 @@ export class PdfInfiniteCanvas {
     const viewportRect = this.viewport.getBoundingClientRect();
     if (viewportRect.width === 0 || viewportRect.height === 0) return 1;
 
-    const { gap, padding, pageWidth, pageHeight } = this.config;
+    const { gap, padding } = this.config;
+
+    // Get actual PDF dimensions from tile engine if available
+    let { pageWidth, pageHeight } = this.config;
+    if (this.tileEngine) {
+      const dims = this.tileEngine.pageDimensions.get(1);
+      if (dims) {
+        pageWidth = dims.width;
+        pageHeight = dims.height;
+      }
+    }
     const aspectRatio = pageWidth / pageHeight;
 
     // Calculate how many pages fit both horizontally and vertically
@@ -460,13 +568,33 @@ export class PdfInfiniteCanvas {
   private calculatePageLayouts(): void {
     this.pageLayouts.clear();
 
-    const { gap, padding, pageWidth, pageHeight, layoutMode, pagesPerRow } = this.config;
+    const { gap, padding, layoutMode, pagesPerRow } = this.config;
+
+    // Get actual PDF dimensions from tile engine if available (page 1 as reference)
+    // This ensures layout matches actual PDF aspect ratio, not hardcoded defaults
+    let { pageWidth, pageHeight } = this.config;
+    if (this.tileEngine) {
+      const dims = this.tileEngine.pageDimensions.get(1);
+      if (dims) {
+        pageWidth = dims.width;
+        pageHeight = dims.height;
+        // Update config to keep everything consistent
+        this.config.pageWidth = pageWidth;
+        this.config.pageHeight = pageHeight;
+      }
+    }
 
     // Calculate base page dimensions (at 100% zoom on canvas)
     // Use a reasonable base size that looks good
     const baseWidth = 400; // Canvas units at 100% zoom
     const aspectRatio = pageWidth / pageHeight;
     const baseHeight = baseWidth / aspectRatio;
+
+    // Store layout constants for O(1) visible page calculation
+    this.layoutBaseWidth = baseWidth;
+    this.layoutBaseHeight = baseHeight;
+    this.layoutPadding = padding;
+    this.layoutGap = gap;
 
     let x = padding;
     let y = padding;
@@ -823,17 +951,24 @@ export class PdfInfiniteCanvas {
     }
 
     switch (displayMode) {
-      case 'paginated':
-        // No zoom allowed in paginated mode
-        minZoom = this.camera.z;
-        maxZoom = this.camera.z;
+      case 'paginated': {
+        // Paginated mode: fit page to viewport at minZoom, allow zoom in up to maxZoom
+        const availableHeightP = viewportRect.height - padding * 2;
+        const availableWidthP = viewportRect.width - padding * 2;
+        // Fit to page (min of fit-width and fit-height)
+        const fitWidthZoom = availableWidthP / layout.width;
+        const fitHeightZoom = availableHeightP / layout.height;
+        minZoom = Math.min(fitWidthZoom, fitHeightZoom);
+        // Allow zooming in up to config maxZoom
         break;
+      }
 
-      case 'horizontal-scroll':
-        // Min zoom = fit page height, unlimited zoom in
+      case 'horizontal-scroll': {
+        // Min zoom = fit page height, allow zoom in up to maxZoom
         const availableHeight = viewportRect.height - padding * 2;
         minZoom = Math.max(this.config.minZoom, availableHeight / layout.height);
         break;
+      }
 
       case 'vertical-scroll': {
         // Min zoom = fit page height (so you can see whole page when zoomed out)
@@ -865,6 +1000,15 @@ export class PdfInfiniteCanvas {
 
   /**
    * Update visible pages based on camera position
+   *
+   * PERFORMANCE OPTIMIZATION: Uses O(1) page range calculation instead of O(N) iteration.
+   * For a 945-page PDF, this reduces per-frame work from ~11,000 bounds checks to ~20.
+   *
+   * Key optimization: Uses 3-tier buffer system to eliminate blank pages:
+   * 1. Core visible zone (no buffer): Pages actively in viewport
+   * 2. Render buffer (800px): Pages that should be rendered immediately
+   * 3. Element creation buffer (1600px): Pages that should have DOM elements ready
+   * 4. Keep buffer (2400px): Pages to retain (prevents thrashing during fast scroll)
    */
   private updateVisiblePages(): void {
     const viewportRect = this.viewport.getBoundingClientRect();
@@ -875,91 +1019,312 @@ export class PdfInfiniteCanvas {
     );
 
     const newVisiblePages = new Set<number>();
-    const buffer = 200 / this.camera.z; // Buffer in canvas units
+    const newRenderPages = new Set<number>();
 
-    for (const [page, layout] of this.pageLayouts) {
-      // Check if page intersects visible bounds (with buffer)
-      const isVisible =
-        layout.x + layout.width > visibleBounds.x - buffer &&
-        layout.x < visibleBounds.x + visibleBounds.width + buffer &&
-        layout.y + layout.height > visibleBounds.y - buffer &&
-        layout.y < visibleBounds.y + visibleBounds.height + buffer;
+    // 3-tier buffer system (in canvas units, adjusted for zoom)
+    // Increased buffers to reduce blank pages during scroll:
+    // - renderBuffer: ~2.5 pages ahead/behind for immediate rendering
+    // - elementBuffer: ~5 pages for DOM element readiness
+    // - keepBuffer: ~7.5 pages to prevent thrashing during fast scroll
+    const renderBuffer = 1200 / this.camera.z;      // Pages to render immediately
+    const elementBuffer = 2400 / this.camera.z;     // Pages to have DOM elements ready
+    const keepBuffer = 3600 / this.camera.z;        // Pages to retain in DOM
 
-      if (isVisible) {
-        newVisiblePages.add(page);
+    // O(1) page range calculation based on layout mode
+    const { layoutMode, pagesPerRow } = this.config;
+    const cellWidth = this.layoutBaseWidth + this.layoutGap;
+    const cellHeight = this.layoutBaseHeight + this.layoutGap;
+    const padding = this.layoutPadding;
+
+    // Calculate page ranges for element buffer (largest zone)
+    const elementPages = this.calculatePagesInBounds(
+      visibleBounds.x - elementBuffer,
+      visibleBounds.y - elementBuffer,
+      visibleBounds.width + elementBuffer * 2,
+      visibleBounds.height + elementBuffer * 2,
+      layoutMode,
+      pagesPerRow,
+      cellWidth,
+      cellHeight,
+      padding
+    );
+
+    // Calculate page ranges for render buffer
+    const renderPages = this.calculatePagesInBounds(
+      visibleBounds.x - renderBuffer,
+      visibleBounds.y - renderBuffer,
+      visibleBounds.width + renderBuffer * 2,
+      visibleBounds.height + renderBuffer * 2,
+      layoutMode,
+      pagesPerRow,
+      cellWidth,
+      cellHeight,
+      padding
+    );
+
+    // Populate sets from calculated ranges
+    for (const page of renderPages) {
+      newVisiblePages.add(page);
+      newRenderPages.add(page);
+    }
+    for (const page of elementPages) {
+      if (!newRenderPages.has(page)) {
+        newRenderPages.add(page);
       }
     }
 
-    // Create elements for newly visible pages
-    for (const page of newVisiblePages) {
+    // Create elements for all pages in element zone
+    for (const page of newRenderPages) {
       if (!this.pageElements.has(page)) {
         this.createPageElement(page);
       }
     }
 
-    // Remove elements for pages no longer visible (with larger buffer to prevent thrashing)
-    const keepBuffer = 500 / this.camera.z;
+    // Remove elements for pages outside keep buffer - only iterate existing elements (small set)
+    const keepPages = this.calculatePagesInBounds(
+      visibleBounds.x - keepBuffer,
+      visibleBounds.y - keepBuffer,
+      visibleBounds.width + keepBuffer * 2,
+      visibleBounds.height + keepBuffer * 2,
+      layoutMode,
+      pagesPerRow,
+      cellWidth,
+      cellHeight,
+      padding
+    );
+    const keepSet = new Set(keepPages);
+
     for (const [page, element] of this.pageElements) {
-      const layout = this.pageLayouts.get(page);
-      if (!layout) continue;
-
-      const shouldKeep =
-        layout.x + layout.width > visibleBounds.x - keepBuffer &&
-        layout.x < visibleBounds.x + visibleBounds.width + keepBuffer &&
-        layout.y + layout.height > visibleBounds.y - keepBuffer &&
-        layout.y < visibleBounds.y + visibleBounds.height + keepBuffer;
-
-      if (!shouldKeep) {
+      if (!keepSet.has(page)) {
         element.destroy();
         this.pageElements.delete(page);
       }
     }
 
+    // Identify immediate neighbors of current page for priority rendering
+    const centerPage = this.getCurrentPage();
+    const immediateNeighbors: number[] = [];
+    for (let offset = -2; offset <= 2; offset++) {
+      const neighborPage = centerPage + offset;
+      if (neighborPage >= 1 && neighborPage <= this.pageCount && newRenderPages.has(neighborPage)) {
+        immediateNeighbors.push(neighborPage);
+      }
+    }
+
     this.visiblePages = newVisiblePages;
 
-    // Queue visible pages for rendering
-    this.queueRender([...newVisiblePages]);
+    // Queue rendering with priority for immediate neighbors
+    this.queueRenderWithPriority(immediateNeighbors, [...newRenderPages]);
 
     // Prefetch pages based on display mode:
     // - Spatial modes (auto-grid, canvas): 2D ripple prefetch based on grid distance
     // - Linear modes (paginated, vertical-scroll, horizontal-scroll): page ± N prefetch
     if (newVisiblePages.size > 0) {
-      const centerPage = this.getCurrentPage();
       this.triggerPrefetch(centerPage);
+    }
+
+    // Tile-based prefetching when in tiled mode (strategy decides)
+    if (this.useTiledRendering && this.renderCoordinator?.shouldUseTiling(this.camera.z)) {
+      this.triggerTilePrefetch();
     }
   }
 
   /**
+   * Trigger tile prefetching for visible viewport
+   * Only called when in tiled rendering mode (zoom > threshold)
+   *
+   * NOW WIRED: Uses coordinator's strategy-based prefetching:
+   * - Scroll mode: velocity-based prediction, dynamic resolution
+   * - Paginated mode: current viewport only
+   */
+  private triggerTilePrefetch(): void {
+    if (!this.renderCoordinator || !this.tileEngine) return;
+
+    // Use canvas coordinates for prefetch calculation
+    const screenRect = this.getViewportRect();
+    const canvasViewport = getVisibleBounds(this.camera, screenRect.width, screenRect.height);
+    const layouts = Array.from(this.pageLayouts.values());
+    const zoom = this.camera.z;
+
+    // Get velocity-aware tile scale with pixelRatio for crisp rendering
+    // Tiles are small (256×256) so can render at high scale without OOM
+    // At zoom 16x with pixelRatio 2, scale = 32 for crisp display
+    const MAX_TILE_SCALE = 32;
+    const rawScale = this.renderCoordinator.getTileScale(zoom, this.config.pixelRatio, this.velocity);
+    const tileScale = Math.min(MAX_TILE_SCALE, rawScale);
+
+    // Get visible tiles for current viewport with proper scale
+    const visibleTiles = this.tileEngine.getVisibleTiles(canvasViewport, layouts, zoom, tileScale);
+
+    // Queue critical tile requests (visible tiles)
+    for (const tile of visibleTiles) {
+      // Override scale based on velocity
+      const adjustedTile = { ...tile, scale: tileScale };
+      this.renderCoordinator.requestRender({
+        type: 'tile' as const,
+        tile: adjustedTile,
+        priority: 'critical',
+      }).catch(() => {
+        // Ignore render failures
+      });
+    }
+
+    // Get prefetch tiles from strategy (velocity-based prediction)
+    const prefetchTiles = this.renderCoordinator.getPrefetchTiles(
+      canvasViewport,
+      layouts,
+      this.velocity,
+      zoom
+    );
+
+    // Queue prefetch requests at lower priority
+    for (const tile of prefetchTiles) {
+      this.renderCoordinator.requestRender({
+        type: 'tile' as const,
+        tile,
+        priority: 'low',
+      }).catch(() => {
+        // Ignore prefetch failures
+      });
+    }
+  }
+
+  /**
+   * Calculate which pages fall within given bounds using O(1) math.
+   * Instead of iterating all pages, calculates row/column ranges based on grid layout.
+   */
+  private calculatePagesInBounds(
+    boundsX: number,
+    boundsY: number,
+    boundsWidth: number,
+    boundsHeight: number,
+    layoutMode: 'vertical' | 'horizontal' | 'grid',
+    pagesPerRow: number,
+    cellWidth: number,
+    cellHeight: number,
+    padding: number
+  ): number[] {
+    const pages: number[] = [];
+
+    if (layoutMode === 'vertical') {
+      // Single column layout - only need to calculate row range
+      const firstRow = Math.max(0, Math.floor((boundsY - padding) / cellHeight));
+      const lastRow = Math.min(
+        this.pageCount - 1,
+        Math.ceil((boundsY + boundsHeight - padding) / cellHeight)
+      );
+
+      for (let row = firstRow; row <= lastRow; row++) {
+        const page = row + 1;
+        if (page >= 1 && page <= this.pageCount) {
+          pages.push(page);
+        }
+      }
+    } else if (layoutMode === 'horizontal') {
+      // Single row layout - only need to calculate column range
+      const firstCol = Math.max(0, Math.floor((boundsX - padding) / cellWidth));
+      const lastCol = Math.min(
+        this.pageCount - 1,
+        Math.ceil((boundsX + boundsWidth - padding) / cellWidth)
+      );
+
+      for (let col = firstCol; col <= lastCol; col++) {
+        const page = col + 1;
+        if (page >= 1 && page <= this.pageCount) {
+          pages.push(page);
+        }
+      }
+    } else {
+      // Grid layout - calculate both row and column ranges
+      const firstRow = Math.max(0, Math.floor((boundsY - padding) / cellHeight));
+      const lastRow = Math.ceil((boundsY + boundsHeight - padding) / cellHeight);
+      const firstCol = Math.max(0, Math.floor((boundsX - padding) / cellWidth));
+      const lastCol = Math.min(pagesPerRow - 1, Math.ceil((boundsX + boundsWidth - padding) / cellWidth));
+
+      for (let row = firstRow; row <= lastRow; row++) {
+        for (let col = firstCol; col <= lastCol; col++) {
+          const page = row * pagesPerRow + col + 1;
+          if (page >= 1 && page <= this.pageCount) {
+            pages.push(page);
+          }
+        }
+      }
+    }
+
+    return pages;
+  }
+
+  /**
    * Trigger prefetch based on current display mode
-   * - Spatial modes use 2D ripple prefetch (SpatialPrefetcher)
-   * - Linear modes use linear page ± N prefetch (via notifyPageChange)
+   *
+   * NOW WIRED: Uses coordinator's strategy-based prefetching:
+   * - Paginated: prefetch ±1 pages via strategy
+   * - Scroll: handled by triggerTilePrefetch (velocity-based)
+   * - Grid: 2D ripple prefetch via SpatialPrefetcher
+   *
+   * Velocity-Aware: During fast scroll, reduce prefetch radius.
    */
   private triggerPrefetch(centerPage: number): void {
     const isSpatialMode =
       this.config.displayMode === 'auto-grid' ||
       this.config.displayMode === 'canvas';
 
-    if (isSpatialMode && this.provider.prefetchPages) {
+    if (isSpatialMode) {
+      // Calculate scroll speed for adaptive radius
+      const scrollSpeed = Math.sqrt(this.velocity.x ** 2 + this.velocity.y ** 2);
+
+      // Adaptive radius based on scroll velocity
+      const FAST_SCROLL_THRESHOLD = 10;
+      const MEDIUM_SCROLL_THRESHOLD = 3;
+
+      let prefetchRadius: number;
+      if (scrollSpeed > FAST_SCROLL_THRESHOLD) {
+        prefetchRadius = 1;
+      } else if (scrollSpeed > MEDIUM_SCROLL_THRESHOLD) {
+        prefetchRadius = 2;
+      } else {
+        prefetchRadius = 4;
+      }
+
       // SPATIAL: Ripple prefetch based on grid position
       const spatialPages = this.spatialPrefetcher.getSpatialPrefetchList({
         centerPage,
-        radius: 3,
+        radius: prefetchRadius,
         columns: this.currentColumns,
         pageCount: this.pageCount,
       });
 
-      // Filter out already-visible pages (they're already loading/loaded)
+      // Filter out already-visible pages and queue for background render
       const pagesToPrefetch = spatialPages.filter((p: number) => !this.visiblePages.has(p));
+      this.queueBackgroundPrefetch(pagesToPrefetch);
 
-      if (pagesToPrefetch.length > 0) {
-        // Background prefetch - don't await, let it run async
-        this.provider.prefetchPages(pagesToPrefetch).catch(err => {
-          console.warn('[PdfInfiniteCanvas] Spatial prefetch failed:', err);
-        });
-      }
+    } else if (this.renderCoordinator) {
+      // STRATEGY-BASED: Use coordinator's strategy for prefetch list
+      const prefetchPages = this.renderCoordinator.getPrefetchPages(centerPage, this.pageCount);
+      const pagesToPrefetch = prefetchPages.filter(p => !this.visiblePages.has(p));
+      this.queueBackgroundPrefetch(pagesToPrefetch);
+
     } else if (this.provider.notifyPageChange) {
-      // LINEAR: Standard page ± N prefetch via provider
+      // FALLBACK: Standard page notification
       this.provider.notifyPageChange(centerPage);
+    }
+  }
+
+  /**
+   * Queue pages for background prefetch rendering
+   * Renders pages at low priority to warm the cache
+   */
+  private queueBackgroundPrefetch(pages: number[]): void {
+    for (const page of pages) {
+      // Queue render to warm cache (fire and forget)
+      const options: PdfRenderOptions = {
+        scale: window.devicePixelRatio || 1,
+      };
+
+      // Fire and forget - we don't need the result, just warming cache
+      this.provider.getPageImage(page, options).catch(() => {
+        // Ignore prefetch failures
+      });
     }
   }
 
@@ -975,6 +1340,7 @@ export class PdfInfiniteCanvas {
       pixelRatio: this.config.pixelRatio,
       enableTextAntialiasing: true,
       enableImageSmoothing: true,
+      useSvgTextLayer: true, // Enable vector-crisp text at any zoom
     });
 
     // Set reading mode
@@ -1003,33 +1369,50 @@ export class PdfInfiniteCanvas {
   }
 
   /**
-   * Queue pages for rendering
+   * Queue pages for rendering with priority support
+   *
+   * Priority pages (immediate neighbors of current page) are rendered first
+   * to eliminate blank pages during scroll/zoom.
    */
-  private queueRender(pages: number[]): void {
+  private queueRenderWithPriority(priorityPages: number[], allPages: number[]): void {
     // Sort by distance from viewport center
     const viewportRect = this.viewport.getBoundingClientRect();
     const centerX = viewportRect.width / 2;
     const centerY = viewportRect.height / 2;
 
-    const sorted = pages.sort((a, b) => {
-      const layoutA = this.pageLayouts.get(a)!;
-      const layoutB = this.pageLayouts.get(b)!;
+    const sortByDistance = (pages: number[]) => {
+      return pages.sort((a, b) => {
+        const layoutA = this.pageLayouts.get(a);
+        const layoutB = this.pageLayouts.get(b);
+        if (!layoutA || !layoutB) return 0;
 
-      // Convert page centers to screen coordinates
-      const pageACenterX = (layoutA.x + layoutA.width / 2 + this.camera.x) * this.camera.z;
-      const pageACenterY = (layoutA.y + layoutA.height / 2 + this.camera.y) * this.camera.z;
-      const pageBCenterX = (layoutB.x + layoutB.width / 2 + this.camera.x) * this.camera.z;
-      const pageBCenterY = (layoutB.y + layoutB.height / 2 + this.camera.y) * this.camera.z;
+        // Convert page centers to screen coordinates
+        const pageACenterX = (layoutA.x + layoutA.width / 2 + this.camera.x) * this.camera.z;
+        const pageACenterY = (layoutA.y + layoutA.height / 2 + this.camera.y) * this.camera.z;
+        const pageBCenterX = (layoutB.x + layoutB.width / 2 + this.camera.x) * this.camera.z;
+        const pageBCenterY = (layoutB.y + layoutB.height / 2 + this.camera.y) * this.camera.z;
 
-      const distA = Math.hypot(pageACenterX - centerX, pageACenterY - centerY);
-      const distB = Math.hypot(pageBCenterX - centerX, pageBCenterY - centerY);
+        const distA = Math.hypot(pageACenterX - centerX, pageACenterY - centerY);
+        const distB = Math.hypot(pageBCenterX - centerX, pageBCenterY - centerY);
 
-      return distA - distB;
-    });
+        return distA - distB;
+      });
+    };
 
-    // Add to queue, avoiding duplicates
-    for (const page of sorted) {
-      if (!this.renderQueue.includes(page)) {
+    // Clear priority queue and add sorted priority pages
+    this.priorityRenderQueue = [];
+    const sortedPriority = sortByDistance([...priorityPages]);
+    for (const page of sortedPriority) {
+      if (!this.priorityRenderQueue.includes(page) && !this.renderQueue.includes(page)) {
+        this.priorityRenderQueue.push(page);
+      }
+    }
+
+    // Add remaining pages to regular queue
+    const remainingPages = allPages.filter(p => !priorityPages.includes(p));
+    const sortedRemaining = sortByDistance(remainingPages);
+    for (const page of sortedRemaining) {
+      if (!this.renderQueue.includes(page) && !this.priorityRenderQueue.includes(page)) {
         this.renderQueue.push(page);
       }
     }
@@ -1038,24 +1421,84 @@ export class PdfInfiniteCanvas {
   }
 
   /**
-   * Process render queue
+   * Queue pages for rendering (legacy method, uses priority queue internally)
+   */
+  private queueRender(pages: number[]): void {
+    this.queueRenderWithPriority([], pages);
+  }
+
+  /**
+   * Process render queue with concurrent rendering and priority support
+   *
+   * Performance optimization: Renders multiple pages in parallel instead of
+   * sequentially. Priority pages (immediate neighbors) are rendered first
+   * with higher concurrency (5 slots) to eliminate blank pages during scrolling.
+   * Uses streaming approach where new renders start as soon as slots become
+   * available (no convoy effect).
    */
   private async processRenderQueue(): Promise<void> {
-    if (this.isRendering || this.renderQueue.length === 0) return;
+    const hasWork = this.priorityRenderQueue.length > 0 || this.renderQueue.length > 0;
+    if (this.isRendering || !hasWork) return;
 
     this.isRendering = true;
     const currentVersion = ++this.renderVersion;
 
-    while (this.renderQueue.length > 0 && this.renderVersion === currentVersion) {
-      const page = this.renderQueue.shift()!;
+    // Scale concurrent renders with worker pool (2x workers, capped at 12)
+    const pool = getCanvasPool();
+    const CONCURRENT_RENDERS = Math.min(pool.workerCount * 2 || 5, 12);
+    const activeRenders = new Map<number, Promise<void>>();
 
-      // Skip if page no longer visible
-      if (!this.visiblePages.has(page)) continue;
+    const getNextPage = (): number | null => {
+      // Priority queue first (immediate neighbors)
+      while (this.priorityRenderQueue.length > 0) {
+        const page = this.priorityRenderQueue.shift()!;
+        const element = this.pageElements.get(page);
+        // Only skip if already rendered, not if just not visible (we want to pre-render)
+        if (element && !element.getIsRendered() && !activeRenders.has(page)) {
+          return page;
+        }
+      }
 
-      const element = this.pageElements.get(page);
-      if (!element || element.getIsRendered()) continue;
+      // Then regular queue
+      while (this.renderQueue.length > 0) {
+        const page = this.renderQueue.shift()!;
+        const element = this.pageElements.get(page);
+        if (element && !element.getIsRendered() && !activeRenders.has(page)) {
+          return page;
+        }
+      }
 
-      await this.renderPage(page, element, currentVersion);
+      return null;
+    };
+
+    const startNextRender = (): void => {
+      while (activeRenders.size < CONCURRENT_RENDERS && this.renderVersion === currentVersion) {
+        const page = getNextPage();
+        if (page === null) break;
+
+        const element = this.pageElements.get(page);
+        if (!element) continue;
+
+        // Start render and track it
+        const renderPromise = this.renderPage(page, element, currentVersion)
+          .finally(() => {
+            activeRenders.delete(page);
+            // Start next render as soon as slot becomes available (streaming)
+            if (this.renderVersion === currentVersion) {
+              startNextRender();
+            }
+          });
+
+        activeRenders.set(page, renderPromise);
+      }
+    };
+
+    // Start initial batch of renders
+    startNextRender();
+
+    // Wait for all active renders to complete
+    while (activeRenders.size > 0 && this.renderVersion === currentVersion) {
+      await Promise.race(activeRenders.values());
     }
 
     this.isRendering = false;
@@ -1076,13 +1519,198 @@ export class PdfInfiniteCanvas {
   ): Promise<void> {
     if (this.renderVersion !== version) return;
 
+    const zoom = this.camera.z;
+    const layout = this.pageLayouts.get(page);
+
+    // Tiling decision: use tiles at high zoom for crisp rendering
+    // - Tiles can render at scale 32 (zoom 16x * pixelRatio 2) without OOM
+    // - Full pages cap at scale 8 to avoid memory issues
+    // - Coordinate conversion now properly handles canvas→PDF units
+    const shouldTile = this.tileEngine &&
+                       this.renderCoordinator &&
+                       layout &&
+                       zoom > 4.0;
+
+    if (shouldTile) {
+      await this.renderPageTiled(page, element, layout, zoom, version);
+    } else {
+      await this.renderPageFull(page, element, version);
+    }
+  }
+
+  /**
+   * Render a page using tile-based rendering (CATiledLayer-style)
+   * Used when zoom > threshold for crisp rendering at high magnification
+   */
+  private async renderPageTiled(
+    page: number,
+    element: PdfPageElement,
+    layout: PageLayout,
+    zoom: number,
+    version: number
+  ): Promise<void> {
+    if (this.renderVersion !== version) return;
+
     element.showLoading();
+
+    try {
+      // Scale: zoom * pixelRatio for crisp rendering
+      // Tiles are small (256×256) so can render at high scale without OOM
+      // At zoom 16x with pixelRatio 2, scale = 32 for crisp display
+      const MAX_TILE_SCALE = 32;
+      const tileScale = Math.min(MAX_TILE_SCALE, Math.max(1, Math.ceil(zoom * this.config.pixelRatio)));
+
+      // At high zoom (>4x), only render VISIBLE tiles (viewport-clipped)
+      // At lower zoom, render all tiles for the page (for smooth panning)
+      let tiles: TileCoordinate[];
+      if (zoom > 4.0) {
+        // Get viewport in WORLD coordinates (not screen coordinates!)
+        const screenRect = this.getViewportRect();
+        const viewport = getVisibleBounds(this.camera, screenRect.width, screenRect.height);
+        tiles = this.tileEngine!.getVisibleTiles(viewport, [layout], zoom, tileScale);
+        const totalTiles = this.tileEngine!.getPageTileGrid(page, tileScale).length;
+        console.log(`[PdfInfiniteCanvas] High zoom ${zoom.toFixed(1)}x: rendering ${tiles.length} visible tiles (vs ${totalTiles} total for page)`);
+      } else {
+        // At normal zoom, get all tiles for smooth pan/zoom
+        tiles = this.tileEngine!.getPageTileGrid(page, tileScale);
+      }
+
+      if (tiles.length === 0) {
+        // No tiles calculated - check if page is actually in viewport
+        if (zoom > 4.0) {
+          // At high zoom, if page doesn't overlap viewport, skip rendering
+          // This preserves any existing canvas content from previous renders
+          const screenRect = this.getViewportRect();
+          const viewport = getVisibleBounds(this.camera, screenRect.width, screenRect.height);
+          const overlaps = this.rectsOverlap(viewport, layout);
+          if (!overlaps) {
+            // Page is not visible - keep existing content, don't clear canvas
+            element.hideLoading();
+            return;
+          }
+        }
+        // Page is in viewport but no tiles - dimensions may not be set. Fall back to full-page.
+        console.warn(`[PdfInfiniteCanvas] No tiles for page ${page}, falling back to full render`);
+        await this.renderPageFull(page, element, version);
+        return;
+      }
+
+      // Request tiles through coordinator (handles caching, deduplication)
+      const tilePromises = tiles.map(tile =>
+        this.renderCoordinator!.requestRender({
+          type: 'tile' as const,
+          tile,
+          priority: this.getTilePriority(tile, layout),
+        })
+      );
+
+      const results = await Promise.all(tilePromises);
+
+      if (this.renderVersion !== version) return;
+
+      // Collect successful tile data for rendering
+      const tileImages: Array<{ tile: typeof tiles[0]; bitmap: ImageBitmap }> = [];
+
+      for (let i = 0; i < tiles.length; i++) {
+        const result = results[i];
+        if (result.success && result.data) {
+          let bitmap: ImageBitmap;
+          if (result.data instanceof ImageBitmap) {
+            bitmap = result.data;
+          } else {
+            // Convert Blob to ImageBitmap
+            bitmap = await createImageBitmap(result.data as Blob);
+          }
+          tileImages.push({ tile: tiles[i], bitmap });
+        }
+      }
+
+      // Get text layer (non-blocking)
+      let textLayerData: TextLayerData | undefined;
+      try {
+        textLayerData = await this.provider.getPageTextLayer(page);
+      } catch {
+        // Text layer is optional
+      }
+
+      if (this.renderVersion !== version) return;
+
+      // Get PDF native dimensions for coordinate transform
+      // Tiles are rendered in PDF coordinate space, but layout may be scaled
+      const pdfDimensions = this.tileEngine!.pageDimensions.get(page);
+
+      // Render tiles to element with PDF dimensions for correct positioning
+      await element.renderTiles(tileImages, textLayerData, zoom, pdfDimensions);
+      element.hideLoading();
+
+    } catch (error) {
+      if (!this.isAbortError(error)) {
+        console.error(`[PdfInfiniteCanvas] Tiled render failed for page ${page}:`, error);
+        // Fall back to full-page rendering
+        await this.renderPageFull(page, element, version);
+      } else {
+        element.hideLoading();
+      }
+    }
+  }
+
+  /**
+   * Get tile priority based on distance from viewport center
+   */
+  private getTilePriority(
+    tile: TileCoordinate,
+    layout: PageLayout
+  ): RenderPriority {
+    // Use canvas coordinates for priority calculation
+    const screenRect = this.getViewportRect();
+    const viewport = getVisibleBounds(this.camera, screenRect.width, screenRect.height);
+    const viewportCenterX = viewport.x + viewport.width / 2;
+    const viewportCenterY = viewport.y + viewport.height / 2;
+
+    // Calculate tile center in canvas coordinates
+    const tileX = layout.x + tile.tileX * TILE_SIZE;
+    const tileY = layout.y + tile.tileY * TILE_SIZE;
+    const tileCenterX = tileX + TILE_SIZE / 2;
+    const tileCenterY = tileY + TILE_SIZE / 2;
+
+    // Distance from viewport center
+    const distance = Math.sqrt(
+      Math.pow(tileCenterX - viewportCenterX, 2) +
+      Math.pow(tileCenterY - viewportCenterY, 2)
+    );
+
+    // Priority based on distance
+    if (distance < viewport.width / 4) return 'critical';
+    if (distance < viewport.width / 2) return 'high';
+    if (distance < viewport.width) return 'medium';
+    return 'low';
+  }
+
+  /**
+   * Render a page using full-page rendering (original path)
+   */
+  private async renderPageFull(
+    page: number,
+    element: PdfPageElement,
+    version: number
+  ): Promise<void> {
+    if (this.renderVersion !== version) return;
+
+    element.showLoading();
+
+    // Calculate zoom-aware render scale for sharp text at current zoom
+    // Cap at max useful scale to avoid fetching unnecessarily large images
+    const zoomAwareScale = this.getZoomAwareRenderScale();
+    const maxScale = this.getMaxUsefulScale();
+    // zoomAwareScale * pixelRatio = desired scale for HiDPI quality
+    // maxScale = absolute max (2048px / pageWidth) to avoid wasteful fetches
+    const targetScale = Math.min(zoomAwareScale * this.config.pixelRatio, maxScale);
 
     try {
       // Use dual-resolution if provider supports it (preferred path)
       if (this.provider.getPageImageDualRes) {
         const result = await this.provider.getPageImageDualRes(page, {
-          scale: this.config.renderScale * this.config.pixelRatio,
+          scale: targetScale,
           dpi: 150,
           format: 'png',
         });
@@ -1100,7 +1728,7 @@ export class PdfInfiniteCanvas {
         if (this.renderVersion !== version) return;
 
         // Display initial (may be thumbnail or full quality)
-        await element.render({ imageBlob: result.initial, textLayerData }, this.config.renderScale);
+        await element.render({ imageBlob: result.initial, textLayerData }, zoomAwareScale);
         element.hideLoading();
 
         // Update local cache with initial
@@ -1117,11 +1745,11 @@ export class PdfInfiniteCanvas {
             }
 
             // Re-render with full quality
-            await element.render({ imageBlob: fullBlob, textLayerData }, this.config.renderScale);
+            await element.render({ imageBlob: fullBlob, textLayerData }, zoomAwareScale);
 
             // Update cache with full quality
             this.pageImageCache.set(page, fullBlob);
-            this.pageCacheScales.set(page, this.config.renderScale * this.config.pixelRatio);
+            this.pageCacheScales.set(page, targetScale);
             this.updateCacheOrder(page);
           }).catch((err) => {
             // Upgrade failed, but we already have something displayed
@@ -1144,7 +1772,7 @@ export class PdfInfiniteCanvas {
 
         if (this.renderVersion !== version) return;
 
-        await element.render({ imageBlob, textLayerData }, this.config.renderScale);
+        await element.render({ imageBlob, textLayerData }, zoomAwareScale);
         element.hideLoading();
       }
     } catch (error) {
@@ -1153,6 +1781,95 @@ export class PdfInfiniteCanvas {
       }
       element.hideLoading();
     }
+  }
+
+  /**
+   * Calculate the render scale needed for current zoom level.
+   *
+   * At high zoom, we need to render at higher resolution to maintain
+   * crisp text (Retina quality = 2x buffer pixels per screen pixel).
+   *
+   * Formula: effectiveRatio = bufferPixels / screenPixels
+   *        = (renderScale * pixelRatio) / cssZoom
+   *
+   * For effectiveRatio >= MIN_EFFECTIVE_RATIO:
+   *   renderScale >= cssZoom * MIN_EFFECTIVE_RATIO / pixelRatio
+   */
+  private getZoomAwareRenderScale(): number {
+    const minRequired = (this.camera.z * this.MIN_EFFECTIVE_RATIO) / this.config.pixelRatio;
+    return Math.max(this.config.renderScale, minRequired);
+  }
+
+  /**
+   * Get maximum useful render scale based on display requirements.
+   *
+   * Balances quality vs memory usage:
+   * - 8x scale gives crisp rendering up to zoom 4x with 2x DPR
+   * - Higher scales cause memory issues and crashes
+   */
+  private getMaxUsefulScale(): number {
+    const zoom = this.camera.z;
+    const pixelRatio = this.config.pixelRatio;
+
+    // Target scale for crisp rendering
+    const idealScale = zoom * pixelRatio;
+
+    // Cap at 8x to prevent memory crashes
+    const MAX_SCALE = 8.0;
+
+    return Math.min(idealScale, MAX_SCALE);
+  }
+
+  /**
+   * Check if a page needs re-rendering due to zoom level change.
+   *
+   * A page needs re-rendering if its cached scale would result in
+   * less than MIN_EFFECTIVE_RATIO buffer pixels per screen pixel.
+   */
+  private needsZoomRerender(page: number): boolean {
+    const cachedScale = this.pageCacheScales.get(page);
+    if (!cachedScale) return true; // Not cached, needs render
+
+    // Calculate effective ratio at current zoom
+    const effectiveRatio = cachedScale / this.camera.z;
+    return effectiveRatio < this.MIN_EFFECTIVE_RATIO;
+  }
+
+  /**
+   * Schedule re-rendering of visible pages that need higher resolution.
+   *
+   * Debounced to avoid excessive re-renders during continuous zoom gestures.
+   */
+  private scheduleZoomRerender(): void {
+    // Clear existing timeout
+    if (this.zoomRerenderTimeout) {
+      clearTimeout(this.zoomRerenderTimeout);
+    }
+
+    this.zoomRerenderTimeout = setTimeout(() => {
+      // Find pages that need re-rendering
+      const pagesToRerender: number[] = [];
+      for (const page of this.visiblePages) {
+        if (this.needsZoomRerender(page)) {
+          pagesToRerender.push(page);
+        }
+      }
+
+      if (pagesToRerender.length > 0) {
+        console.log(`[PdfInfiniteCanvas] Re-rendering ${pagesToRerender.length} pages for zoom ${this.camera.z.toFixed(2)}`);
+
+        // Mark pages as needing re-render (clear rendered state)
+        for (const page of pagesToRerender) {
+          const element = this.pageElements.get(page);
+          if (element) {
+            element.clearRendered();
+          }
+        }
+
+        // Queue for re-render
+        this.queueRender(pagesToRerender);
+      }
+    }, this.ZOOM_RERENDER_DEBOUNCE);
   }
 
   /**
@@ -1175,7 +1892,8 @@ export class PdfInfiniteCanvas {
    * Get cached page image or fetch from server
    */
   private async getCachedPageImage(page: number): Promise<Blob> {
-    const targetScale = this.config.renderScale * this.config.pixelRatio;
+    // Use zoom-aware scale for sharp rendering at current zoom
+    const targetScale = this.getZoomAwareRenderScale() * this.config.pixelRatio;
 
     // Check cache
     if (this.pageImageCache.has(page)) {
@@ -1196,6 +1914,7 @@ export class PdfInfiniteCanvas {
     if (pending) return pending;
 
     // Fetch from server
+    // Note: HybridPdfProvider.renderPage() handles DPI-aware scaling internally
     const fetchScale = Math.max(targetScale, 1.5);
     const promise = (async () => {
       try {
@@ -1361,7 +2080,8 @@ export class PdfInfiniteCanvas {
   private handleWheel(e: WheelEvent): void {
     e.preventDefault();
 
-    const rect = this.viewport.getBoundingClientRect();
+    // Use cached rect to avoid layout thrashing
+    const rect = this.getViewportRect();
     const point: Point = {
       x: e.clientX - rect.left,
       y: e.clientY - rect.top,
@@ -1414,9 +2134,27 @@ export class PdfInfiniteCanvas {
       // Apply direct pan - panCamera handles zoom-adjusted movement
       this.camera = panCamera(this.camera, deltaX, deltaY);
       this.constrainCameraPosition();
+
+      // Apply transform immediately for responsive feedback
       this.applyTransform();
-      this.updateVisiblePages();
+
+      // Defer visible pages update to next frame to keep scroll smooth
+      this.scheduleVisiblePagesUpdate();
     }
+  }
+
+  /**
+   * Schedule visible pages update for next animation frame
+   * Coalesces multiple updates into one to avoid thrashing
+   */
+  private scheduleVisiblePagesUpdate(): void {
+    if (this.pendingVisiblePagesUpdate) return;
+
+    this.pendingVisiblePagesUpdate = true;
+    requestAnimationFrame(() => {
+      this.pendingVisiblePagesUpdate = false;
+      this.updateVisiblePages();
+    });
   }
 
   /**
@@ -1519,6 +2257,10 @@ export class PdfInfiniteCanvas {
 
       this.applyTransform();
       this.updateVisiblePages();
+
+      // Schedule re-render if zoom increased beyond cached resolution
+      this.scheduleZoomRerender();
+
       this.onZoomChangeCallback?.(this.camera.z);
     }
   }
@@ -1735,27 +2477,46 @@ export class PdfInfiniteCanvas {
 
   /**
    * Get current page (based on what's most visible)
+   *
+   * PERFORMANCE OPTIMIZATION: Uses O(1) calculation instead of O(N) iteration.
+   * Calculates page directly from camera position using grid layout formulas.
    */
   getCurrentPage(): number {
     const viewportRect = this.viewport.getBoundingClientRect();
     const centerX = viewportRect.width / 2;
     const centerY = viewportRect.height / 2;
 
-    let closestPage = 1;
-    let closestDistance = Infinity;
+    // Convert screen center to canvas coordinates
+    // Formula: screenToCanvas(screen, camera) = screen / zoom - camera
+    const canvasCenterX = centerX / this.camera.z - this.camera.x;
+    const canvasCenterY = centerY / this.camera.z - this.camera.y;
 
-    for (const [page, layout] of this.pageLayouts) {
-      const pageCenterX = (layout.x + layout.width / 2 + this.camera.x) * this.camera.z;
-      const pageCenterY = (layout.y + layout.height / 2 + this.camera.y) * this.camera.z;
-      const distance = Math.hypot(pageCenterX - centerX, pageCenterY - centerY);
+    const { layoutMode, pagesPerRow } = this.config;
+    const cellWidth = this.layoutBaseWidth + this.layoutGap;
+    const cellHeight = this.layoutBaseHeight + this.layoutGap;
+    const padding = this.layoutPadding;
 
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closestPage = page;
-      }
+    let page: number;
+
+    if (layoutMode === 'vertical') {
+      // Single column - calculate row from Y position
+      const row = Math.round((canvasCenterY - padding - this.layoutBaseHeight / 2) / cellHeight);
+      page = Math.max(1, Math.min(this.pageCount, row + 1));
+    } else if (layoutMode === 'horizontal') {
+      // Single row - calculate column from X position
+      const col = Math.round((canvasCenterX - padding - this.layoutBaseWidth / 2) / cellWidth);
+      page = Math.max(1, Math.min(this.pageCount, col + 1));
+    } else {
+      // Grid layout - calculate both row and column
+      const row = Math.round((canvasCenterY - padding - this.layoutBaseHeight / 2) / cellHeight);
+      const col = Math.round((canvasCenterX - padding - this.layoutBaseWidth / 2) / cellWidth);
+      const clampedCol = Math.max(0, Math.min(pagesPerRow - 1, col));
+      const clampedRow = Math.max(0, row);
+      page = clampedRow * pagesPerRow + clampedCol + 1;
+      page = Math.max(1, Math.min(this.pageCount, page));
     }
 
-    return closestPage;
+    return page;
   }
 
   /**
@@ -1839,12 +2600,38 @@ export class PdfInfiniteCanvas {
    * Handle resize
    */
   handleResize(): void {
-    const viewportRect = this.viewport.getBoundingClientRect();
+    // Update cached viewport rect
+    this.cachedViewportRect = this.viewport.getBoundingClientRect();
     this.cameraConstraints.viewport = {
-      width: viewportRect.width,
-      height: viewportRect.height,
+      width: this.cachedViewportRect.width,
+      height: this.cachedViewportRect.height,
     };
     this.updateVisiblePages();
+  }
+
+  /**
+   * Get viewport rect (cached to avoid layout thrashing)
+   */
+  private getViewportRect(): DOMRect {
+    if (!this.cachedViewportRect) {
+      this.cachedViewportRect = this.viewport.getBoundingClientRect();
+    }
+    return this.cachedViewportRect;
+  }
+
+  /**
+   * Check if two rectangles overlap
+   */
+  private rectsOverlap(
+    a: { x: number; y: number; width: number; height: number },
+    b: { x: number; y: number; width: number; height: number }
+  ): boolean {
+    return !(
+      a.x + a.width < b.x ||
+      b.x + b.width < a.x ||
+      a.y + a.height < b.y ||
+      b.y + b.height < a.y
+    );
   }
 
   /**
@@ -1868,6 +2655,12 @@ export class PdfInfiniteCanvas {
     if (this.config.displayMode === mode) return;
 
     const currentPage = this.getCurrentPage();
+
+    // Notify render coordinator of mode change (for cache management)
+    if (this.renderCoordinator) {
+      const coordinatorMode = this.getCoordinatorMode(mode);
+      this.renderCoordinator.setMode(coordinatorMode);
+    }
 
     this.config.displayMode = mode;
 
@@ -1904,6 +2697,24 @@ export class PdfInfiniteCanvas {
     this.constrainCameraPosition();
     this.applyTransform();
     this.updateVisiblePages();
+  }
+
+  /**
+   * Map display mode to render coordinator mode
+   */
+  private getCoordinatorMode(displayMode: DisplayMode): RenderMode {
+    switch (displayMode) {
+      case 'paginated':
+        return 'paginated';
+      case 'vertical-scroll':
+      case 'horizontal-scroll':
+        return 'scroll';
+      case 'auto-grid':
+      case 'canvas':
+        return 'grid';
+      default:
+        return 'paginated';
+    }
   }
 
   /**
@@ -1974,6 +2785,12 @@ export class PdfInfiniteCanvas {
 
     // Stop inertia animation
     this.stopInertia();
+
+    // Clear zoom re-render timeout
+    if (this.zoomRerenderTimeout) {
+      clearTimeout(this.zoomRerenderTimeout);
+      this.zoomRerenderTimeout = null;
+    }
 
     for (const element of this.pageElements.values()) {
       element.destroy();

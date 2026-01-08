@@ -165,6 +165,62 @@ export class WasmPdfRenderer {
   }
 
   /**
+   * Render a specific tile (256x256 region) of a page
+   *
+   * @param pageNumber 1-indexed page number
+   * @param tileX Tile X coordinate (0-indexed)
+   * @param tileY Tile Y coordinate (0-indexed)
+   * @param options Render options (scale, tileSize)
+   * @returns PNG blob of the tile
+   */
+  async renderTile(
+    pageNumber: number,
+    tileX: number,
+    tileY: number,
+    options?: { scale?: number; tileSize?: number }
+  ): Promise<Blob> {
+    if (!this.bridge || !this.documentId) {
+      throw new Error('No document loaded');
+    }
+
+    const scale = options?.scale ?? 2;
+    const tileSize = options?.tileSize ?? 256;
+    const startTime = performance.now();
+
+    // Note: Tile caching is handled by TileCacheManager at a higher level
+    // This method just renders the tile
+
+    const result = await this.bridge.renderTile(
+      this.documentId,
+      pageNumber,
+      tileX,
+      tileY,
+      tileSize,
+      scale
+    );
+
+    // Convert Uint8Array PNG to Blob
+    const pngData = new Uint8Array(result.data);
+    const blob = new Blob([pngData], { type: 'image/png' });
+
+    if (this.config.debug) {
+      console.log(
+        `[WasmRenderer] Rendered tile (${pageNumber}, ${tileX}, ${tileY}) @ ${scale}x ` +
+          `(${result.width}x${result.height}) in ${(performance.now() - startTime).toFixed(1)}ms`
+      );
+    }
+
+    return blob;
+  }
+
+  /**
+   * Get the document ID (needed by RenderCoordinator)
+   */
+  getDocumentId(): string | null {
+    return this.documentId;
+  }
+
+  /**
    * Get text layer with character positions
    *
    * @param pageNumber 1-indexed page number
@@ -424,29 +480,37 @@ export class WasmPdfRenderer {
 }
 
 /**
- * Singleton instance for shared use
+ * Singleton instance for shared use - use promise to prevent race conditions
  */
-let sharedRenderer: WasmPdfRenderer | null = null;
+let sharedRendererPromise: Promise<WasmPdfRenderer> | null = null;
+let sharedRendererInstance: WasmPdfRenderer | null = null;
 
 /**
- * Get or create the shared WASM renderer instance
+ * Get or create the shared WASM renderer instance.
+ * Uses promise-based singleton to prevent race conditions when multiple
+ * callers invoke this concurrently during initialization.
  */
 export async function getSharedWasmRenderer(): Promise<WasmPdfRenderer> {
-  if (!sharedRenderer) {
-    sharedRenderer = new WasmPdfRenderer();
-    await sharedRenderer.initialize();
+  if (!sharedRendererPromise) {
+    sharedRendererPromise = (async () => {
+      const renderer = new WasmPdfRenderer();
+      await renderer.initialize();
+      sharedRendererInstance = renderer;
+      return renderer;
+    })();
   }
-  return sharedRenderer;
+  return sharedRendererPromise;
 }
 
 /**
  * Destroy the shared WASM renderer
  */
 export function destroySharedWasmRenderer(): void {
-  if (sharedRenderer) {
-    sharedRenderer.destroy();
-    sharedRenderer = null;
+  if (sharedRendererInstance) {
+    sharedRendererInstance.destroy();
+    sharedRendererInstance = null;
   }
+  sharedRendererPromise = null;
   destroySharedMuPDFBridge();
 }
 

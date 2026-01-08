@@ -38,7 +38,7 @@ export interface CameraConstraints {
 
 const DEFAULT_CONSTRAINTS: CameraConstraints = {
   minZoom: 0.1,
-  maxZoom: 10,
+  maxZoom: 16, // Allow high zoom for detailed viewing
   constrainToBounds: false,
 };
 

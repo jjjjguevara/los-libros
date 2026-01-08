@@ -8,6 +8,7 @@
 
 import { PdfPageElement, type PageRenderData, type PageHighlight, type ReadingMode } from './pdf-page-element';
 import { calculateOptimalLayout, type LayoutResult, type LayoutMode } from './pdf-layout-calculator';
+import { getCanvasPool } from './pdf-canvas-pool';
 import type { PdfTextLayer as TextLayerData, PdfRenderOptions } from '../types';
 
 export type DisplayMode = 'paginated' | 'scrolled';
@@ -592,7 +593,9 @@ export class PdfMultiPageContainer {
       return Math.abs(a - midPage) - Math.abs(b - midPage);
     });
 
-    const CONCURRENT_RENDERS = 4;
+    // Scale concurrent renders with worker pool (2x workers, capped at 12)
+    const pool = getCanvasPool();
+    const CONCURRENT_RENDERS = Math.min(pool.workerCount * 2 || 5, 12);
     for (let i = 0; i < sortedPagesToRender.length; i += CONCURRENT_RENDERS) {
       // Check if render version changed (zoom/layout changed) - abort if stale
       if (this.renderVersion !== currentRenderVersion) {
@@ -641,6 +644,7 @@ export class PdfMultiPageContainer {
 
     // Fetch from server at appropriate scale
     // Use a minimum scale to avoid pixelation when zooming back in
+    // Note: HybridPdfProvider.renderPage() handles DPI-aware scaling internally
     const fetchScale = Math.max(targetScale, 1.5);
 
     // Create the request promise and store it for deduplication
@@ -726,6 +730,7 @@ export class PdfMultiPageContainer {
         pixelRatio: this.config.pixelRatio,
         enableTextAntialiasing: this.config.enableTextAntialiasing,
         enableImageSmoothing: this.config.enableImageSmoothing,
+        useSvgTextLayer: true, // Enable vector-crisp text at any zoom
       });
 
       // Apply reading mode

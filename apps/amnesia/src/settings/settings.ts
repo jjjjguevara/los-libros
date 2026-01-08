@@ -483,6 +483,19 @@ export interface PdfSettings {
   minCreationBuffer: number;
   /** Minimum destruction buffer in pixels. Pages are kept alive when this far from viewport. Default: 300 */
   minDestructionBuffer: number;
+
+  // ==========================================================================
+  // Tile Rendering Settings (CATiledLayer-style optimization)
+  // ==========================================================================
+
+  /** Enable tiled rendering for large documents. Default: true */
+  enableTiledRendering: boolean;
+  /** Tile size in pixels (256 = finer granularity, 512 = fewer tiles). Default: 256 */
+  tileSize: 256 | 512;
+  /** Number of viewports to prefetch ahead during scroll (1-4). Default: 2 */
+  scrollPrefetchViewports: number;
+  /** Fast scroll velocity threshold for switching to low-res tiles (px/s). Default: 500 */
+  fastScrollThreshold: number;
 }
 
 export interface LibrosSettings {
@@ -880,6 +893,12 @@ export const DEFAULT_SETTINGS: LibrosSettings = {
     renderDebounceMs: 50,             // Delay before rendering pages during scroll (ms) - lower = more responsive
     minCreationBuffer: 300,           // Minimum buffer for creating page elements (px) - ~1 page height
     minDestructionBuffer: 600,        // Minimum buffer for keeping page elements (px) - prevents flicker
+
+    // Tile Rendering Settings (CATiledLayer-style optimization)
+    enableTiledRendering: true,       // Enable tiled rendering for large documents
+    tileSize: 256,                    // 256px tiles for finer granularity (matches Preview.app)
+    scrollPrefetchViewports: 2,       // Prefetch 2 viewports ahead during scroll
+    fastScrollThreshold: 500,         // Switch to low-res tiles when scrolling > 500px/s
   },
 
   // ==========================================================================
