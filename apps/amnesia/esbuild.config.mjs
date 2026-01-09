@@ -228,7 +228,6 @@ const context = await esbuild.context({
   external: [
     "obsidian",
     "electron",
-    "pdfjs-dist",
     "@codemirror/autocomplete",
     "@codemirror/collab",
     "@codemirror/commands",
@@ -248,6 +247,9 @@ const context = await esbuild.context({
   sourcemap: prod ? false : "inline",
   treeShaking: true,
   outfile: "temp/vault/.obsidian/plugins/amnesia/main.js",
+  define: {
+    "__DEV__": prod ? "false" : "true",
+  },
   plugins: [
     esbuildSvelte({
       compilerOptions: {

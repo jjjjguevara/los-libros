@@ -39,9 +39,9 @@ import {
 } from './recovery-service';
 
 import {
-  LiquidTemplateService,
-  createLiquidTemplateService,
-} from './liquid-template-service';
+  NunjucksTemplateService,
+  createNunjucksTemplateService,
+} from '../../templates/nunjucks-engine';
 
 // ============================================================================
 // Types
@@ -164,7 +164,7 @@ export class MetadataSyncService {
   private fieldMapping: FieldMappingManager;
   private validator: MetadataValidator;
   private recovery: MetadataRecoveryService | null = null;
-  private templates: LiquidTemplateService;
+  private templates: NunjucksTemplateService;
   private config: MetadataSyncServiceConfig;
   private listeners: Set<EventListener>;
   private pendingConflicts: Map<string, MetadataConflict[]>;
@@ -186,7 +186,7 @@ export class MetadataSyncService {
 
     this.fieldMapping = createFieldMappingManager();
     this.validator = createMetadataValidator();
-    this.templates = createLiquidTemplateService();
+    this.templates = createNunjucksTemplateService();
     this.listeners = new Set();
     this.pendingConflicts = new Map();
   }
@@ -723,7 +723,7 @@ export class MetadataSyncService {
   /**
    * Get template service
    */
-  getTemplateService(): LiquidTemplateService {
+  getTemplateService(): NunjucksTemplateService {
     return this.templates;
   }
 

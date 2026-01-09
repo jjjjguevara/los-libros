@@ -29,7 +29,7 @@ export type WorkerRequest =
   | { type: 'UNLOAD_DOCUMENT'; requestId: string; docId: string };
 
 export type WorkerResponse =
-  | { type: 'LOADED'; requestId: string; pageCount: number; success: true }
+  | { type: 'LOADED'; requestId: string; pageCount: number; toc: TocEntry[]; success: true }
   | { type: 'LOAD_ERROR'; requestId: string; error: string; success: false }
   | { type: 'PAGE_RENDERED'; requestId: string; pageNum: number; data: Uint8Array; width: number; height: number }
   | { type: 'TILE_RENDERED'; requestId: string; pageNum: number; tileX: number; tileY: number; data: Uint8Array; width: number; height: number }
@@ -84,6 +84,13 @@ export interface SearchResult {
   }>;
 }
 
+export interface TocEntry {
+  id: string;
+  label: string;
+  href: string;
+  children: TocEntry[];
+}
+
 // Document cache - uses 'any' since mupdf is dynamically loaded
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const documents = new Map<string, any>();
@@ -91,7 +98,7 @@ const documents = new Map<string, any>();
 /**
  * Load a PDF document from ArrayBuffer
  */
-function loadDocument(id: string, data: ArrayBuffer): { pageCount: number } {
+function loadDocument(id: string, data: ArrayBuffer): { pageCount: number; toc: TocEntry[] } {
   // Unload existing document with same ID
   if (documents.has(id)) {
     try {
@@ -105,7 +112,32 @@ function loadDocument(id: string, data: ArrayBuffer): { pageCount: number } {
   const doc = mupdf.Document.openDocument(data, 'application/pdf');
   documents.set(id, doc);
 
-  return { pageCount: doc.countPages() };
+  // Extract TOC using MuPDF's loadOutline
+  const toc: TocEntry[] = [];
+  let tocIdCounter = 0;
+  try {
+    const outline = doc.loadOutline();
+    if (outline) {
+      // Convert MuPDF outline to our TocEntry format
+      // Uses page:X as href for PDF navigation
+      function convertOutline(items: any[]): TocEntry[] {
+        return items.map((item) => {
+          const pageNum = typeof item.page === 'number' ? item.page + 1 : 1; // MuPDF uses 0-indexed pages
+          return {
+            id: `toc-${tocIdCounter++}`,
+            label: item.title || `Page ${pageNum}`,
+            href: `page:${pageNum}`,
+            children: item.down ? convertOutline(item.down) : [],
+          };
+        });
+      }
+      toc.push(...convertOutline(outline));
+    }
+  } catch {
+    // TOC extraction is optional - some PDFs don't have outlines
+  }
+
+  return { pageCount: doc.countPages(), toc };
 }
 
 /**
@@ -436,11 +468,12 @@ function handleRequest(request: WorkerRequest): void {
   try {
     switch (request.type) {
       case 'LOAD_DOCUMENT': {
-        const { pageCount } = loadDocument(request.docId, request.data);
+        const { pageCount, toc } = loadDocument(request.docId, request.data);
         self.postMessage({
           type: 'LOADED',
           requestId: request.requestId,
           pageCount,
+          toc,
           success: true,
         } as WorkerResponse);
         break;

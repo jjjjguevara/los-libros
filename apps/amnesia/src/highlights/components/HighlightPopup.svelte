@@ -14,9 +14,12 @@
     Unlock,
     Edit3,
     Check,
+    HelpCircle,
+    ChevronDown,
   } from 'lucide-svelte';
   import type { HighlightColor, Highlight } from '../../library/types';
   import type { PendingSelection } from '../highlight-store';
+  import type { StubType } from '../../integrations/doc-doctor-bridge';
 
   // Mode: 'new' for new selection, 'existing' for clicking on existing highlight
   export let mode: 'new' | 'existing' = 'new';
@@ -24,16 +27,28 @@
   export let existingHighlight: Highlight | null = null;
   export let position: { x: number; y: number };
   export let existingTags: string[] = [];
+  export let docDoctorConnected = false;
 
   const dispatch = createEventDispatcher<{
-    highlight: { color: HighlightColor; annotation?: string; tags?: string[]; type?: 'highlight' | 'underline' };
+    highlight: { color: HighlightColor; annotation?: string; tags?: string[]; type?: 'highlight' | 'underline'; category?: StubType };
     updateHighlight: { id: string; color?: HighlightColor; annotation?: string; tags?: string[]; locked?: boolean };
     deleteHighlight: { id: string };
     bookmark: { name?: string };
     copyText: { text: string };
     copyLink: { cfi: string; bookId: string };
+    createKnowledgeGap: { stubType: StubType; text: string; color: HighlightColor };
     close: void;
   }>();
+
+  // Knowledge gap stub types with metadata
+  const stubTypes: { type: StubType; label: string; color: HighlightColor; icon: string }[] = [
+    { type: 'verify', label: 'Needs Verification', color: 'yellow', icon: 'check-circle' },
+    { type: 'expand', label: 'Needs Expansion', color: 'green', icon: 'plus-circle' },
+    { type: 'clarify', label: 'Needs Clarification', color: 'blue', icon: 'help-circle' },
+    { type: 'question', label: 'Open Question', color: 'pink', icon: 'message-circle' },
+    { type: 'important', label: 'Key Insight', color: 'purple', icon: 'star' },
+    { type: 'citation', label: 'Needs Citation', color: 'yellow', icon: 'quote' },
+  ];
 
   const colors: { color: HighlightColor; label: string; css: string }[] = [
     { color: 'yellow', label: 'Yellow', css: '#fef3c7' },
@@ -45,6 +60,7 @@
 
   let showAnnotation = false;
   let showTags = false;
+  let showKnowledgeGap = false;
   let annotation = '';
   let selectedColor: HighlightColor = 'yellow';
   let highlightType: 'highlight' | 'underline' = 'highlight';
@@ -119,12 +135,48 @@
 
   function handleAnnotateClick() {
     showAnnotation = !showAnnotation;
-    if (showAnnotation) showTags = false;
+    if (showAnnotation) {
+      showTags = false;
+      showKnowledgeGap = false;
+    }
   }
 
   function handleTagsClick() {
     showTags = !showTags;
-    if (showTags) showAnnotation = false;
+    if (showTags) {
+      showAnnotation = false;
+      showKnowledgeGap = false;
+    }
+  }
+
+  function handleKnowledgeGapClick() {
+    showKnowledgeGap = !showKnowledgeGap;
+    if (showKnowledgeGap) {
+      showAnnotation = false;
+      showTags = false;
+    }
+  }
+
+  function handleCreateKnowledgeGap(stubType: StubType) {
+    // Find the corresponding color for this stub type
+    const stubInfo = stubTypes.find(s => s.type === stubType);
+    const color = stubInfo?.color || 'yellow';
+
+    // Dispatch event to create highlight with category and sync to Doc Doctor
+    dispatch('createKnowledgeGap', {
+      stubType,
+      text: displayText,
+      color,
+    });
+
+    // Also create a highlight with the category
+    dispatch('highlight', {
+      color,
+      annotation: `[${stubInfo?.label || stubType}]`,
+      tags: ['knowledge-gap', stubType],
+      type: 'highlight',
+      category: stubType,
+    });
   }
 
   function handleBookmark() {
@@ -355,6 +407,17 @@
         <Tag size={16} />
         Tags
       </button>
+      {#if docDoctorConnected}
+        <button
+          class="action-btn"
+          class:active={showKnowledgeGap}
+          on:click={handleKnowledgeGapClick}
+          title="Create knowledge gap (syncs to Doc Doctor)"
+        >
+          <HelpCircle size={16} />
+          Gap
+        </button>
+      {/if}
       <button class="action-btn" on:click={handleCopyLink} title="Copy link">
         <Link size={16} />
       </button>
@@ -367,6 +430,30 @@
           placeholder="Add a note..."
           rows="3"
         />
+      </div>
+    {/if}
+
+    {#if showKnowledgeGap && docDoctorConnected}
+      <div class="knowledge-gap-section">
+        <div class="gap-header">
+          <HelpCircle size={14} />
+          <span>Create Knowledge Gap</span>
+        </div>
+        <div class="gap-types">
+          {#each stubTypes as stub}
+            <button
+              class="gap-type-btn"
+              on:click={() => handleCreateKnowledgeGap(stub.type)}
+              title={stub.label}
+            >
+              <span class="gap-color-dot" style="background-color: {colors.find(c => c.color === stub.color)?.css || '#fef3c7'}"></span>
+              {stub.label}
+            </button>
+          {/each}
+        </div>
+        <div class="gap-hint">
+          Creates a highlight and syncs to Doc Doctor as a stub.
+        </div>
       </div>
     {/if}
   {/if}
@@ -698,5 +785,62 @@
   .tag-suggestion:hover {
     background: var(--background-modifier-hover);
     color: var(--text-normal);
+  }
+
+  /* Knowledge Gap Section */
+  .knowledge-gap-section {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--background-modifier-border);
+  }
+
+  .gap-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75rem;
+    font-weight: var(--font-semibold);
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+
+  .gap-types {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .gap-type-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    color: var(--text-normal);
+    transition: all 0.15s ease;
+    text-align: left;
+  }
+
+  .gap-type-btn:hover {
+    background: var(--background-modifier-hover);
+    border-color: var(--interactive-accent);
+  }
+
+  .gap-color-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .gap-hint {
+    margin-top: 8px;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    font-style: italic;
   }
 </style>

@@ -17,13 +17,16 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod annotations;
+mod bibliography;
 mod cfi;
 mod config;
 mod db;
-mod epub;
+mod document;
 mod error;
+mod formats;
 mod html;
 mod library;
+mod mupdf;
 mod ocr;
 mod opds;
 mod pdf;
@@ -119,7 +122,8 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/api/v1/health", get(health_check))
-        .nest("/api/v1/books", routes::books::router())
+        .nest("/api/v1/documents", routes::documents::router())
+        // Legacy /api/v1/books endpoint removed - use /api/v1/documents instead
         .nest("/api/v1/pdf", routes::pdf::router())
         .nest("/api/v1/upload", routes::upload::router(upload_state))
         .nest("/opds", routes::opds::router(library_cache))
@@ -128,6 +132,9 @@ async fn main() {
         .nest("/api/v1/highlights", routes::highlights::router(db_pool.clone()))
         .nest("/api/v1/annotations", routes::annotations::router())
         .nest("/api/v1/sync", routes::sync::router())
+        .nest("/api/v1/search", routes::search::router())
+        .nest("/api/v1/extract", routes::extract::router())
+        .nest("/api/v1/bibliography", routes::bibliography::router())
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(app_state);

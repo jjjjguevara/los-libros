@@ -1,0 +1,1020 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "metadata": {
+    "title": "Amnesia + Doc Doctor Ecosystem Expansion PRD",
+    "version": "1.0.0",
+    "created": "2026-01-08",
+    "updated": "2026-01-08",
+    "authors": ["Josue Guevara"],
+    "status": "approved",
+    "tags": [
+      "obsidian",
+      "pdf",
+      "epub",
+      "knowledge-management",
+      "ai",
+      "reading-intelligence"
+    ]
+  },
+
+  "vision": {
+    "problem_statements": [
+      {
+        "name": "Document Drift",
+        "description": "The rapid decay of context and retention following consumption of static documents"
+      },
+      {
+        "name": "Structural Entropy",
+        "description": "The inevitable degradation of organized knowledge repositories into unstructured, unnavigable data lakes"
+      }
+    ],
+    "solution": "Shift from passive pixel rendering to active semantic reconstruction, treating PDFs not as final artifacts but as semi-structured databases to be mined, parsed, reflowed, and interwoven with the user's knowledge graph",
+    "goals": [
+      "Transform static files into dynamic, queryable nodes within a living knowledge network",
+      "Enable local-first, privacy-preserving AI-powered reading intelligence",
+      "Unify annotation semantics across Amnesia highlights and Doc Doctor annotations",
+      "Provide both immersive (Live) and analytical (Source) reading modes"
+    ]
+  },
+
+  "architecture": {
+    "platform": "Electron (Obsidian)",
+    "rendering_engine": "MuPDF (WebAssembly)",
+    "ai_providers": [
+      {
+        "name": "Anthropic Claude",
+        "type": "cloud",
+        "use_cases": [
+          "argument_mining",
+          "fallacy_detection",
+          "claim_verification",
+          "summarization"
+        ]
+      },
+      {
+        "name": "transformers.js",
+        "type": "local",
+        "use_cases": ["embeddings", "NER", "semantic_search"]
+      }
+    ],
+    "vector_database": {
+      "name": "LanceDB",
+      "type": "embedded",
+      "format": "Lance columnar",
+      "rationale": "Serverless, runs in-process, scales to millions of embeddings with minimal RAM"
+    },
+    "template_engine": "Nunjucks",
+    "annotation_standard": "W3C Web Annotation Data Model"
+  },
+
+  "reader_modes": {
+    "concept": "Dual-mode reading inspired by Obsidian's Source/Live Preview for markdown",
+    "toggle": "Cmd/Ctrl + E",
+    "modes": {
+      "live": {
+        "name": "Live Mode (The Sanctuary)",
+        "philosophy": "Reading is an act of disappearance",
+        "experience": "Immersive, flowing",
+        "features": [
+          "Clean viewport - text only",
+          "Gentle highlights - colors appear but do not speak",
+          "Silent margins - no annotations, widgets, or AI",
+          "Continuous scroll - pages dissolve into river",
+          "Ambient metadata - reading time whispers in corner"
+        ],
+        "hidden": [
+          "Argument structure overlays",
+          "Citation previews",
+          "Prerequisite warnings",
+          "Cross-book connections",
+          "Velocity heatmaps",
+          "AI-generated content"
+        ]
+      },
+      "source": {
+        "name": "Source Mode (The Laboratory)",
+        "philosophy": "I cannot teach anybody anything. I can only make them think.",
+        "experience": "Analytical, active",
+        "features": [
+          "Argument margins - claims (blue), evidence (green), counterpoints (red)",
+          "Citation hover - Semantic Scholar abstracts on mouseover",
+          "Prerequisite alerts - 'This assumes familiarity with...'",
+          "Velocity heatmap - scrollbar glows where you slowed down",
+          "Cross-book links - 'Author B contradicts this on page 47'",
+          "ToC overlay - AI-generated outline for PDFs lacking one",
+          "Concept highlighting - key terms glow with semantic weight",
+          "Co-Reader panel - AI asks anticipated questions"
+        ],
+        "toggles": [
+          "argumentMargins",
+          "citationHover",
+          "velocityHeatmap",
+          "prerequisiteAlerts",
+          "crossBookLinks",
+          "tocOverlay",
+          "conceptHighlighting",
+          "coReaderPanel"
+        ]
+      }
+    },
+    "state_persistence": {
+      "scope_options": ["book", "session", "global"],
+      "default_mode": "live"
+    }
+  },
+
+  "unified_annotations": {
+    "principle": "Stubs (knowledge gaps) !== Annotations (captured insights)",
+    "vocabulary": {
+      "types": [
+        {
+          "key": "verify",
+          "color": "yellow",
+          "amnesia_color": "yellow",
+          "vector_family": "retrieval",
+          "purpose": "Needs fact-checking"
+        },
+        {
+          "key": "expand",
+          "color": "green",
+          "amnesia_color": "green",
+          "vector_family": "creation",
+          "purpose": "Needs more detail"
+        },
+        {
+          "key": "clarify",
+          "color": "blue",
+          "amnesia_color": "blue",
+          "vector_family": "computation",
+          "purpose": "Ambiguous, needs precision"
+        },
+        {
+          "key": "question",
+          "color": "pink",
+          "amnesia_color": "pink",
+          "vector_family": "computation",
+          "purpose": "Open question"
+        },
+        {
+          "key": "important",
+          "color": "purple",
+          "amnesia_color": "purple",
+          "vector_family": "synthesis",
+          "purpose": "Key insight"
+        },
+        {
+          "key": "citation",
+          "color": "orange",
+          "amnesia_color": "orange",
+          "vector_family": "retrieval",
+          "purpose": "Needs evidence"
+        },
+        {
+          "key": "definition",
+          "color": "teal",
+          "amnesia_color": null,
+          "vector_family": "retrieval",
+          "purpose": "Term being defined"
+        },
+        {
+          "key": "argument",
+          "color": "navy",
+          "amnesia_color": null,
+          "vector_family": "synthesis",
+          "purpose": "Main thesis"
+        },
+        {
+          "key": "evidence",
+          "color": "lime",
+          "amnesia_color": null,
+          "vector_family": "retrieval",
+          "purpose": "Supporting evidence"
+        },
+        {
+          "key": "counterpoint",
+          "color": "red",
+          "amnesia_color": null,
+          "vector_family": "synthesis",
+          "purpose": "Opposing view"
+        },
+        {
+          "key": "todo",
+          "color": "gray",
+          "amnesia_color": null,
+          "vector_family": "creation",
+          "purpose": "Task reminder"
+        },
+        {
+          "key": "connection",
+          "color": "cyan",
+          "amnesia_color": null,
+          "vector_family": "structural",
+          "purpose": "Links to other idea"
+        }
+      ],
+      "schema_driven": true,
+      "all_features_user_extensible": true,
+      "alias_support": true
+    }
+  },
+
+  "phases": [
+    {
+      "id": "phase_0",
+      "name": "Code Cleanup",
+      "duration_weeks": "1-2",
+      "risk": "zero",
+      "tasks": [
+        { "task": "Remove pdfjs-dist dependency", "impact": "-5MB" },
+        { "task": "Delete deprecated code comments", "impact": "-50 LOC" },
+        { "task": "Conditional MCP test harness", "impact": "-344 LOC" },
+        {
+          "task": "Convert 5 Calibre templates to Nunjucks",
+          "impact": "template consolidation"
+        },
+        { "task": "Remove liquid-engine.ts", "impact": "-191 LOC" },
+        {
+          "task": "Delete 10 redundant generator classes",
+          "impact": "-1696 LOC"
+        },
+        { "task": "npm uninstall liquidjs", "impact": "-700KB" }
+      ]
+    },
+    {
+      "id": "phase_1",
+      "name": "Document Enhancement",
+      "duration_weeks": "2-3",
+      "features": [
+        "ghost_toc_generator",
+        "semantic_figure_extraction",
+        "table_structure_recognition",
+        "footnote_consolidation"
+      ]
+    },
+    {
+      "id": "phase_2",
+      "name": "Reading Intelligence",
+      "duration_weeks": "2-3",
+      "features": [
+        "virtual_gaze_tracking",
+        "cognitive_load_detection",
+        "active_readometer",
+        "velocity_heatmap"
+      ]
+    },
+    {
+      "id": "phase_3",
+      "name": "Unified Annotations Vocabulary",
+      "duration_weeks": "2-3",
+      "critical": true,
+      "tasks": [
+        {
+          "task": "Create AnnotationTypeDefinition interface",
+          "plugin": "doc-doctor"
+        },
+        {
+          "task": "Define 12 default types with semantic fields",
+          "plugin": "shared"
+        },
+        {
+          "task": "Implement frontmatter sync for annotations",
+          "plugin": "doc-doctor"
+        },
+        {
+          "task": "Add category field to Highlight interface",
+          "plugin": "amnesia"
+        },
+        {
+          "task": "Create color to semantic type mapping",
+          "plugin": "amnesia"
+        },
+        {
+          "task": "Implement event-based cross-plugin sync",
+          "plugin": "shared"
+        }
+      ]
+    },
+    {
+      "id": "phase_4",
+      "name": "Cross-Document Intelligence",
+      "duration_weeks": "3-4",
+      "features": [
+        "citation_graph_spider",
+        "semantic_diff",
+        "ghost_linker_ner",
+        "cross_book_contradictions"
+      ]
+    },
+    {
+      "id": "phase_5",
+      "name": "AI-Powered Features",
+      "duration_weeks": "3-4",
+      "features": [
+        "adversarial_agent",
+        "local_rag_oracle",
+        "claim_verification",
+        "argument_mining"
+      ]
+    },
+    {
+      "id": "phase_6",
+      "name": "UI/UX Enhancements",
+      "duration_weeks": "2-3",
+      "features": ["liquid_canvas", "semantic_scrollbar", "source_live_modes"]
+    },
+    {
+      "id": "phase_7",
+      "name": "Obsidian Deep Integration",
+      "duration_weeks": "2-3",
+      "features": [
+        "virtual_file_proxy",
+        "graph_view_injection",
+        "dataview_integration",
+        "inter_plugin_communication"
+      ]
+    },
+    {
+      "id": "phase_8",
+      "name": "Dictionary Manager",
+      "duration_weeks": "3-4",
+      "features": [
+        "dictionary_service",
+        "multi_provider_api",
+        "tooltip_ui",
+        "smart_connections_linking"
+      ]
+    }
+  ],
+
+  "features": {
+    "document_enhancement": {
+      "ghost_toc_generator": {
+        "name": "Ghost ToC Generator",
+        "description": "Generate missing Table of Contents from PDF font/position analysis + AI refinement, Sanitize exisiting but unstructured ToCs",
+        "category": "document_enhancement",
+        "wow_factor": 5,
+        "complexity": "high",
+        "plugin": "amnesia",
+        "algorithm": {
+          "phase_1": {
+            "name": "Font Histogram Analysis",
+            "steps": [
+              "Extract text spans via MuPDF stext (Page → Block → Line → Span → Char)",
+              "Normalize font sizes to nearest 0.5pt bins",
+              "Build frequency distribution: F_config → C_count",
+              "Identify body text baseline (highest C_count)",
+              "Flag candidates where Size > Size_body OR Weight > Weight_body",
+              "Cluster by visual weight, assign H1-H6"
+            ],
+            "accuracy": "80%"
+          },
+          "phase_2": {
+            "name": "Semantic Density Filter",
+            "steps": [
+              "Token count constraint: < 30 words for heading candidates",
+              "Pattern matching: numbering schemas (1., 1.2, IV.)",
+              "Keyword detection: Abstract, Introduction, Methods, Conclusion",
+              "Case normalization: INTRODUCTION → Introduction"
+            ]
+          },
+          "phase_3": {
+            "name": "Spatial Heuristics",
+            "steps": [
+              "Indentation analysis: deviation from modal X_margin",
+              "Centering detection: | (PageWidth/2) - (X_start + Width/2) | < epsilon",
+              "Whitespace isolation: ΔY between blocks signals semantic breaks"
+            ]
+          },
+          "phase_4": {
+            "name": "AI Refinement",
+            "prompt": "Clean these headings to proper title case and standardize numbering",
+            "cost": "$0.01 per PDF",
+            "accuracy": "98%"
+          }
+        },
+        "dependencies": ["mupdf_wasm"]
+      },
+
+      "semantic_figure_extraction": {
+        "name": "Semantic Figure Extraction",
+        "description": "Extract figures (vector and raster) with caption association",
+        "category": "document_enhancement",
+        "wow_factor": 4,
+        "complexity": "very_high",
+        "plugin": "amnesia",
+        "algorithm": {
+          "raster_extraction": "Detect Do operators in PDF stream, extract embedded bitmaps",
+          "vector_extraction": {
+            "method": "Bounding Box Heuristic",
+            "steps": [
+              "Scan Display List for clusters of path operators (re, c)",
+              "Identify high densities within rectangular region",
+              "Associate caption via regex: ^Fig(ure)?\\.?\\s*\\d+",
+              "Rasterize bbox at 300 DPI to PNG"
+            ]
+          }
+        },
+        "dependencies": ["mupdf_wasm", "mupdf_display_list"]
+      },
+
+      "table_structure_recognition": {
+        "name": "Table Structure Recognition",
+        "description": "Reconstruct table grids into Markdown/CSV format",
+        "category": "document_enhancement",
+        "wow_factor": 4,
+        "complexity": "high",
+        "plugin": "amnesia",
+        "algorithm": {
+          "name": "Whitespace River Detection",
+          "steps": [
+            "Analyze horizontal position of text spans across consecutive lines",
+            "Identify vertical gaps (rivers) denoting column boundaries",
+            "Horizontal alignment defines rows",
+            "Intersections define cells",
+            "Reconstruct to Markdown table or CSV"
+          ]
+        },
+        "dependencies": ["mupdf_wasm"]
+      }
+    },
+
+    "reading_intelligence": {
+      "virtual_gaze_tracking": {
+        "name": "Virtual Gaze Tracking (MSD Model)",
+        "description": "Track attention via Mouse-Scroll-Dwell heuristics without eye-tracking hardware",
+        "category": "reading_intelligence",
+        "wow_factor": 4,
+        "complexity": "high",
+        "plugin": "amnesia",
+        "algorithm": {
+          "name": "Mouse-Scroll-Dwell (MSD) Model",
+          "signals": [
+            {
+              "signal": "Mouse Hover",
+              "description": "Mouse trails eye or hovers near current line"
+            },
+            {
+              "signal": "Text Selection",
+              "description": "Text tracing without intent to copy"
+            },
+            {
+              "signal": "Scroll Velocity",
+              "description": "Rate of text passage through viewport"
+            }
+          ],
+          "implementation": {
+            "sample_rate": "100ms",
+            "viewport_division": "Semantic grid corresponding to text blocks",
+            "attention_rules": [
+              "If Velocity_scroll ≈ 0 (Dwell) AND cursor over Block B → increment AttentionScore[B]",
+              "If Velocity_scroll matches reading speed (200-300 wpm) → distribute across center 50%",
+              "Apply temporal decay to prioritize recent focus"
+            ]
+          }
+        },
+        "references": ["https://research.google.com/pubs/archive/40760.pdf"]
+      },
+
+      "cognitive_load_detection": {
+        "name": "Cognitive Load Detection (Regressive Saccades)",
+        "description": "Detect comprehension difficulty via scroll oscillation patterns",
+        "category": "reading_intelligence",
+        "wow_factor": 5,
+        "complexity": "high",
+        "plugin": "amnesia",
+        "algorithm": {
+          "pattern": "Rapid Scroll Down → Scroll Up (similar magnitude, t < 2s) → Pause",
+          "interpretation": {
+            "high_complexity_oscillation": "Confusion / High Cognitive Load",
+            "low_complexity_oscillation": "Distraction / Navigation"
+          },
+          "correlation": "Flesch-Kincaid or syllable count of visible text"
+        },
+        "visualization": {
+          "type": "Confusion Heatmap",
+          "location": "Scrollbar hot zones (red/orange)",
+          "trigger": "Doc Doctor AI offers simplification"
+        }
+      },
+
+      "active_readometer": {
+        "name": "Active Readometer",
+        "description": "Semantic progress metric that tracks actual reading vs scrolling",
+        "category": "reading_intelligence",
+        "wow_factor": 4,
+        "complexity": "medium",
+        "plugin": "amnesia",
+        "algorithm": {
+          "api": "Intersection Observer",
+          "rule": "Block marked 'Read' only if in Focus Zone for t > WordCount/ReadingSpeed_avg",
+          "storage": "IndexedDB or SQLite, keyed by file hash"
+        },
+        "visualization": {
+          "type": "Reading Density Rail",
+          "states": [
+            { "color": "white", "meaning": "Unseen" },
+            { "color": "light_blue", "meaning": "Skimmed (passed too fast)" },
+            { "color": "deep_blue", "meaning": "Read (met time threshold)" },
+            { "color": "gold", "meaning": "Studied (high dwell + annotations)" }
+          ]
+        }
+      },
+
+      "velocity_heatmap": {
+        "name": "Velocity Heatmap",
+        "description": "Scrollbar overlay showing reading speed per paragraph",
+        "category": "reading_intelligence",
+        "wow_factor": 3,
+        "complexity": "low",
+        "plugin": "amnesia",
+        "visualization": {
+          "colors": {
+            "green": ">300 WPM (fast)",
+            "yellow": "150-300 WPM (medium)",
+            "red": "<150 WPM (slow)"
+          },
+          "location": "Scrollbar overlay"
+        }
+      }
+    },
+
+    "cross_document_intelligence": {
+      "citation_graph_spider": {
+        "name": "Citation Graph (The Spider Module)",
+        "description": "Visualize citation lineage with Ghost Nodes for missing papers",
+        "category": "cross_document_intelligence",
+        "wow_factor": 5,
+        "complexity": "very_high",
+        "plugin": "amnesia",
+        "architecture": {
+          "tier_1": {
+            "name": "Fast Extraction",
+            "method": "Regex-based parsing (citation.js, anystyle)",
+            "use_case": "Structured bibliographies"
+          },
+          "tier_2": {
+            "name": "Robust Extraction",
+            "method": "GROBID (Java, Docker sidecar)",
+            "use_case": "Complex PDF structure"
+          }
+        },
+        "resolution": {
+          "match": "Hard link [[...]] to existing vault note",
+          "no_match": "Ghost Node - paper cited but not in library"
+        },
+        "visualization": {
+          "library": "Cytoscape.js or Ogma",
+          "layout": "Current paper as central node",
+          "in_degree": "Papers in vault that cite current document (Backward Chaining)",
+          "out_degree": "Bibliography references (Forward Chaining)",
+          "colors": {
+            "green": "Exists in vault",
+            "grey": "Ghost Node (Knowledge Gap)"
+          }
+        },
+        "dependencies": ["cytoscape_js", "grobid"]
+      },
+
+      "semantic_diff": {
+        "name": "Semantic Diff (Concept Drift)",
+        "description": "Track meaning changes between document versions, not just text changes",
+        "category": "cross_document_intelligence",
+        "wow_factor": 4,
+        "complexity": "high",
+        "plugin": "amnesia",
+        "algorithm": {
+          "steps": [
+            "Segment both documents into paragraphs",
+            "Generate embeddings via transformers.js (Xenova/all-MiniLM-L6-v2)",
+            "Compute Cosine Similarity between corresponding chunks"
+          ],
+          "thresholds": [
+            {
+              "range": "> 0.98",
+              "interpretation": "Identical (minor punctuation)"
+            },
+            {
+              "range": "0.8 - 0.95",
+              "interpretation": "Rephrasing (same meaning)"
+            },
+            {
+              "range": "< 0.8",
+              "interpretation": "Semantic Shift (meaning changed)"
+            }
+          ]
+        },
+        "visualization": "Highlight Low Similarity regions",
+        "dependencies": ["transformers_js", "lancedb"]
+      },
+
+      "ghost_linker_ner": {
+        "name": "Ghost Linker (Auto-Linking via NER)",
+        "description": "Automatically link PDF text to vault notes using Named Entity Recognition",
+        "category": "cross_document_intelligence",
+        "wow_factor": 5,
+        "complexity": "high",
+        "plugin": "amnesia",
+        "algorithm": {
+          "model": "Xenova/bert-base-NER (quantized, WebGPU)",
+          "entities": [
+            "PER (Persons)",
+            "ORG (Organizations)",
+            "LOC (Locations)",
+            "MISC (Concepts)"
+          ],
+          "matching": "Fuzzy match against Obsidian vault file list and aliases"
+        },
+        "visualization": {
+          "type": "Ghost Links",
+          "appearance": "Subtle, clickable overlays resembling [[...]]",
+          "ephemeral": true,
+          "reification": "Right-click to solidify permanently"
+        },
+        "dependencies": ["transformers_js", "webgpu"]
+      },
+
+      "cross_book_contradictions": {
+        "name": "Cross-Book Contradiction Detection",
+        "description": "Find when Author A says X but Author B disagrees",
+        "category": "cross_document_intelligence",
+        "wow_factor": 4,
+        "complexity": "high",
+        "plugin": "shared",
+        "algorithm": {
+          "steps": [
+            "Get all highlights on topic",
+            "Cluster by book",
+            "For each pair of books, LLM pairwise comparison",
+            "Store contradictions with confidence scores"
+          ]
+        },
+        "dependencies": ["anthropic_api", "embeddings"]
+      }
+    },
+
+    "ai_powered": {
+      "adversarial_agent": {
+        "name": "Adversarial Reading Agent (Fallacy Detection)",
+        "description": "Critiques arguments instead of summarizing them",
+        "category": "ai_powered",
+        "wow_factor": 5,
+        "complexity": "medium",
+        "plugin": "doc-doctor",
+        "architecture": {
+          "name": "Chain of Verification",
+          "steps": [
+            {
+              "step": 1,
+              "prompt": "Extract the core claim and its supporting premises from the selection"
+            },
+            {
+              "step": 2,
+              "prompt": "Evaluate reasoning against fallacies: Ad Hominem, Straw Man, False Dichotomy, Circular Reasoning, Correlation/Causation"
+            },
+            {
+              "step": 3,
+              "prompt": "Does the text provide empirical evidence for premises? Identify unsupported assertions"
+            },
+            {
+              "step": 4,
+              "output": "JSON: {fallacy_type, confidence_score, explanation}"
+            }
+          ]
+        },
+        "visualization": "Warning icon in margin with hover critique",
+        "dependencies": ["anthropic_api"]
+      },
+
+      "local_rag_oracle": {
+        "name": "Local RAG Oracle",
+        "description": "Privacy-preserving retrieval-augmented generation - data never leaves machine until final query",
+        "category": "ai_powered",
+        "wow_factor": 5,
+        "complexity": "very_high",
+        "plugin": "amnesia",
+        "stack": {
+          "database": "LanceDB (embedded, serverless)",
+          "embeddings": "transformers.js (supbase/gte-small q4, WebGPU)",
+          "orchestration": "LangChain.js"
+        },
+        "workflow": [
+          {
+            "step": "Ingestion",
+            "action": "Extract text via MuPDF, chunk (500 tokens, 50 overlap), embed, index in LanceDB"
+          },
+          { "step": "Query", "action": "User asks question about document" },
+          {
+            "step": "Retrieval",
+            "action": "Vector similarity search for top-k chunks"
+          },
+          {
+            "step": "Synthesis",
+            "action": "Chunks + query sent to Claude 3.5 Sonnet"
+          },
+          {
+            "step": "Attribution",
+            "action": "Answer includes citations with PDF coordinate deep links"
+          }
+        ],
+        "dependencies": [
+          "lancedb",
+          "langchain_js",
+          "transformers_js",
+          "anthropic_api"
+        ]
+      },
+
+      "argument_mining": {
+        "name": "Argument Mining",
+        "description": "Extract claims, evidence, and counterpoints from text",
+        "category": "ai_powered",
+        "wow_factor": 5,
+        "complexity": "high",
+        "plugin": "doc-doctor",
+        "schema": {
+          "claims": {
+            "fields": ["text", "position", "confidence", "supportedBy"]
+          },
+          "evidence": {
+            "fields": ["id", "text", "type", "supports"],
+            "types": ["data", "citation", "example", "authority"]
+          },
+          "counterpoints": { "fields": ["text", "addressedBy"] }
+        },
+        "visualization": "Margins: Claims (blue), Evidence (green), Counterpoints (red)",
+        "cost": "$0.10 per article",
+        "dependencies": ["anthropic_api"]
+      },
+
+      "claim_verification": {
+        "name": "Automated Claim Verification",
+        "description": "Identify empirical claims and check for citation/data support",
+        "category": "ai_powered",
+        "wow_factor": 4,
+        "complexity": "medium",
+        "plugin": "doc-doctor",
+        "prompt": "Identify all empirical claims. For each, check if supported by citation or data. Flag unsupported claims.",
+        "visualization": "Truth Table overlay, color-coded by evidentiary support",
+        "dependencies": ["anthropic_api"]
+      }
+    },
+
+    "ui_ux": {
+      "liquid_canvas": {
+        "name": "Liquid Canvas (Tear-Out Excerpts)",
+        "description": "LiquidText-style document deconstruction with visual lineage",
+        "category": "ui_ux",
+        "wow_factor": 5,
+        "complexity": "high",
+        "plugin": "amnesia",
+        "implementation": {
+          "technology": "React Portals over PDF Canvas",
+          "workflow": [
+            "User selects text/image → Drag handle appears",
+            "Dragging instantiates Card component with excerpt",
+            "Card retains deep link: pdf://file.pdf#page=3&rect=100,200,300,400",
+            "Bezier curves (D3.js/SVG) connect Card to source, update on scroll"
+          ]
+        },
+        "dependencies": ["react", "d3_js"]
+      },
+
+      "semantic_scrollbar": {
+        "name": "Semantic Scrollbar (Heatmap Rail)",
+        "description": "Repurpose scrollbar as multi-layer data visualization",
+        "category": "ui_ux",
+        "wow_factor": 4,
+        "complexity": "medium",
+        "plugin": "amnesia",
+        "visualization": {
+          "width": "20px canvas on right edge",
+          "layers": [
+            {
+              "layer": 1,
+              "name": "Heatmap",
+              "content": "Reading density (blue gradient)"
+            },
+            {
+              "layer": 2,
+              "name": "Structure",
+              "content": "Colored bands for sections (Intro, Methods, Results)"
+            },
+            {
+              "layer": 3,
+              "name": "Search",
+              "content": "Tick marks for search results or Ghost Links"
+            }
+          ],
+          "interaction": "Click jumps to semantic location, not pixel offset"
+        }
+      }
+    },
+
+    "obsidian_integration": {
+      "virtual_file_proxy": {
+        "name": "Virtual File Proxy",
+        "description": "Expose PDFs to Dataview as virtual .md files",
+        "category": "obsidian_integration",
+        "wow_factor": 4,
+        "complexity": "very_high",
+        "plugin": "amnesia",
+        "mechanism": {
+          "virtual_file": "For Paper.pdf, register virtual Paper.md in metadata cache",
+          "content": "Extracted text of PDF",
+          "frontmatter": "Authors, Year, DOI, Readometer Score, Fallacy Count"
+        },
+        "use_case": "Dataview queries: TABLE read-score, authors FROM 'Papers' WHERE read-score > 50"
+      },
+
+      "graph_view_injection": {
+        "name": "Graph View Injection",
+        "description": "Add Ghost Nodes to Obsidian's Graph View for uncaptured citations",
+        "category": "obsidian_integration",
+        "wow_factor": 4,
+        "complexity": "high",
+        "plugin": "amnesia",
+        "mechanism": {
+          "hook": "Intercept getNodes method of graph renderer",
+          "injection": "Inject node data for citations without files",
+          "styling": "Dashed borders, grey color for Ghost Nodes"
+        },
+        "value": "Visualize potential graph - knowledge you COULD have"
+      },
+
+      "inter_plugin_communication": {
+        "name": "Inter-Plugin Communication (IPC)",
+        "description": "Event bus for plugin ecosystem integration",
+        "category": "obsidian_integration",
+        "wow_factor": 3,
+        "complexity": "medium",
+        "plugin": "amnesia",
+        "api": "app.plugins.plugins['amnesia'].api",
+        "events": ["on-highlight", "on-read-progress", "on-citation-found"],
+        "integration_example": "Highlighting definition → triggers flashcard in Spaced Repetition plugin"
+      }
+    },
+
+    "dictionary": {
+      "dictionary_service": {
+        "name": "Dictionary Manager",
+        "description": "Multi-provider dictionary with atomic note generation",
+        "category": "dictionary",
+        "wow_factor": 4,
+        "complexity": "medium",
+        "plugin": "amnesia",
+        "cache_strategy": {
+          "L1": { "type": "Memory", "ttl": "1 hour", "entries": 500 },
+          "L2": { "type": "IndexedDB", "ttl": "7 days", "size": "50MB" },
+          "L3": { "type": "Filesystem", "ttl": "30 days", "notes": true }
+        },
+        "providers": [
+          { "name": "Free Dictionary API", "priority": 1, "auth": false },
+          { "name": "Wiktionary", "priority": 2, "auth": false },
+          { "name": "Merriam-Webster", "priority": 3, "auth": "api_key" }
+        ]
+      }
+    }
+  },
+
+  "integrations": {
+    "external_tools": [
+      {
+        "name": "Semantic Scholar",
+        "type": "api",
+        "cost": "free",
+        "papers": "214M+",
+        "features": [
+          "paper_search",
+          "author_search",
+          "TLDRs",
+          "embeddings",
+          "citations"
+        ]
+      },
+      {
+        "name": "Docling",
+        "type": "local",
+        "cost": "free",
+        "accuracy": "97.9%",
+        "features": ["table_extraction", "layout_analysis"]
+      },
+      {
+        "name": "OCRmyPDF",
+        "type": "subprocess",
+        "cost": "free",
+        "languages": "109+",
+        "features": ["searchable_text_layer", "deskew", "pdf_a_output"]
+      },
+      {
+        "name": "GROBID",
+        "type": "docker_sidecar",
+        "cost": "free",
+        "features": ["citation_extraction", "pdf_structure_parsing"]
+      },
+      {
+        "name": "Zotero",
+        "type": "api",
+        "cost": "free",
+        "features": ["citation_management", "highlight_linking"]
+      },
+      {
+        "name": "Readwise",
+        "type": "api",
+        "cost": "$8/month",
+        "features": ["spaced_repetition", "highlight_sync"]
+      }
+    ],
+    "obsidian_plugins": [
+      {
+        "name": "Smart Connections",
+        "integration": "vector_similarity",
+        "features": ["auto_link_highlights", "semantic_search"]
+      },
+      {
+        "name": "Dataview",
+        "integration": "virtual_file_proxy",
+        "features": ["query_pdf_contents"]
+      },
+      {
+        "name": "Spaced Repetition",
+        "integration": "event_bus",
+        "features": ["flashcard_generation"]
+      },
+      {
+        "name": "Graph View",
+        "integration": "node_injection",
+        "features": ["ghost_nodes"]
+      }
+    ]
+  },
+
+  "metrics": {
+    "core": [
+      {
+        "metric": "Bundle size",
+        "before": "~15MB",
+        "after": "~8MB",
+        "improvement": "-47%"
+      },
+      { "metric": "Generator classes", "before": 12, "after": 1 },
+      { "metric": "Template engines", "before": 2, "after": 1 },
+      {
+        "metric": "Calibre search (10k books)",
+        "before": "1000ms",
+        "after": "20ms"
+      },
+      { "metric": "Annotation types (shared)", "before": 0, "after": 12 }
+    ],
+    "features": [
+      { "feature": "ToC Generation (rule-based)", "target": "80%+ accuracy" },
+      { "feature": "ToC Generation (AI)", "target": "98%+ accuracy" },
+      { "feature": "Citation Extraction", "target": "90%+ precision" },
+      { "feature": "Cross-Book Matching", "target": "<500ms for 100 books" },
+      { "feature": "Concept Map Render", "target": "60 FPS on 500 nodes" },
+      { "feature": "Smart Connections Link", "target": "<200ms per highlight" },
+      { "feature": "Semantic Scholar API", "target": "<1s response" },
+      { "feature": "Local RAG Query", "target": "<2s end-to-end" }
+    ]
+  },
+
+  "risks": [
+    {
+      "risk": "LLM API costs",
+      "mitigation": "Aggressive caching, local models for embeddings/NER, user-controlled API key",
+      "severity": "medium"
+    },
+    {
+      "risk": "WASM bundle size",
+      "mitigation": "Lazy loading, code splitting, conditional features",
+      "severity": "medium"
+    },
+    {
+      "risk": "Cross-plugin compatibility",
+      "mitigation": "Event-based loose coupling, versioned APIs, graceful degradation",
+      "severity": "low"
+    },
+    {
+      "risk": "Privacy concerns with cloud AI",
+      "mitigation": "Local-first architecture, clear data flow documentation, opt-in cloud features",
+      "severity": "high"
+    }
+  ],
+
+  "references": {
+    "research_documents": [
+      "/Users/josueguevara/Documents/Builds/amnesia/docs/research/2026-01-08/Obsidian Plugin Research Amnesia Doc Doctor.md"
+    ],
+    "technical": [
+      "MuPDF documentation: https://pymupdf.readthedocs.io",
+      "transformers.js: https://huggingface.co/docs/transformers.js",
+      "LanceDB: https://lancedb.com",
+      "Cytoscape.js: https://js.cytoscape.org",
+      "W3C Web Annotation: https://www.w3.org/TR/annotation-model/"
+    ],
+    "academic": [
+      "Eye-gaze and cursor alignment: https://research.google.com/pubs/archive/40760.pdf",
+      "Font histogram for ToC: https://aclanthology.org/2020.fnp-1.30.pdf",
+      "XY-Cut algorithm: https://stackoverflow.com/questions/27549574"
+    ]
+  }
+}

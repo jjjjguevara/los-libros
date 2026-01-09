@@ -214,10 +214,13 @@ export class ReaderView extends ItemView {
   /**
    * Navigate to a highlight using CFI and text for precise location
    * Called by the global sidebar for accurate highlight navigation
+   * @param cfi - The CFI of the highlight
+   * @param text - The text content of the highlight
+   * @param color - Optional highlight color for visual effect
    */
-  navigateToHighlight(cfi: string, text: string): void {
+  navigateToHighlight(cfi: string, text: string, color?: string): void {
     if (this.component) {
-      (this.component as any).navigateToHighlight(cfi, text);
+      (this.component as any).navigateToHighlight(cfi, text, color);
     }
   }
 

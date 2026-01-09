@@ -13,6 +13,7 @@ import type {
     FieldAlias,
     ReaderVaultSyncMode,
     ReaderVaultConflictStrategy,
+    DocDoctorConflictStrategy,
 } from '../settings';
 import {
     createTabHeader,
@@ -328,6 +329,75 @@ export function SyncSettings({ plugin, containerEl }: SyncSettingsProps): void {
             .setDynamicTooltip()
             .onChange(async (value) => {
                 settings.readerVaultSync.hubRegenerateDelay = value;
+                await plugin.saveSettings();
+            }));
+
+    // ==========================================================================
+    // DOC DOCTOR INTEGRATION
+    // ==========================================================================
+
+    const docDoctorSection = createSection(containerEl, 'stethoscope', 'Doc Doctor Integration');
+
+    createExplainerBox(docDoctorSection,
+        'Sync knowledge-gap highlights to Doc Doctor stubs for AI processing. ' +
+        'Only knowledge-gap types (verify, expand, clarify, question) create stubs. ' +
+        'Insight types (important, citation) stay in Amnesia only as complete annotations. ' +
+        'Resolved stubs flow back to update your highlight annotations.'
+    );
+
+    new Setting(docDoctorSection)
+        .setName('Enable Doc Doctor Sync')
+        .setDesc('Connect knowledge-gap highlights to Doc Doctor stubs')
+        .addToggle(toggle => toggle
+            .setValue(settings.docDoctorSync.enabled)
+            .onChange(async (value) => {
+                settings.docDoctorSync.enabled = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(docDoctorSection)
+        .setName('Auto-Sync Knowledge Gaps')
+        .setDesc('Automatically sync knowledge-gap highlights (verify/expand/clarify/question) to stubs')
+        .addToggle(toggle => toggle
+            .setValue(settings.docDoctorSync.autoSyncHighlights)
+            .onChange(async (value) => {
+                settings.docDoctorSync.autoSyncHighlights = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(docDoctorSection)
+        .setName('Sync on Create')
+        .setDesc('Immediately create a stub when a knowledge-gap highlight is made')
+        .addToggle(toggle => toggle
+            .setValue(settings.docDoctorSync.syncOnCreate)
+            .onChange(async (value) => {
+                settings.docDoctorSync.syncOnCreate = value;
+                await plugin.saveSettings();
+            }));
+
+    new Setting(docDoctorSection)
+        .setName('Propagate Resolutions')
+        .setDesc('When a stub is resolved in Doc Doctor, update the linked highlight annotation')
+        .addToggle(toggle => toggle
+            .setValue(settings.docDoctorSync.propagateResolutions)
+            .onChange(async (value) => {
+                settings.docDoctorSync.propagateResolutions = value;
+                await plugin.saveSettings();
+            }));
+
+    createSubsectionHeader(docDoctorSection, 'Conflict Resolution');
+
+    new Setting(docDoctorSection)
+        .setName('Conflict Strategy')
+        .setDesc('How to resolve conflicts when highlight and stub are both modified')
+        .addDropdown(dropdown => dropdown
+            .addOption('newest-wins', 'Newest Wins (most recent modification)')
+            .addOption('amnesia-wins', 'Amnesia Wins (prefer highlight data)')
+            .addOption('dd-wins', 'Doc Doctor Wins (prefer stub data)')
+            .addOption('manual', 'Ask User (show conflict modal)')
+            .setValue(settings.docDoctorSync.conflictStrategy)
+            .onChange(async (value) => {
+                settings.docDoctorSync.conflictStrategy = value as DocDoctorConflictStrategy;
                 await plugin.saveSettings();
             }));
 

@@ -20,7 +20,9 @@
   import TocTab from './TocTab.svelte';
   import SearchTab from './SearchTab.svelte';
   import ImageLightbox from '../../reader/components/ImageLightbox.svelte';
-  import type { TocEntry } from '../../reader/renderer/types';
+  import type { TocEntry, SpineItem } from '../../reader/renderer/types';
+  import type { Locator } from '../../reader/navigator/navigator-interface';
+  import type { TocExpandedState } from './toc/types';
   import { getSearchIndex, type SearchResult } from '../../reader/search-index';
   import {
     Search,
@@ -51,6 +53,9 @@
 
   // ToC state
   let toc: TocEntry[] = [];
+  let spineItems: SpineItem[] = [];
+  let currentLocator: Locator | null = null;
+  let tocExpandedState: TocExpandedState = [];
   let currentChapter: string | null = null;
 
   // Search state
@@ -124,6 +129,9 @@
     bookImages = [];
     imagesLoadedForBook = null;
     toc = [];
+    spineItems = [];
+    currentLocator = null;
+    tocExpandedState = [];
     currentChapter = null;
   }
 
@@ -215,7 +223,7 @@
     sidebarStore.clearSearch();
   }
 
-  function navigateToCfi(cfi: string, text?: string) {
+  function navigateToCfi(cfi: string, text?: string, color?: HighlightColor) {
     if (!activeBookPath) {
       return;
     }
@@ -226,7 +234,7 @@
       if (view.bookPath === activeBookPath || view.getState?.()?.bookPath === activeBookPath) {
         // Use text-based navigation for better accuracy
         if (text) {
-          view.navigateToHighlight?.(cfi, text);
+          view.navigateToHighlight?.(cfi, text, color);
         } else {
           view.navigateToCfi?.(cfi);
         }
@@ -343,12 +351,38 @@
   }
 
   // Method to update ToC from reader
-  export function setToc(entries: TocEntry[]) {
+  export function setToc(entries: TocEntry[], spine?: SpineItem[], initialExpandedState?: TocExpandedState) {
     toc = entries;
+    if (spine) {
+      spineItems = spine;
+    }
+    if (initialExpandedState) {
+      tocExpandedState = initialExpandedState;
+    }
   }
 
   export function setCurrentChapter(chapter: string | null) {
     currentChapter = chapter;
+  }
+
+  // Method to update current location from reader (for progress tracking)
+  export function updateLocation(locator: Locator) {
+    currentLocator = locator;
+    // Also update currentChapter for backward compatibility
+    if (locator.href) {
+      currentChapter = locator.href;
+    }
+  }
+
+  // Handle save of TOC expanded state
+  function handleSaveTocExpandedState(state: TocExpandedState) {
+    tocExpandedState = state;
+    // Save to book settings if we have an active book
+    if (activeBookId && plugin.bookSettingsStore) {
+      plugin.bookSettingsStore.updateBookSettings(activeBookId, {
+        tocExpandedState: state,
+      });
+    }
   }
 
   // Search methods
@@ -507,13 +541,16 @@
     {:else if activeTab === 'toc'}
       <TocTab
         {toc}
-        {currentChapter}
+        {spineItems}
+        currentLocator={currentLocator}
+        initialExpandedState={tocExpandedState}
+        onSaveExpandedState={handleSaveTocExpandedState}
         on:navigate={(e) => navigateToTocEntry(e.detail.href)}
       />
     {:else if activeTab === 'highlights'}
       <HighlightsTab
         highlights={filteredHighlights}
-        on:navigate={(e) => navigateToCfi(e.detail.cfi, e.detail.text)}
+        on:navigate={(e) => navigateToCfi(e.detail.cfi, e.detail.text, e.detail.color)}
         on:delete={(e) => deleteHighlight(e.detail.id)}
       />
     {:else if activeTab === 'bookmarks'}

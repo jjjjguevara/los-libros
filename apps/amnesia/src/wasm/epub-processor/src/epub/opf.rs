@@ -152,10 +152,19 @@ pub fn find_toc_doc(
     doc: &roxmltree::Document,
     manifest: &HashMap<String, ManifestItem>,
 ) -> TocDocInfo {
+    // Debug: Log manifest items with properties
+    for (id, item) in manifest.iter() {
+        if item.properties.is_some() {
+            web_sys::console::log_1(&format!("[EPUB] Manifest item '{}': href='{}', properties={:?}",
+                id, item.href, item.properties).into());
+        }
+    }
+
     // Try to find NAV (EPUB 3) first
     for item in manifest.values() {
         if let Some(props) = &item.properties {
             if props.contains("nav") {
+                web_sys::console::log_1(&format!("[EPUB] Found NAV document: {}", item.href).into());
                 return TocDocInfo::Nav { href: item.href.clone() };
             }
         }
@@ -165,13 +174,21 @@ pub fn find_toc_doc(
     for node in doc.descendants() {
         if node.tag_name().name() == "spine" {
             if let Some(toc_id) = node.attribute("toc") {
+                web_sys::console::log_1(&format!("[EPUB] Spine has toc attribute: '{}'", toc_id).into());
                 if let Some(ncx_item) = manifest.get(toc_id) {
+                    web_sys::console::log_1(&format!("[EPUB] Found NCX document: {}", ncx_item.href).into());
                     return TocDocInfo::Ncx { href: ncx_item.href.clone() };
+                } else {
+                    web_sys::console::log_1(&format!("[EPUB] NCX id '{}' not found in manifest. Available: {:?}",
+                        toc_id, manifest.keys().collect::<Vec<_>>()).into());
                 }
+            } else {
+                web_sys::console::log_1(&"[EPUB] Spine element has no 'toc' attribute".into());
             }
         }
     }
 
+    web_sys::console::log_1(&"[EPUB] No NAV or NCX found, will fallback to spine".into());
     TocDocInfo::None
 }
 

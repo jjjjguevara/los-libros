@@ -2,62 +2,99 @@
   /**
    * Table of Contents Tab Component
    *
-   * Displays book table of contents using Obsidian's tree-item pattern.
-   * Features: hierarchical nesting, current chapter highlighting, navigation.
+   * Displays book table of contents with progress tracking, expand/collapse controls.
+   * Features: hierarchical nesting, per-chapter progress bars, book progress bar,
+   * keyboard navigation, state persistence.
    */
-  import { createEventDispatcher } from 'svelte';
-  import type { TocEntry } from '../../reader/renderer/types';
-  import { List } from 'lucide-svelte';
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import type { TocEntry, SpineItem } from '../../reader/renderer/types';
+  import type { Locator } from '../../reader/navigator/navigator-interface';
+  import type { TocEntryWithProgress, BookProgress, TocExpandedState } from './toc/types';
+  import { TocProgressCalculator } from './toc/TocProgressCalculator';
+  import { TocExpandedStateManager } from './toc/TocExpandedState';
+  import { List, ChevronsDownUp, ChevronsUpDown } from 'lucide-svelte';
   import TocEntryItem from './TocEntryItem.svelte';
 
   export let toc: TocEntry[] = [];
-  export let currentChapter: string | null = null;
+  export let spineItems: SpineItem[] = [];
+  export let currentLocator: Locator | null = null;
+  export let initialExpandedState: TocExpandedState = [];
+  export let onSaveExpandedState: ((state: TocExpandedState) => void) | null = null;
 
   const dispatch = createEventDispatcher<{
     navigate: { href: string };
   }>();
 
-  let expandedItems = new Set<string>();
-
-  // Auto-expand items that contain the current chapter on initial load
-  $: if (currentChapter && expandedItems.size === 0) {
-    expandToCurrentChapter(toc, currentChapter);
+  // Initialize calculator when spine items change
+  let calculator: TocProgressCalculator | null = null;
+  $: if (spineItems.length > 0) {
+    calculator = new TocProgressCalculator(spineItems);
   }
 
-  function expandToCurrentChapter(entries: TocEntry[], target: string): boolean {
-    for (const entry of entries) {
-      const isCurrent = isCurrentEntry(entry, target);
-      const childContains = entry.children.length > 0 && expandToCurrentChapter(entry.children, target);
+  // Initialize expanded state manager
+  let expandedStateManager: TocExpandedStateManager;
+  let expandedItems = new Set<string>(initialExpandedState);
 
-      if (isCurrent || childContains) {
-        expandedItems.add(entry.id);
-        expandedItems = expandedItems;
-        return true;
+  onMount(() => {
+    expandedStateManager = new TocExpandedStateManager(
+      initialExpandedState,
+      (state) => {
+        expandedItems = new Set(state);
+        onSaveExpandedState?.(state);
       }
-    }
-    return false;
-  }
+    );
+  });
 
-  function isCurrentEntry(entry: TocEntry, chapter: string | null): boolean {
-    if (!chapter) return false;
-    const entryPath = entry.href.split('#')[0];
-    const currentPath = chapter.split('#')[0];
-    return entryPath === currentPath ||
-           currentPath.endsWith(entryPath) ||
-           entryPath.endsWith(currentPath);
+  // Compute enhanced TOC with progress
+  let enhancedToc: TocEntryWithProgress[] = [];
+  let bookProgress: BookProgress = {
+    currentSpineIndex: 0,
+    currentHref: '',
+    currentChapterProgress: 0,
+    totalProgression: 0,
+    chaptersRead: 0,
+    totalChapters: 0,
+    percentComplete: 0,
+  };
+
+  $: if (calculator && toc.length > 0) {
+    enhancedToc = calculator.enhanceTocWithProgress(toc, currentLocator);
+    bookProgress = calculator.calculateBookProgress(currentLocator);
+
+    // Auto-expand to current chapter when locator changes
+    if (expandedStateManager && currentLocator) {
+      expandedStateManager.expandToCurrent(enhancedToc);
+    }
   }
 
   function toggleExpand(id: string) {
-    if (expandedItems.has(id)) {
-      expandedItems.delete(id);
+    if (expandedStateManager) {
+      expandedStateManager.toggle(id);
     } else {
-      expandedItems.add(id);
+      // Fallback for before onMount
+      if (expandedItems.has(id)) {
+        expandedItems.delete(id);
+      } else {
+        expandedItems.add(id);
+      }
+      expandedItems = expandedItems;
     }
-    expandedItems = expandedItems;
   }
 
   function handleNavigate(href: string) {
     dispatch('navigate', { href });
+  }
+
+  function expandAll() {
+    if (expandedStateManager && enhancedToc.length > 0) {
+      expandedStateManager.expandAll(enhancedToc);
+    }
+  }
+
+  function collapseAll() {
+    if (expandedStateManager) {
+      expandedStateManager.collapseAll();
+    }
   }
 
   function getTotalCount(entries: TocEntry[]): number {
@@ -78,14 +115,44 @@
     </div>
   {:else}
     <div class="toc-header">
-      <span class="toc-count">{getTotalCount(toc)} chapters</span>
+      <div class="toc-header-top">
+        <span class="toc-count">{getTotalCount(toc)} chapters</span>
+        <div class="toc-header-actions">
+          <button
+            class="toc-header-btn"
+            on:click={expandAll}
+            title="Expand All"
+            aria-label="Expand all sections"
+          >
+            <ChevronsUpDown size={14} />
+          </button>
+          <button
+            class="toc-header-btn"
+            on:click={collapseAll}
+            title="Collapse All"
+            aria-label="Collapse all sections"
+          >
+            <ChevronsDownUp size={14} />
+          </button>
+        </div>
+      </div>
+      {#if bookProgress.totalProgression > 0}
+        <div class="toc-book-progress">
+          <div class="toc-book-progress-bar">
+            <div
+              class="toc-book-progress-fill"
+              style:width="{bookProgress.totalProgression}%"
+            ></div>
+          </div>
+          <span class="toc-book-progress-text">{bookProgress.totalProgression}%</span>
+        </div>
+      {/if}
     </div>
 
-    <div class="toc-tree">
-      {#each toc as entry (entry.id)}
+    <div class="toc-tree" role="tree">
+      {#each enhancedToc as entry (entry.id)}
         <TocEntryItem
           {entry}
-          {currentChapter}
           {expandedItems}
           level={0}
           on:navigate={(e) => handleNavigate(e.detail.href)}
@@ -125,15 +192,75 @@
 
   .toc-header {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    gap: 6px;
     padding: 6px 8px;
     border-bottom: 1px solid var(--background-modifier-border);
     flex-shrink: 0;
   }
 
+  .toc-header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
   .toc-count {
     font-size: var(--font-ui-smaller);
     color: var(--text-muted);
+  }
+
+  .toc-header-actions {
+    display: flex;
+    gap: 2px;
+  }
+
+  .toc-header-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-s);
+    transition: background 0.1s, color 0.1s;
+  }
+
+  .toc-header-btn:hover {
+    background: var(--background-modifier-hover);
+    color: var(--text-normal);
+  }
+
+  .toc-book-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .toc-book-progress-bar {
+    flex: 1;
+    height: 4px;
+    background: var(--background-modifier-border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .toc-book-progress-fill {
+    height: 100%;
+    background: var(--interactive-accent);
+    border-radius: 2px;
+    transition: width 300ms ease;
+  }
+
+  .toc-book-progress-text {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    min-width: 32px;
+    text-align: right;
   }
 
   .toc-tree {

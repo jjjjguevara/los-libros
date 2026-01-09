@@ -9,11 +9,17 @@
 //! - Search with bounding boxes for highlighting
 //! - Actual font metadata extraction
 //! - Native page labels support
+//! - PDF annotation extraction (highlights, underlines, comments)
 
+pub mod annotation_extractor;
 mod cache;
 mod mupdf_parser;
 mod types;
 
+pub use annotation_extractor::{
+    extract_annotations, ExtractedAnnotation, ExtractedAnnotationType, ExtractionOptions,
+    ExtractionResult, ExtractionStats,
+};
 pub use cache::PdfCache;
 pub use mupdf_parser::{PdfParseError, PdfParser};
 pub use types::{

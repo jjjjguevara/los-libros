@@ -166,6 +166,23 @@ export class WasmBookProvider implements BookProvider {
     // Generate an ID for the metadata if not present
     const metadataId = wasm.metadata.identifier || wasm.id;
 
+    // Convert spine items
+    const spine = wasm.spine.map((item) => ({
+      id: item.id,
+      href: item.href,
+      mediaType: item.mediaType,
+      linear: item.linear,
+    }));
+
+    // Convert TOC entries, with fallback to generate from spine if empty
+    let toc = wasm.toc.map((entry) => this.convertTocEntry(entry));
+
+    if (toc.length === 0 && spine.length > 0) {
+      console.log(`[WasmProvider] TOC is empty, generating from spine (${spine.length} items)`);
+      toc = this.generateTocFromSpine(spine);
+      console.log(`[WasmProvider] Generated ${toc.length} TOC entries from spine`);
+    }
+
     return {
       id: wasm.id,
       metadata: {
@@ -181,14 +198,24 @@ export class WasmBookProvider implements BookProvider {
         description: wasm.metadata.description,
         coverHref: wasm.metadata.coverHref,
       },
-      spine: wasm.spine.map((item) => ({
-        id: item.id,
-        href: item.href,
-        mediaType: item.mediaType,
-        linear: item.linear,
-      })),
-      toc: wasm.toc.map((entry) => this.convertTocEntry(entry)),
+      spine,
+      toc,
     };
+  }
+
+  /**
+   * Generate TOC entries from spine when no NAV/NCX is available
+   */
+  private generateTocFromSpine(spine: Array<{ id: string; href: string; linear: boolean }>): any[] {
+    return spine
+      .filter(item => item.linear)
+      .map((item, index) => ({
+        id: `spine-${index}`,
+        href: item.href,
+        label: `Chapter ${index + 1}`,
+        level: 0,
+        children: [],
+      }));
   }
 
   /**

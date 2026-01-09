@@ -135,8 +135,8 @@
     return `border-left-color: ${colors[color]};`;
   }
 
-  function navigateTo(cfi: string) {
-    dispatch('navigateTo', { cfi });
+  function navigateTo(cfi: string, text?: string) {
+    dispatch('navigateTo', { cfi, text });
   }
 
   function formatDate(date: Date): string {
@@ -241,8 +241,8 @@
                     style={getHighlightColorStyle(highlight.color)}
                     role="button"
                     tabindex="0"
-                    on:click={() => navigateTo(highlight.cfi)}
-                    on:keydown={(e) => e.key === 'Enter' && navigateTo(highlight.cfi)}
+                    on:click={() => navigateTo(highlight.cfi, highlight.text)}
+                    on:keydown={(e) => e.key === 'Enter' && navigateTo(highlight.cfi, highlight.text)}
                   >
                     <div class="item-text">"{truncateText(highlight.text, 150)}"</div>
                     {#if highlight.annotation}

@@ -6,14 +6,106 @@ use crate::error::Result;
 
 /// Initialize the database schema
 pub async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
-    sqlx::query(SCHEMA_SQL)
+    // Step 1: Create tables without indexes (for new installs)
+    sqlx::query(SCHEMA_TABLES_SQL)
+        .execute(pool)
+        .await?;
+
+    // Step 2: Run migrations to add columns to existing tables
+    run_migrations(pool).await?;
+
+    // Step 3: Create indexes (after columns exist)
+    sqlx::query(SCHEMA_INDEXES_SQL)
         .execute(pool)
         .await?;
 
     Ok(())
 }
 
-const SCHEMA_SQL: &str = r#"
+/// Run migrations to update existing tables with new columns
+async fn run_migrations(pool: &SqlitePool) -> Result<()> {
+    // Migration: Add new columns to highlights table if they don't exist
+    // SQLite doesn't have ADD COLUMN IF NOT EXISTS, so we check first
+    let columns: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM pragma_table_info('highlights')"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let column_names: Vec<&str> = columns.iter().map(|(n,)| n.as_str()).collect();
+
+    // Add document_format column if missing
+    if !column_names.contains(&"document_format") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN document_format TEXT NOT NULL DEFAULT 'epub'")
+            .execute(pool)
+            .await?;
+    }
+
+    // Add type column if missing
+    if !column_names.contains(&"type") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN type TEXT NOT NULL DEFAULT 'highlight'")
+            .execute(pool)
+            .await?;
+    }
+
+    // Add page column if missing
+    if !column_names.contains(&"page") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN page INTEGER")
+            .execute(pool)
+            .await?;
+    }
+
+    // Add text_prefix column if missing
+    if !column_names.contains(&"text_prefix") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN text_prefix TEXT")
+            .execute(pool)
+            .await?;
+    }
+
+    // Add text_suffix column if missing
+    if !column_names.contains(&"text_suffix") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN text_suffix TEXT")
+            .execute(pool)
+            .await?;
+    }
+
+    // Add region columns if missing
+    if !column_names.contains(&"region_x") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN region_x REAL")
+            .execute(pool)
+            .await?;
+    }
+
+    if !column_names.contains(&"region_y") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN region_y REAL")
+            .execute(pool)
+            .await?;
+    }
+
+    if !column_names.contains(&"region_width") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN region_width REAL")
+            .execute(pool)
+            .await?;
+    }
+
+    if !column_names.contains(&"region_height") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN region_height REAL")
+            .execute(pool)
+            .await?;
+    }
+
+    // Add rects_json column if missing
+    if !column_names.contains(&"rects_json") {
+        sqlx::query("ALTER TABLE highlights ADD COLUMN rects_json TEXT")
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// SQL for creating tables (without indexes)
+const SCHEMA_TABLES_SQL: &str = r#"
 -- Books table (for deduplication and metadata)
 CREATE TABLE IF NOT EXISTS books (
     id TEXT PRIMARY KEY,
@@ -29,9 +121,6 @@ CREATE TABLE IF NOT EXISTS books (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
-CREATE INDEX IF NOT EXISTS idx_books_file_hash ON books(file_hash);
-CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
 
 -- Upload sessions table (for resumable uploads)
 CREATE TABLE IF NOT EXISTS upload_sessions (
@@ -49,10 +138,6 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     expires_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_upload_sessions_file_hash ON upload_sessions(file_hash);
-CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status);
-CREATE INDEX IF NOT EXISTS idx_upload_sessions_expires ON upload_sessions(expires_at);
-
 -- Reading progress table
 CREATE TABLE IF NOT EXISTS reading_progress (
     id TEXT PRIMARY KEY,
@@ -69,10 +154,6 @@ CREATE TABLE IF NOT EXISTS reading_progress (
 
     UNIQUE(book_id, user_id, device_id)
 );
-
-CREATE INDEX IF NOT EXISTS idx_progress_book_id ON reading_progress(book_id);
-CREATE INDEX IF NOT EXISTS idx_progress_user_id ON reading_progress(user_id);
-CREATE INDEX IF NOT EXISTS idx_progress_last_read ON reading_progress(last_read);
 
 -- Highlights table (supports both EPUB and PDF)
 CREATE TABLE IF NOT EXISTS highlights (
@@ -108,13 +189,6 @@ CREATE TABLE IF NOT EXISTS highlights (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_highlights_book_id ON highlights(book_id);
-CREATE INDEX IF NOT EXISTS idx_highlights_user_id ON highlights(user_id);
-CREATE INDEX IF NOT EXISTS idx_highlights_cfi ON highlights(cfi);
-CREATE INDEX IF NOT EXISTS idx_highlights_format ON highlights(document_format);
-CREATE INDEX IF NOT EXISTS idx_highlights_type ON highlights(type);
-CREATE INDEX IF NOT EXISTS idx_highlights_page ON highlights(page);
-
 -- Reading sessions table
 CREATE TABLE IF NOT EXISTS reading_sessions (
     id TEXT PRIMARY KEY,
@@ -132,10 +206,6 @@ CREATE TABLE IF NOT EXISTS reading_sessions (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_book_id ON reading_sessions(book_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON reading_sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON reading_sessions(started_at);
-
 -- Sync queue for offline operations
 CREATE TABLE IF NOT EXISTS sync_queue (
     id TEXT PRIMARY KEY,
@@ -146,9 +216,6 @@ CREATE TABLE IF NOT EXISTS sync_queue (
     retry_count INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending'
 );
-
-CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status);
-CREATE INDEX IF NOT EXISTS idx_sync_queue_timestamp ON sync_queue(timestamp);
 
 -- Sync operations table (for multi-device sync)
 CREATE TABLE IF NOT EXISTS sync_operations (
@@ -164,10 +231,6 @@ CREATE TABLE IF NOT EXISTS sync_operations (
     applied INTEGER DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_sync_book ON sync_operations(book_id);
-CREATE INDEX IF NOT EXISTS idx_sync_timestamp ON sync_operations(timestamp);
-CREATE INDEX IF NOT EXISTS idx_sync_entity ON sync_operations(entity_type, entity_id);
-
 -- Sync versions table (version tracking per book)
 CREATE TABLE IF NOT EXISTS sync_versions (
     book_id TEXT PRIMARY KEY,
@@ -175,4 +238,36 @@ CREATE TABLE IF NOT EXISTS sync_versions (
     last_sync TEXT,
     device_id TEXT
 );
+"#;
+
+/// SQL for creating indexes (run after migrations)
+const SCHEMA_INDEXES_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_books_file_hash ON books(file_hash);
+CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
+
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_file_hash ON upload_sessions(file_hash);
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_expires ON upload_sessions(expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_progress_book_id ON reading_progress(book_id);
+CREATE INDEX IF NOT EXISTS idx_progress_user_id ON reading_progress(user_id);
+CREATE INDEX IF NOT EXISTS idx_progress_last_read ON reading_progress(last_read);
+
+CREATE INDEX IF NOT EXISTS idx_highlights_book_id ON highlights(book_id);
+CREATE INDEX IF NOT EXISTS idx_highlights_user_id ON highlights(user_id);
+CREATE INDEX IF NOT EXISTS idx_highlights_cfi ON highlights(cfi);
+CREATE INDEX IF NOT EXISTS idx_highlights_format ON highlights(document_format);
+CREATE INDEX IF NOT EXISTS idx_highlights_type ON highlights(type);
+CREATE INDEX IF NOT EXISTS idx_highlights_page ON highlights(page);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_book_id ON reading_sessions(book_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON reading_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON reading_sessions(started_at);
+
+CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status);
+CREATE INDEX IF NOT EXISTS idx_sync_queue_timestamp ON sync_queue(timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_sync_book ON sync_operations(book_id);
+CREATE INDEX IF NOT EXISTS idx_sync_timestamp ON sync_operations(timestamp);
+CREATE INDEX IF NOT EXISTS idx_sync_entity ON sync_operations(entity_type, entity_id);
 "#;

@@ -1,15 +1,30 @@
 /**
  * Highlight Anchor
  *
- * Re-anchors stored highlights to DOM Ranges for rendering.
+ * Unified anchoring system for both EPUB and PDF highlights.
+ * Provides a common interface with explicit error reporting.
+ *
+ * EPUB: Re-anchors stored highlights to DOM Ranges for rendering.
  * Uses W3C Web Annotation selectors with fallback chain:
  * 1. CFI (most precise for unchanged content)
  * 2. TextQuote with context (handles content drift)
  * 3. TextPosition (last resort)
+ *
+ * PDF: Converts coordinate-based selectors to display rects.
+ * Uses normalized coordinates (0-1) for resolution independence.
  */
 
-import type { HighlightSelector, AnchorResult, EpubHighlightSelector } from './types';
-import { isEpubSelector } from './types';
+import type {
+  HighlightSelector,
+  AnchorResult,
+  EpubHighlightSelector,
+  PdfHighlightSelector,
+  PdfRect,
+  PdfTextItem,
+  PdfTextLayer,
+  PdfCharPosition,
+} from './types';
+import { isEpubSelector, isPdfSelector } from './types';
 
 /**
  * Text quote selector for anchoring (EPUB format)
@@ -23,8 +38,51 @@ interface TextQuoteSelector {
 }
 
 /**
+ * Unified anchor result - works for both EPUB and PDF
+ */
+export interface UnifiedAnchorResult {
+  /** Whether anchoring succeeded */
+  success: boolean;
+  /** Format of the source selector */
+  format: 'epub' | 'pdf';
+  /** For EPUB: DOM Range for rendering */
+  range?: Range | null;
+  /** For PDF: Display rects in normalized coordinates */
+  rects?: PdfRect[];
+  /** Page number (for PDF) */
+  page?: number;
+  /** Anchor status */
+  status: 'exact' | 'fuzzy' | 'orphaned';
+  /** Confidence in the anchor (0-1) */
+  confidence: number;
+  /** Error details if anchoring failed */
+  error?: AnchorError;
+}
+
+/**
+ * Detailed error for anchor failures
+ */
+export interface AnchorError {
+  code: AnchorErrorCode;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+/**
+ * Error codes for anchor failures
+ */
+export type AnchorErrorCode =
+  | 'INVALID_SELECTOR'
+  | 'SELECTOR_MISSING_DATA'
+  | 'TEXT_NOT_FOUND'
+  | 'POSITION_OUT_OF_RANGE'
+  | 'INVALID_RECT'
+  | 'PAGE_MISMATCH'
+  | 'DOM_ERROR';
+
+/**
  * Highlight re-anchoring engine
- * Converts stored selectors to DOM Ranges for the current view
+ * Converts stored selectors to DOM Ranges (EPUB) or rect arrays (PDF)
  */
 export class HighlightAnchor {
   private doc: Document;
@@ -50,20 +108,457 @@ export class HighlightAnchor {
   }
 
   /**
-   * Anchor a selector to a DOM Range
+   * Unified anchor method - handles both EPUB and PDF selectors
+   * Returns a unified result with explicit error reporting
+   *
+   * @param selector - The selector to anchor (EPUB or PDF)
+   * @param options - Optional configuration
+   */
+  anchorUnified(
+    selector: HighlightSelector,
+    options?: {
+      scopeElement?: Element;
+      currentPage?: number; // For PDF: validate page matches
+      textLayer?: PdfTextLayer; // For PDF: text layer for text-based re-anchoring
+      pageWidth?: number; // For PDF: page width for normalizing rects
+      pageHeight?: number; // For PDF: page height for normalizing rects
+    }
+  ): UnifiedAnchorResult {
+    if (isEpubSelector(selector)) {
+      return this.anchorEpubUnified(selector, options?.scopeElement);
+    }
+
+    if (isPdfSelector(selector)) {
+      return this.anchorPdfUnified(selector, options?.currentPage, options?.textLayer, options?.pageWidth, options?.pageHeight);
+    }
+
+    // Unknown format
+    console.error('[HighlightAnchor] Unknown selector format:', selector);
+    return {
+      success: false,
+      format: 'epub', // Default
+      status: 'orphaned',
+      confidence: 0,
+      error: {
+        code: 'INVALID_SELECTOR',
+        message: 'Unknown selector format',
+        details: { selector },
+      },
+    };
+  }
+
+  /**
+   * Anchor EPUB selector with unified result
+   */
+  private anchorEpubUnified(
+    selector: EpubHighlightSelector,
+    scopeElement?: Element
+  ): UnifiedAnchorResult {
+    const result = this.anchor(selector, scopeElement);
+
+    if (result.range) {
+      return {
+        success: true,
+        format: 'epub',
+        range: result.range,
+        status: result.status,
+        confidence: result.confidence,
+      };
+    }
+
+    // Determine specific error
+    let error: AnchorError;
+    if (!selector.fallback && !selector.position) {
+      error = {
+        code: 'SELECTOR_MISSING_DATA',
+        message: 'EPUB selector has no fallback or position data',
+        details: { cfi: selector.primary?.cfi },
+      };
+    } else {
+      error = {
+        code: 'TEXT_NOT_FOUND',
+        message: 'Could not find text matching selector in document',
+        details: {
+          exact: selector.fallback?.exact?.slice(0, 50),
+          hasPosition: !!selector.position,
+        },
+      };
+    }
+
+    console.warn('[HighlightAnchor] EPUB anchor failed:', error.message, error.details);
+
+    return {
+      success: false,
+      format: 'epub',
+      range: null,
+      status: 'orphaned',
+      confidence: 0,
+      error,
+    };
+  }
+
+  /**
+   * Anchor PDF selector with unified result
+   * Now supports text-based re-anchoring when textLayer is provided
+   */
+  private anchorPdfUnified(
+    selector: PdfHighlightSelector,
+    currentPage?: number,
+    textLayer?: PdfTextLayer,
+    pageWidth?: number,
+    pageHeight?: number
+  ): UnifiedAnchorResult {
+    const page = selector.primary?.page;
+
+    // Validate page
+    if (page === undefined || page < 1) {
+      const error: AnchorError = {
+        code: 'INVALID_SELECTOR',
+        message: 'PDF selector has invalid or missing page number',
+        details: { page },
+      };
+      console.warn('[HighlightAnchor] PDF anchor failed:', error.message);
+      return {
+        success: false,
+        format: 'pdf',
+        status: 'orphaned',
+        confidence: 0,
+        error,
+      };
+    }
+
+    // Check if page matches current view (optional validation)
+    if (currentPage !== undefined && page !== currentPage) {
+      return {
+        success: true, // Not an error, just not visible
+        format: 'pdf',
+        page,
+        rects: [],
+        status: 'exact',
+        confidence: 1.0,
+        error: {
+          code: 'PAGE_MISMATCH',
+          message: `Highlight is on page ${page}, currently viewing page ${currentPage}`,
+        },
+      };
+    }
+
+    // Get rects from selector
+    const rects: PdfRect[] = [];
+
+    // Primary rects (multi-line selections)
+    if (selector.rects && selector.rects.length > 0) {
+      for (const rect of selector.rects) {
+        if (this.isValidRect(rect)) {
+          rects.push(rect);
+        }
+      }
+    }
+
+    // Fallback to region selector
+    if (rects.length === 0 && selector.region) {
+      const region = selector.region;
+      const rect: PdfRect = {
+        x: region.x,
+        y: region.y,
+        width: region.width,
+        height: region.height,
+      };
+      if (this.isValidRect(rect)) {
+        rects.push(rect);
+      } else {
+        console.warn('[HighlightAnchor] Invalid region rect:', region);
+      }
+    }
+
+    // If no rects yet, try text-based re-anchoring
+    if (rects.length === 0 && selector.fallback && textLayer && pageWidth && pageHeight) {
+      console.debug('[HighlightAnchor] Attempting PDF text-based re-anchoring');
+      const textRects = this.anchorPdfByText(selector.fallback, textLayer, pageWidth, pageHeight);
+      if (textRects.length > 0) {
+        return {
+          success: true,
+          format: 'pdf',
+          page,
+          rects: textRects,
+          status: 'fuzzy', // Text-based match is less precise
+          confidence: 0.8,
+        };
+      }
+    }
+
+    if (rects.length === 0) {
+      // All strategies failed
+      if (selector.fallback) {
+        const hasTextLayer = !!textLayer;
+        console.debug('[HighlightAnchor] PDF text-based re-anchoring failed', {
+          hasTextLayer,
+          exact: selector.fallback.exact?.slice(0, 50),
+        });
+        return {
+          success: false,
+          format: 'pdf',
+          page,
+          status: 'orphaned',
+          confidence: 0,
+          error: {
+            code: 'TEXT_NOT_FOUND',
+            message: hasTextLayer
+              ? 'Could not find text in PDF text layer'
+              : 'PDF text re-anchoring requires textLayer option',
+            details: {
+              hasTextFallback: true,
+              hasTextLayer,
+              exact: selector.fallback.exact?.slice(0, 50),
+            },
+          },
+        };
+      }
+
+      return {
+        success: false,
+        format: 'pdf',
+        page,
+        status: 'orphaned',
+        confidence: 0,
+        error: {
+          code: 'SELECTOR_MISSING_DATA',
+          message: 'PDF selector has no rect or charRects data',
+        },
+      };
+    }
+
+    return {
+      success: true,
+      format: 'pdf',
+      page,
+      rects,
+      status: 'exact',
+      confidence: 1.0,
+    };
+  }
+
+  /**
+   * Anchor PDF highlight using text search in the text layer
+   * Similar strategy to EPUB TextQuote anchoring:
+   * 1. Try exact text with prefix and suffix context
+   * 2. Try with prefix only
+   * 3. Try with suffix only
+   * 4. Try exact text only
+   */
+  private anchorPdfByText(
+    fallback: { exact?: string; prefix?: string; suffix?: string },
+    textLayer: PdfTextLayer,
+    pageWidth: number,
+    pageHeight: number
+  ): PdfRect[] {
+    const { exact, prefix, suffix } = fallback;
+    if (!exact) return [];
+
+    // Build the full text content from all items
+    const fullText = textLayer.items.map(item => item.text).join('');
+
+    // Strategy 1: Match with full context (highest confidence)
+    let matchStart = -1;
+    let matchEnd = -1;
+
+    if (prefix && suffix) {
+      const pattern = prefix + exact + suffix;
+      const index = fullText.indexOf(pattern);
+      if (index !== -1) {
+        matchStart = index + prefix.length;
+        matchEnd = matchStart + exact.length;
+      }
+    }
+
+    // Strategy 2: Match with prefix only
+    if (matchStart === -1 && prefix) {
+      const pattern = prefix + exact;
+      const index = fullText.indexOf(pattern);
+      if (index !== -1) {
+        matchStart = index + prefix.length;
+        matchEnd = matchStart + exact.length;
+      }
+    }
+
+    // Strategy 3: Match with suffix only
+    if (matchStart === -1 && suffix) {
+      const pattern = exact + suffix;
+      const index = fullText.indexOf(pattern);
+      if (index !== -1) {
+        matchStart = index;
+        matchEnd = matchStart + exact.length;
+      }
+    }
+
+    // Strategy 4: Match exact text only
+    if (matchStart === -1) {
+      const index = fullText.indexOf(exact);
+      if (index !== -1) {
+        matchStart = index;
+        matchEnd = matchStart + exact.length;
+      }
+    }
+
+    if (matchStart === -1) {
+      return [];
+    }
+
+    // Convert character offsets to rects from the text layer
+    return this.getRectsFromTextLayer(textLayer, matchStart, matchEnd, pageWidth, pageHeight);
+  }
+
+  /**
+   * Get normalized rects from text layer for a character range
+   */
+  private getRectsFromTextLayer(
+    textLayer: PdfTextLayer,
+    startOffset: number,
+    endOffset: number,
+    pageWidth: number,
+    pageHeight: number
+  ): PdfRect[] {
+    const rects: PdfRect[] = [];
+    let currentOffset = 0;
+
+    for (const item of textLayer.items) {
+      const itemStart = currentOffset;
+      const itemEnd = currentOffset + item.text.length;
+
+      // Check if this item overlaps with our range
+      if (itemEnd > startOffset && itemStart < endOffset) {
+        // This item contains part of our selection
+        if (item.charPositions && item.charPositions.length > 0) {
+          // Use character-level positions for precise rects
+          const charRects = this.getCharRectsInRange(
+            item.charPositions,
+            Math.max(0, startOffset - itemStart),
+            Math.min(item.text.length, endOffset - itemStart),
+            pageWidth,
+            pageHeight
+          );
+          rects.push(...charRects);
+        } else {
+          // Fallback to item-level rect
+          const normalizedRect: PdfRect = {
+            x: item.x / pageWidth,
+            y: item.y / pageHeight,
+            width: item.width / pageWidth,
+            height: item.height / pageHeight,
+          };
+          if (this.isValidRect(normalizedRect)) {
+            rects.push(normalizedRect);
+          }
+        }
+      }
+
+      currentOffset = itemEnd;
+      if (currentOffset >= endOffset) break;
+    }
+
+    return this.mergeAdjacentRects(rects);
+  }
+
+  /**
+   * Get normalized rects for a character range within a text item
+   */
+  private getCharRectsInRange(
+    chars: PdfCharPosition[],
+    localStart: number,
+    localEnd: number,
+    pageWidth: number,
+    pageHeight: number
+  ): PdfRect[] {
+    const rects: PdfRect[] = [];
+
+    for (let i = localStart; i < localEnd && i < chars.length; i++) {
+      const char = chars[i];
+      if (char.char === ' ' || char.char === '\n') continue; // Skip whitespace
+
+      const rect: PdfRect = {
+        x: char.x / pageWidth,
+        y: char.y / pageHeight,
+        width: char.width / pageWidth,
+        height: char.height / pageHeight,
+      };
+
+      if (this.isValidRect(rect)) {
+        rects.push(rect);
+      }
+    }
+
+    return rects;
+  }
+
+  /**
+   * Merge adjacent character rects into line rects for cleaner rendering
+   */
+  private mergeAdjacentRects(rects: PdfRect[]): PdfRect[] {
+    if (rects.length <= 1) return rects;
+
+    const merged: PdfRect[] = [];
+    let current = { ...rects[0] };
+    const tolerance = 0.005; // 0.5% tolerance for "same line"
+
+    for (let i = 1; i < rects.length; i++) {
+      const rect = rects[i];
+
+      // Check if on same line (similar y and height)
+      const sameLine =
+        Math.abs(rect.y - current.y) < tolerance &&
+        Math.abs(rect.height - current.height) < tolerance;
+
+      // Check if adjacent (next rect starts where current ends)
+      const adjacent = Math.abs(rect.x - (current.x + current.width)) < tolerance * 2;
+
+      if (sameLine && adjacent) {
+        // Extend current rect
+        current.width = rect.x + rect.width - current.x;
+      } else {
+        // Start new rect
+        merged.push(current);
+        current = { ...rect };
+      }
+    }
+    merged.push(current);
+
+    return merged;
+  }
+
+  /**
+   * Validate a PDF rect has reasonable values
+   */
+  private isValidRect(rect: PdfRect): boolean {
+    return (
+      typeof rect.x === 'number' &&
+      typeof rect.y === 'number' &&
+      typeof rect.width === 'number' &&
+      typeof rect.height === 'number' &&
+      rect.x >= 0 &&
+      rect.y >= 0 &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.x <= 1 &&
+      rect.y <= 1 &&
+      rect.width <= 1 &&
+      rect.height <= 1
+    );
+  }
+
+  /**
+   * Anchor a selector to a DOM Range (EPUB only)
    * Strategy: CFI first → TextQuote fallback → Position last resort
    *
-   * NOTE: This class is designed for EPUB/HTML content with DOM-based anchoring.
-   * PDF highlights use PdfAnnotationLayer with coordinate-based rendering.
+   * NOTE: For unified anchoring of both EPUB and PDF, use anchorUnified() instead.
    *
    * @param selector - The selector to anchor
    * @param scopeElement - Optional element to restrict search to (e.g., chapter)
    */
   anchor(selector: HighlightSelector, scopeElement?: Element): AnchorResult {
     // PDF selectors use a different rendering path (PdfAnnotationLayer with rect coords)
-    // They shouldn't be anchored to DOM ranges
+    // They shouldn't be anchored to DOM ranges - use anchorUnified() for PDF support
     if (!isEpubSelector(selector)) {
-      console.debug('[HighlightAnchor] PDF selector cannot be anchored to DOM');
+      console.warn('[HighlightAnchor] PDF selector passed to anchor() - use anchorUnified() instead');
       return { range: null, status: 'orphaned', confidence: 0 };
     }
 

@@ -707,6 +707,170 @@ export class ScrolledNavigator implements Navigator {
     return this.goTo({ type: 'position', position: this.currentSpineIndex - 1 });
   }
 
+  /**
+   * Navigate to a specific DOM element within a chapter.
+   * For scrolled mode, this scrolls the element into view with directional animation.
+   * The element is always centered on the page when arriving.
+   * @param element - Target element to navigate to
+   * @param spineIndex - Index of the chapter containing the element
+   * @param options - Navigation options (instant for immediate jump)
+   * @returns True if navigation was successful
+   */
+  async navigateToElement(
+    element: HTMLElement,
+    spineIndex: number,
+    options?: NavigationOptions
+  ): Promise<boolean> {
+    if (!this.scrollContainer) {
+      return false;
+    }
+
+    const instant = options?.instant ?? false;
+
+    // Check if element is already visible in viewport
+    const elementRect = element.getBoundingClientRect();
+    const containerRect = this.scrollContainer.getBoundingClientRect();
+    const isVisible =
+      elementRect.top >= containerRect.top &&
+      elementRect.bottom <= containerRect.bottom &&
+      elementRect.left >= containerRect.left &&
+      elementRect.right <= containerRect.right;
+
+    // If already visible, skip navigation but still emit events
+    if (isVisible) {
+      this.currentSpineIndex = spineIndex;
+      this.updateCurrentLocator();
+      if (this.currentLocator) {
+        this.emit('relocated', this.currentLocator);
+      }
+      return true;
+    }
+
+    // Determine scroll direction for visual feedback
+    // Use bounding rect to get accurate position relative to scroll container
+    const currentScrollTop = this.scrollContainer.scrollTop;
+    // Calculate element's absolute position in the scroll container's coordinate system
+    const elementTopInContainer = elementRect.top - containerRect.top + currentScrollTop;
+    const targetScrollTop = elementTopInContainer - (containerRect.height / 2) + (elementRect.height / 2);
+    const scrollDirection = targetScrollTop > currentScrollTop ? 'down' : 'up';
+
+    // Update current spine index
+    this.currentSpineIndex = spineIndex;
+
+    if (instant) {
+      // Instant scroll (for quick navigation)
+      element.scrollIntoView({ behavior: 'auto', block: 'center' });
+    } else {
+      // Add directional visual indicator
+      this.showScrollDirectionIndicator(scrollDirection);
+
+      // Smooth scroll to center the element
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+      // Wait for scroll animation to complete
+      await this.waitForScrollEnd();
+    }
+
+    // Update locator
+    this.updateCurrentLocator();
+
+    // Emit events
+    if (this.currentLocator) {
+      this.emit('relocated', this.currentLocator);
+    }
+
+    return true;
+  }
+
+  /**
+   * Show a brief directional indicator during scroll navigation
+   */
+  private showScrollDirectionIndicator(direction: 'up' | 'down'): void {
+    if (!this.scrollContainer) return;
+
+    // Create indicator element
+    const indicator = document.createElement('div');
+    indicator.className = `scroll-direction-indicator scroll-${direction}`;
+    indicator.style.cssText = `
+      position: absolute;
+      ${direction === 'down' ? 'bottom: 0' : 'top: 0'};
+      left: 0;
+      right: 0;
+      height: 60px;
+      background: linear-gradient(
+        ${direction === 'down' ? '0deg' : '180deg'},
+        rgba(var(--interactive-accent-rgb, 124, 108, 217), 0.15) 0%,
+        transparent 100%
+      );
+      pointer-events: none;
+      z-index: 100;
+      animation: scroll-indicator-fade 0.4s ease-out forwards;
+    `;
+
+    // Add keyframes if not present
+    this.ensureScrollIndicatorStyles();
+
+    // Add to container
+    this.scrollContainer.style.position = 'relative';
+    this.scrollContainer.appendChild(indicator);
+
+    // Remove after animation
+    setTimeout(() => {
+      indicator.remove();
+    }, 400);
+  }
+
+  /**
+   * Ensure scroll indicator CSS is in the document
+   */
+  private ensureScrollIndicatorStyles(): void {
+    const styleId = 'scroll-indicator-styles';
+    if (document.getElementById(styleId)) return;
+
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = `
+      @keyframes scroll-indicator-fade {
+        0% { opacity: 0; }
+        30% { opacity: 1; }
+        100% { opacity: 0; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  /**
+   * Wait for scroll animation to complete
+   */
+  private waitForScrollEnd(): Promise<void> {
+    return new Promise(resolve => {
+      if (!this.scrollContainer) {
+        resolve();
+        return;
+      }
+
+      let scrollTimeout: number | null = null;
+      const onScroll = () => {
+        if (scrollTimeout) {
+          clearTimeout(scrollTimeout);
+        }
+        scrollTimeout = window.setTimeout(() => {
+          this.scrollContainer?.removeEventListener('scroll', onScroll);
+          resolve();
+        }, 100);
+      };
+
+      this.scrollContainer.addEventListener('scroll', onScroll);
+
+      // Fallback timeout
+      setTimeout(() => {
+        if (scrollTimeout) clearTimeout(scrollTimeout);
+        this.scrollContainer?.removeEventListener('scroll', onScroll);
+        resolve();
+      }, 600);
+    });
+  }
+
   // ============================================================================
   // Position Tracking
   // ============================================================================

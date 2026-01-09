@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::epub::TocEntry;
+use crate::document::TocEntry;
 
 /// A fully parsed PDF document
 #[derive(Debug, Clone, Serialize, Deserialize)]

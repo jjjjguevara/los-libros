@@ -439,13 +439,28 @@ export class ShadowDOMView {
         color: var(--theme-fg);
       }
 
+      /* Reset all links to inherit text color by default.
+         Some EPUBs wrap entire paragraphs in <a> tags without href for navigation structure.
+         These should not appear as links. */
       a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      /* Only style links with actual href as links */
+      a[href]:not([href=""]) {
         color: var(--theme-link);
       }
 
-      a:visited {
+      a[href]:not([href=""]):visited {
         color: var(--theme-link);
         opacity: 0.8;
+      }
+
+      /* Footnote/endnote references - ensure they're styled as links */
+      a[href*="#en"], a[href*="#note"], a[href*="#fn"], a[href*="#ref"],
+      a[href*="#endnote"], a[href*="#footnote"] {
+        color: var(--theme-link);
       }
 
       ::selection {

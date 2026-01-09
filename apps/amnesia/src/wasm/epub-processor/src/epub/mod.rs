@@ -293,6 +293,13 @@ impl EpubBook {
             .map_err(|e| EpubError::XmlError(e.to_string()))?;
         let toc_info = find_toc_doc(&opf_doc, &opf.manifest);
 
+        // Debug: Log TOC document info
+        web_sys::console::log_1(&format!("[EPUB] TOC info: {:?}", match &toc_info {
+            TocDocInfo::Nav { href } => format!("NAV: {}", href),
+            TocDocInfo::Ncx { href } => format!("NCX: {}", href),
+            TocDocInfo::None => "None".to_string(),
+        }).into());
+
         let toc = match toc_info {
             TocDocInfo::Nav { href } => {
                 let full_path = if opf_dir.is_empty() {
@@ -300,13 +307,20 @@ impl EpubBook {
                 } else {
                     format!("{}/{}", opf_dir, href)
                 };
+                web_sys::console::log_1(&format!("[EPUB] Looking for NAV at: {}", full_path).into());
                 if let Some(bytes) = resources.get(&full_path) {
+                    web_sys::console::log_1(&format!("[EPUB] Found NAV document ({} bytes)", bytes.len()).into());
                     if let Ok(content) = String::from_utf8(bytes.clone()) {
-                        Self::parse_nav_document(&content)
+                        let entries = Self::parse_nav_document(&content);
+                        web_sys::console::log_1(&format!("[EPUB] Parsed {} NAV entries", entries.len()).into());
+                        entries
                     } else {
+                        web_sys::console::log_1(&"[EPUB] NAV document is not valid UTF-8".into());
                         Vec::new()
                     }
                 } else {
+                    web_sys::console::log_1(&format!("[EPUB] NAV not found. Available resources: {:?}",
+                        resources.keys().take(10).collect::<Vec<_>>()).into());
                     Vec::new()
                 }
             }
@@ -316,19 +330,29 @@ impl EpubBook {
                 } else {
                     format!("{}/{}", opf_dir, href)
                 };
+                web_sys::console::log_1(&format!("[EPUB] Looking for NCX at: {}", full_path).into());
                 if let Some(bytes) = resources.get(&full_path) {
+                    web_sys::console::log_1(&format!("[EPUB] Found NCX document ({} bytes)", bytes.len()).into());
                     if let Ok(content) = String::from_utf8(bytes.clone()) {
-                        Self::parse_ncx_document(&content)
+                        let entries = Self::parse_ncx_document(&content);
+                        web_sys::console::log_1(&format!("[EPUB] Parsed {} NCX entries", entries.len()).into());
+                        entries
                     } else {
+                        web_sys::console::log_1(&"[EPUB] NCX document is not valid UTF-8".into());
                         Vec::new()
                     }
                 } else {
+                    web_sys::console::log_1(&format!("[EPUB] NCX not found. Available resources: {:?}",
+                        resources.keys().take(10).collect::<Vec<_>>()).into());
                     Vec::new()
                 }
             }
             TocDocInfo::None => {
                 // Generate ToC from spine
-                Self::generate_toc_from_spine(&opf.spine)
+                web_sys::console::log_1(&format!("[EPUB] No NAV/NCX found, generating from spine ({} items)", opf.spine.len()).into());
+                let entries = Self::generate_toc_from_spine(&opf.spine);
+                web_sys::console::log_1(&format!("[EPUB] Generated {} entries from spine", entries.len()).into());
+                entries
             }
         };
 

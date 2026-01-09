@@ -10,6 +10,7 @@ import type {
   WorkerResponse,
   TextLayerData,
   SearchResult,
+  TocEntry,
 } from './mupdf-worker';
 
 type PendingRequest = {
@@ -204,7 +205,7 @@ export class MuPDFBridge {
   /**
    * Load a PDF document from ArrayBuffer
    */
-  async loadDocument(data: ArrayBuffer): Promise<{ pageCount: number }> {
+  async loadDocument(data: ArrayBuffer): Promise<{ pageCount: number; toc: TocEntry[] }> {
     // Generate a document ID
     const docId = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const requestId = this.generateRequestId();
@@ -213,18 +214,19 @@ export class MuPDFBridge {
       type: 'LOADED';
       requestId: string;
       pageCount: number;
+      toc: TocEntry[];
     }>(
       { type: 'LOAD_DOCUMENT', requestId, docId, data },
       [data] // Transfer ArrayBuffer ownership
     );
 
-    return { pageCount: response.pageCount };
+    return { pageCount: response.pageCount, toc: response.toc };
   }
 
   /**
    * Load a PDF document and return the document ID
    */
-  async loadDocumentWithId(data: ArrayBuffer): Promise<{ id: string; pageCount: number }> {
+  async loadDocumentWithId(data: ArrayBuffer): Promise<{ id: string; pageCount: number; toc: TocEntry[] }> {
     const docId = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const requestId = this.generateRequestId();
 
@@ -232,12 +234,13 @@ export class MuPDFBridge {
       type: 'LOADED';
       requestId: string;
       pageCount: number;
+      toc: TocEntry[];
     }>(
       { type: 'LOAD_DOCUMENT', requestId, docId, data },
       [data]
     );
 
-    return { id: docId, pageCount: response.pageCount };
+    return { id: docId, pageCount: response.pageCount, toc: response.toc };
   }
 
   /**

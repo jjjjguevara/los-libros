@@ -498,6 +498,35 @@ export interface PdfSettings {
   fastScrollThreshold: number;
 }
 
+// ==========================================================================
+// Doc Doctor Integration Settings Types
+// ==========================================================================
+
+/**
+ * Conflict resolution strategy for Doc Doctor sync
+ */
+export type DocDoctorConflictStrategy =
+  | 'amnesia-wins'    // Amnesia highlight data takes priority
+  | 'dd-wins'         // Doc Doctor stub data takes priority
+  | 'newest-wins'     // Most recently modified wins
+  | 'manual';         // Ask user for each conflict
+
+/**
+ * Doc Doctor integration settings
+ */
+export interface DocDoctorSyncSettings {
+  /** Enable Doc Doctor integration. Default: true */
+  enabled: boolean;
+  /** Auto-sync highlights to Doc Doctor stubs. Default: false */
+  autoSyncHighlights: boolean;
+  /** Sync on highlight creation. Default: true */
+  syncOnCreate: boolean;
+  /** Propagate stub resolutions to highlight annotations. Default: true */
+  propagateResolutions: boolean;
+  /** Default conflict resolution strategy. Default: 'newest-wins' */
+  conflictStrategy: DocDoctorConflictStrategy;
+}
+
 export interface LibrosSettings {
   // Server connection
   serverUrl: string;
@@ -652,6 +681,13 @@ export interface LibrosSettings {
 
   /** HUD configuration */
   hud: HudSettings;
+
+  // ==========================================================================
+  // Doc Doctor Integration Settings
+  // ==========================================================================
+
+  /** Doc Doctor sync configuration */
+  docDoctorSync: DocDoctorSyncSettings;
 }
 
 export const DEFAULT_SETTINGS: LibrosSettings = {
@@ -938,5 +974,17 @@ export const DEFAULT_SETTINGS: LibrosSettings = {
     rememberLastTab: true,        // Remember last open tab
     showBadges: true,             // Show badges on tabs
     useDocDoctorIntegration: true, // Use Doc Doctor when available
+  },
+
+  // ==========================================================================
+  // Doc Doctor Integration Settings Defaults
+  // ==========================================================================
+
+  docDoctorSync: {
+    enabled: true,                  // Enable Doc Doctor integration by default
+    autoSyncHighlights: false,      // Don't auto-sync by default (user opt-in)
+    syncOnCreate: true,             // Sync when highlight is created (if autoSync enabled)
+    propagateResolutions: true,     // Update highlight when stub is resolved
+    conflictStrategy: 'newest-wins', // Default conflict strategy
   },
 };

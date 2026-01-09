@@ -38,6 +38,7 @@ import {
   type ContextChangeEvent,
 } from '../context/context-detector';
 import { createHUDStore } from '../state/hud-store';
+import type { BookHealth } from '../../integrations/doc-doctor-bridge';
 
 // Tab components for cross-plugin mounting (Renderer Pattern)
 // These are imported here so they're instantiated in Amnesia's bundle context
@@ -103,6 +104,10 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
   private currentContext: HUDContext = { type: 'none' };
   private contextSubscribers = new Set<(context: HUDContext) => void>();
 
+  // Book health integration with Doc Doctor
+  private currentBookHealth: BookHealth | null = null;
+  private bookHealthStore: Writable<BookHealth | null> = writable(null);
+
   // Reactive stores for Doc Doctor compatibility
   private primaryTextStore: Writable<string> = writable('');
   private indicatorColorStore: Writable<'green' | 'yellow' | 'red' | 'blue' | 'muted'> = writable('muted');
@@ -133,6 +138,15 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
       this.currentContext = event.current;
       this.notifyContextSubscribers(event.current);
       this.notifySubscribers(); // Also trigger general update
+
+      // Fetch book health when context changes to a book
+      if (event.current.type === 'book') {
+        this.fetchBookHealth();
+      } else {
+        // Clear health when leaving book context
+        this.currentBookHealth = null;
+        this.bookHealthStore.set(null);
+      }
     });
     this.unsubscribes.push(contextUnsub);
 
@@ -166,6 +180,73 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
       });
       this.unsubscribes.push(serverUnsub);
     }
+
+    // Subscribe to Doc Doctor health updates
+    this.setupDocDoctorHealthSubscription();
+  }
+
+  /**
+   * Set up subscription to Doc Doctor health events
+   */
+  private setupDocDoctorHealthSubscription(): void {
+    const bridge = this.plugin.docDoctorBridge;
+    if (!bridge) return;
+
+    // Subscribe to health updates
+    const healthUnsub = bridge.on('health-updated', (data) => {
+      // Update health if this is for the current book
+      const context = this.currentContext;
+      if (context.type === 'book' && context.notePath === data.filePath) {
+        this.currentBookHealth = data.health;
+        this.bookHealthStore.set(data.health);
+        this.notifySubscribers();
+      }
+    });
+    this.unsubscribes.push(() => healthUnsub.dispose());
+  }
+
+  /**
+   * Fetch book health for the current context
+   */
+  async fetchBookHealth(): Promise<void> {
+    const context = this.currentContext;
+    if (context.type !== 'book' || !context.notePath) {
+      this.currentBookHealth = null;
+      this.bookHealthStore.set(null);
+      return;
+    }
+
+    const bridge = this.plugin.docDoctorBridge;
+    if (!bridge || !bridge.isConnected()) {
+      this.currentBookHealth = null;
+      this.bookHealthStore.set(null);
+      return;
+    }
+
+    try {
+      const health = await bridge.getBookHealth(context.notePath);
+      this.currentBookHealth = health;
+      this.bookHealthStore.set(health);
+      this.notifySubscribers();
+    } catch (error) {
+      console.warn('[AmnesiaHUDProvider] Failed to fetch book health:', error);
+      this.currentBookHealth = null;
+      this.bookHealthStore.set(null);
+    }
+  }
+
+  /**
+   * Get current book health (synchronous)
+   */
+  getBookHealth(): BookHealth | null {
+    return this.currentBookHealth;
+  }
+
+  /**
+   * Get book health store (for reactive components)
+   */
+  getBookHealthStore(): Readable<BookHealth | null> {
+    return this.bookHealthStore;
   }
 
   subscribe(callback: () => void): () => void {
@@ -193,13 +274,20 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
     const stats = this.getReadingStats();
     const serverStatus = this.getServerStatusInfo();
     const context = this.currentContext;
+    const bookHealth = this.currentBookHealth;
 
     // Build primary text - context-aware
     let primaryText = '';
     if (context.type === 'book') {
       const title = context.title || 'Book';
       const shortTitle = title.length > 20 ? title.slice(0, 20) + '…' : title;
-      primaryText = `📖 ${shortTitle} | ${stats.totalHighlights} hl`;
+      // Include book health percentage if available
+      if (bookHealth) {
+        const healthPct = Math.round(bookHealth.overall * 100);
+        primaryText = `📖 ${shortTitle} | ${healthPct}% | ${stats.totalHighlights} hl`;
+      } else {
+        primaryText = `📖 ${shortTitle} | ${stats.totalHighlights} hl`;
+      }
     } else if (context.type === 'author') {
       primaryText = `👤 ${context.authorName} | ${stats.totalHighlights} hl`;
     } else if (context.type === 'series') {
@@ -210,18 +298,31 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
       primaryText = `${stats.currentlyReading} reading | ${stats.totalHighlights} hl`;
     }
 
-    // Determine indicator color
-    const healthColor = this.calculateHealthColor(stats.lastReadDate);
+    // Determine indicator color based on book health or last read date
     let indicatorColor: 'green' | 'yellow' | 'red' | 'blue' | 'muted';
-    if (healthColor === 'green') indicatorColor = 'green';
-    else if (healthColor === 'yellow') indicatorColor = 'yellow';
-    else if (healthColor === 'red') indicatorColor = 'red';
-    else indicatorColor = 'muted';
+    if (bookHealth) {
+      // Use book health to determine color when available
+      indicatorColor = this.getHealthIndicatorColor(bookHealth.overall);
+    } else {
+      const healthColor = this.calculateHealthColor(stats.lastReadDate);
+      if (healthColor === 'green') indicatorColor = 'green';
+      else if (healthColor === 'yellow') indicatorColor = 'yellow';
+      else if (healthColor === 'red') indicatorColor = 'red';
+      else indicatorColor = 'muted';
+    }
 
-    // Server status badge
+    // Badge priority: Book Health > Server Status
     let badge: { text: string; variant: 'warning' | 'info' | 'success' } | null = null;
-    if (serverStatus.status === 'running') {
+    if (bookHealth) {
+      // Show book health badge when available
+      const healthPct = Math.round(bookHealth.overall * 100);
+      const variant = healthPct >= 70 ? 'success' : healthPct >= 40 ? 'info' : 'warning';
+      badge = { text: `❤ ${healthPct}%`, variant };
+    } else if (serverStatus.status === 'running') {
       badge = { text: '● Server', variant: 'success' };
+    } else if (serverStatus.isLocalMode) {
+      // Local/WASM mode - show blue info badge
+      badge = { text: '◉ Local', variant: 'info' };
     } else if (serverStatus.status === 'error') {
       badge = { text: '⚠ Server', variant: 'warning' };
     }
@@ -230,7 +331,17 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
     this.primaryTextStore.set(primaryText);
     this.indicatorColorStore.set(indicatorColor);
     this.secondaryBadgeStore.set(badge);
-    this.tooltipStore.set(this.generateTooltip(stats));
+    this.tooltipStore.set(this.generateTooltip(stats, bookHealth));
+  }
+
+  /**
+   * Get indicator color based on book health percentage
+   */
+  private getHealthIndicatorColor(health: number): 'green' | 'yellow' | 'red' | 'muted' {
+    if (health >= 0.7) return 'green';
+    if (health >= 0.4) return 'yellow';
+    if (health > 0) return 'red';
+    return 'muted';
   }
 
   private notifyContextSubscribers(context: HUDContext): void {
@@ -687,12 +798,15 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
     port?: number;
     uptime?: number;
     lastError?: string;
+    isLocalMode?: boolean;
   } {
     if (!this.plugin.serverManager) {
+      // No server manager means we're in local/WASM-only mode
       return {
         status: 'stopped',
-        indicator: '○',
-        color: 'gray',
+        indicator: '◉',
+        color: 'blue',
+        isLocalMode: true,
       };
     }
 
@@ -700,6 +814,12 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
 
     let indicator: string;
     let color: StatusBarColor;
+    let isLocalMode = false;
+
+    // Check if this is intentional local/WASM mode
+    // "Server binary not found" means we're in WASM-only mode, not a real error
+    const isIntentionalLocalMode = state.lastError?.includes('binary not found') ||
+                                    state.lastError?.includes('not configured');
 
     switch (state.status) {
       case 'running':
@@ -713,8 +833,26 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
         color = 'yellow';
         break;
       case 'error':
-        indicator = '⚠';
-        color = 'red';
+        // Treat "binary not found" as local mode, not error
+        if (isIntentionalLocalMode) {
+          indicator = '◉';
+          color = 'blue';
+          isLocalMode = true;
+        } else {
+          indicator = '⚠';
+          color = 'red';
+        }
+        break;
+      case 'stopped':
+        // Stopped without error = local/WASM mode (intentionally disabled)
+        if (!state.lastError || isIntentionalLocalMode) {
+          indicator = '◉';
+          color = 'blue';
+          isLocalMode = true;
+        } else {
+          indicator = '○';
+          color = 'gray';
+        }
         break;
       default:
         indicator = '○';
@@ -728,6 +866,7 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
       port: state.port,
       uptime: state.uptime,
       lastError: state.lastError,
+      isLocalMode,
     };
   }
 
@@ -850,13 +989,28 @@ export class AmnesiaHUDProvider implements HUDContentProvider {
     return activity;
   }
 
-  private generateTooltip(stats: ReadingStats): string {
+  private generateTooltip(stats: ReadingStats, bookHealth?: BookHealth | null): string {
     const lines: string[] = [
       'Amnesia Reading Activity',
       '━'.repeat(24),
       `Currently reading: ${stats.currentlyReading} books`,
       `Total highlights: ${stats.totalHighlights}`,
     ];
+
+    // Add book health section if available
+    if (bookHealth) {
+      lines.push('');
+      lines.push('Book Health (Doc Doctor)');
+      lines.push('─'.repeat(20));
+      const healthPct = Math.round(bookHealth.overall * 100);
+      lines.push(`Overall: ${healthPct}%`);
+      lines.push(`Highlights: ${bookHealth.breakdown.highlightCount}`);
+      lines.push(`Stubs: ${bookHealth.breakdown.stubCount} (${bookHealth.breakdown.resolvedStubCount} resolved)`);
+      const coveragePct = Math.round(bookHealth.breakdown.annotationCoverage * 100);
+      lines.push(`Coverage: ${coveragePct}%`);
+    }
+
+    lines.push('');
 
     if (stats.lastReadDate) {
       const diff = Date.now() - stats.lastReadDate.getTime();

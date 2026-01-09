@@ -2,14 +2,14 @@
   /**
    * ToC Entry Item Component
    *
-   * Recursive component for rendering individual ToC entries.
+   * Recursive component for rendering individual ToC entries with progress tracking.
    */
   import { createEventDispatcher } from 'svelte';
-  import type { TocEntry } from '../../reader/renderer/types';
+  import { slide } from 'svelte/transition';
+  import type { TocEntryWithProgress } from './toc/types';
   import { ChevronRight, ChevronDown } from 'lucide-svelte';
 
-  export let entry: TocEntry;
-  export let currentChapter: string | null = null;
+  export let entry: TocEntryWithProgress;
   export let expandedItems: Set<string>;
   export let level: number = 0;
 
@@ -20,16 +20,9 @@
 
   $: hasChildren = entry.children && entry.children.length > 0;
   $: isExpanded = expandedItems.has(entry.id);
-  $: isCurrent = isCurrentEntry(entry);
-
-  function isCurrentEntry(e: TocEntry): boolean {
-    if (!currentChapter) return false;
-    const entryPath = e.href.split('#')[0];
-    const currentPath = currentChapter.split('#')[0];
-    return entryPath === currentPath ||
-           currentPath.endsWith(entryPath) ||
-           entryPath.endsWith(currentPath);
-  }
+  $: isCurrent = entry.isCurrent;
+  $: isAncestor = entry.isAncestorOfCurrent;
+  $: progress = entry.progress;
 
   function handleClick() {
     dispatch('navigate', { href: entry.href });
@@ -39,23 +32,50 @@
     e.stopPropagation();
     dispatch('toggle', { id: entry.id });
   }
+
+  function handleKeydown(e: KeyboardEvent) {
+    switch (e.key) {
+      case 'Enter':
+      case ' ':
+        e.preventDefault();
+        handleClick();
+        break;
+      case 'ArrowRight':
+        // Expand if collapsed and has children
+        if (hasChildren && !isExpanded) {
+          e.preventDefault();
+          dispatch('toggle', { id: entry.id });
+        }
+        break;
+      case 'ArrowLeft':
+        // Collapse if expanded and has children
+        if (hasChildren && isExpanded) {
+          e.preventDefault();
+          dispatch('toggle', { id: entry.id });
+        }
+        break;
+    }
+  }
 </script>
 
 <div class="toc-entry" style="--level: {level}">
   <div
     class="toc-entry-self"
     class:is-current={isCurrent}
+    class:is-ancestor={isAncestor}
     class:has-children={hasChildren}
-    role="button"
+    role="treeitem"
     tabindex="0"
+    aria-expanded={hasChildren ? isExpanded : undefined}
     on:click={handleClick}
-    on:keydown={(e) => e.key === 'Enter' && handleClick()}
+    on:keydown={handleKeydown}
   >
     {#if hasChildren}
       <button
         class="toc-expand-btn"
         on:click={handleToggle}
         aria-label={isExpanded ? 'Collapse' : 'Expand'}
+        tabindex="-1"
       >
         {#if isExpanded}
           <ChevronDown size={14} />
@@ -66,15 +86,24 @@
     {:else}
       <span class="toc-spacer"></span>
     {/if}
-    <span class="toc-entry-label">{entry.label}</span>
+    <div class="toc-entry-content">
+      <span class="toc-entry-label">{entry.label}</span>
+      {#if progress > 0}
+        <div class="toc-progress-bar">
+          <div class="toc-progress-fill" style:width="{progress}%"></div>
+        </div>
+      {/if}
+    </div>
+    {#if isCurrent}
+      <span class="toc-progress-text">{progress}%</span>
+    {/if}
   </div>
 
   {#if hasChildren && isExpanded}
-    <div class="toc-children">
+    <div class="toc-children" transition:slide={{ duration: 200 }}>
       {#each entry.children as child (child.id)}
         <svelte:self
           entry={child}
-          {currentChapter}
           {expandedItems}
           level={level + 1}
           on:navigate
@@ -105,6 +134,11 @@
     background: var(--background-modifier-hover);
   }
 
+  .toc-entry-self:focus-visible {
+    outline: 2px solid var(--interactive-accent);
+    outline-offset: -2px;
+  }
+
   .toc-entry-self.is-current {
     background: var(--background-modifier-active-hover);
     border-left: 3px solid var(--interactive-accent);
@@ -113,6 +147,10 @@
 
   .toc-entry-self.is-current .toc-entry-label {
     color: var(--interactive-accent);
+    font-weight: 500;
+  }
+
+  .toc-entry-self.is-ancestor .toc-entry-label {
     font-weight: 500;
   }
 
@@ -141,6 +179,14 @@
     flex-shrink: 0;
   }
 
+  .toc-entry-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
   .toc-entry-label {
     font-size: var(--font-ui-small);
     line-height: 1.3;
@@ -148,7 +194,28 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 1;
+  }
+
+  .toc-progress-bar {
+    height: 3px;
+    background: var(--background-modifier-border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .toc-progress-fill {
+    height: 100%;
+    background: var(--interactive-accent);
+    border-radius: 2px;
+    transition: width 200ms ease;
+  }
+
+  .toc-progress-text {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    flex-shrink: 0;
+    min-width: 32px;
+    text-align: right;
   }
 
   .toc-children {

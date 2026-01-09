@@ -43,6 +43,7 @@ import { SelectionHandler, type SelectionData } from './renderer/selection';
 import { getObsidianThemeColors, isObsidianDarkMode } from './reader-settings';
 import { generateFullCfi } from './renderer/cfi-utils';
 import { ContentSanitizer, type SanitizerConfig } from '../security';
+import { parseHref, pageToSpineIndex } from './utils/href-parser';
 
 // ============================================================================
 // Theme Colors
@@ -195,11 +196,13 @@ export class ShadowDOMRenderer {
     this.setupThemeObserver();
 
     // Set up CSS highlights if supported
+    // IMPORTANT: Pass shadow root to inject highlight styles into Shadow DOM
     if (isCSSHighlightAPISupported()) {
       console.log('[ShadowDOMRenderer] Using CSS Custom Highlight API');
       this.cssHighlights = new CSSHighlightManager(
         this.view.getDocument(),
-        (highlightId, position) => this.emit('highlightClicked', { annotationId: highlightId, position })
+        (highlightId, position) => this.emit('highlightClicked', { annotationId: highlightId, position }),
+        this.view.getShadowRoot()
       );
     }
 
@@ -697,15 +700,27 @@ export class ShadowDOMRenderer {
       return;
     }
 
-    const container = this.view.getContentContainer();
-    const TIMEOUT_MS = 50; // Max 50ms per highlight to prevent freeze
+    const shadowRoot = this.view.getShadowRoot();
+    const TIMEOUT_MS = 100; // Max 100ms per highlight for text matching
     let anchored = 0;
     let skipped = 0;
 
     // Process highlights one at a time with timeout protection
     for (let i = 0; i < this.storedHighlights.length; i++) {
       const highlight = this.storedHighlights[i];
-      if (!highlight.cfi) {
+      if (!highlight.text) {
+        skipped++;
+        continue;
+      }
+
+      // Get the chapter element for this specific highlight
+      // This is crucial - we must search within the correct chapter, not the entire container
+      const chapterEl = shadowRoot.querySelector(
+        `.epub-chapter[data-spine-index="${highlight.spineIndex}"]`
+      ) as HTMLElement | null;
+
+      if (!chapterEl || !chapterEl.textContent?.length) {
+        // Chapter not loaded yet or empty - skip for now
         skipped++;
         continue;
       }
@@ -714,7 +729,20 @@ export class ShadowDOMRenderer {
       const spineItem = this.book?.spine[highlight.spineIndex];
       const href = spineItem?.href || '';
 
-      // Create locator from highlight - NO text matching to avoid fuzzy search
+      // Get text context from selector if available
+      // The selector has textQuote with prefix/suffix for better matching
+      const fallback = highlight.selector?.fallback;
+      const textContext = fallback && fallback.type === 'TextQuoteSelector'
+        ? {
+            highlight: fallback.exact || highlight.text,
+            before: fallback.prefix,
+            after: fallback.suffix,
+          }
+        : { highlight: highlight.text };
+
+      // Create locator from highlight
+      // CFI resolution doesn't work with Shadow DOM (wrapper elements in path),
+      // so we use text-based anchoring with context
       const locator: Locator = {
         href,
         locations: {
@@ -722,14 +750,14 @@ export class ShadowDOMRenderer {
           cfi: highlight.cfi,
           position: highlight.spineIndex,
         },
-        // IMPORTANT: Don't include text - this triggers expensive fuzzy matching
-        // text: highlight.text ? { highlight: highlight.text } : undefined,
+        // Include text with context for exact match fallback
+        text: textContext,
       };
 
       try {
-        // Anchor with timeout protection
+        // Anchor with timeout protection - search within the specific chapter element
         const result = await Promise.race([
-          anchorToDOM(locator, container),
+          anchorToDOM(locator, chapterEl),
           new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS))
         ]);
 
@@ -794,33 +822,19 @@ export class ShadowDOMRenderer {
       console.warn('[ShadowDOMRenderer] Failed to generate CFI for selection:', error);
     }
 
-    // Translate position from shadow DOM to viewport coordinates
-    const viewportPosition = this.translateToViewportCoords(data.position);
+    // IMPORTANT: data.position is already in viewport coordinates (clientX/clientY)
+    // from the SelectionHandler. No translation needed.
+    // The previous translateToViewportCoords() incorrectly added container offsets.
 
     // Emit the selected event
     this.emit('selected', {
       text: data.text,
       cfi,
       range: data.range,
-      position: viewportPosition,
+      position: data.position, // Already viewport coordinates
       spineIndex: this.currentSpineIndex,
       selector: data.selector,
     });
-  }
-
-  /**
-   * Translate coordinates from shadow DOM document to main viewport
-   */
-  private translateToViewportCoords(pos: { x: number; y: number }): { x: number; y: number } {
-    if (!this.view) return pos;
-
-    // Get the container's position in the viewport
-    const containerRect = this.container.getBoundingClientRect();
-
-    return {
-      x: pos.x + containerRect.left,
-      y: pos.y + containerRect.top,
-    };
   }
 
   // ============================================================================
@@ -961,15 +975,47 @@ export class ShadowDOMRenderer {
   async navigateToHref(href: string): Promise<void> {
     if (!this.book || !this.navigator) return;
 
-    // Split href into path and hash
-    let targetHref = href;
-    let hash: string | undefined;
+    // Parse the href to determine navigation type
+    const parsed = parseHref(href);
 
-    const hashIndex = href.indexOf('#');
-    if (hashIndex !== -1) {
-      targetHref = href.substring(0, hashIndex);
-      hash = href.substring(hashIndex + 1);
+    // Handle special schemes (position:N, page:N)
+    if (parsed.type === 'position') {
+      // Direct spine index navigation
+      const spineIndex = parsed.spineIndex;
+      if (spineIndex >= 0 && spineIndex < this.book.spine.length) {
+        await this.navigator.goTo(
+          { type: 'position', position: spineIndex },
+          { instant: false }
+        );
+        setTimeout(() => {
+          this.highlightFirstVisibleElement(spineIndex);
+        }, 150);
+      } else {
+        console.warn('[ShadowDOMRenderer] Invalid position index:', spineIndex);
+      }
+      return;
     }
+
+    if (parsed.type === 'page') {
+      // Page-based navigation (1-indexed page → 0-indexed spine)
+      const spineIndex = pageToSpineIndex(parsed.pageNumber, this.book.spine.length);
+      if (spineIndex >= 0) {
+        await this.navigator.goTo(
+          { type: 'position', position: spineIndex },
+          { instant: false }
+        );
+        setTimeout(() => {
+          this.highlightFirstVisibleElement(spineIndex);
+        }, 150);
+      } else {
+        console.warn('[ShadowDOMRenderer] Invalid page number:', parsed.pageNumber);
+      }
+      return;
+    }
+
+    // Standard href navigation
+    const targetHref = parsed.href;
+    const hash = parsed.fragment;
 
     // Find the spine index with flexible matching
     let spineIndex = this.findSpineIndex(targetHref);
@@ -1044,8 +1090,13 @@ export class ShadowDOMRenderer {
   /**
    * Navigate to a highlight by CFI and text.
    * Uses text search to find the exact location within the chapter.
+   * Enhanced with:
+   * - Skip navigation if already visible
+   * - Highlight color for blink effect
+   * - Directional animations for scrolled mode
+   * - Fade transitions for paginated mode
    */
-  async navigateToHighlight(cfi: string, text: string): Promise<void> {
+  async navigateToHighlight(cfi: string, text: string, color?: HighlightColor): Promise<void> {
     if (!this.navigator || !this.view || !this.book) return;
 
     // Extract spine index from CFI
@@ -1061,7 +1112,40 @@ export class ShadowDOMRenderer {
       return;
     }
 
-    // First, navigate to the chapter to ensure it's loaded
+    // Find the text within the chapter first to check visibility
+    const shadowRoot = this.view.getShadowRoot();
+    let chapterEl = shadowRoot.querySelector(`.epub-chapter[data-spine-index="${spineIndex}"]`);
+
+    // Try to find the range in current state (if chapter is loaded)
+    let range: Range | null = null;
+    const searchText = text.slice(0, 100);
+
+    if (chapterEl) {
+      range = this.findTextRange(searchText, chapterEl as HTMLElement);
+
+      // Check if highlight is already visible - skip navigation if so
+      if (range && this.isRangeVisible(range)) {
+        // Just apply blink effect, don't navigate
+        this.highlightTextWithBlink(range, text, color);
+        return;
+      }
+    }
+
+    // Check if we're in paginated mode for fade transition
+    const isPaginatedMode = this.navigator.mode === 'paginated';
+    const viewportWrapper = this.view.getViewportWrapper();
+
+    // For paginated mode: fade out FIRST before any navigation
+    // This ensures a smooth fade-in/fade-out transition instead of visible page shifts
+    if (isPaginatedMode && viewportWrapper) {
+      viewportWrapper.style.transition = 'opacity 0.12s ease-out';
+      viewportWrapper.style.opacity = '0';
+      await new Promise(r => setTimeout(r, 120));
+    }
+
+    // Navigate to the chapter to ensure it's loaded
+    // For paginated mode, this is invisible (faded out)
+    // For scrolled mode, this jumps instantly to let navigateToElement do the directional scroll
     await this.navigator.goTo(
       { type: 'href', href: spineItem.href },
       { instant: true }
@@ -1069,42 +1153,106 @@ export class ShadowDOMRenderer {
 
     // Wait for content to be ready
     await new Promise(r => requestAnimationFrame(r));
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 50));
 
-    // Find the text within the chapter
-    const searchText = text.slice(0, 100);
-    const shadowRoot = this.view.getShadowRoot();
-    const chapterEl = shadowRoot.querySelector(`.epub-chapter[data-spine-index="${spineIndex}"]`);
+    // Re-find the chapter element after navigation
+    chapterEl = shadowRoot.querySelector(`.epub-chapter[data-spine-index="${spineIndex}"]`);
 
     if (!chapterEl) {
       console.warn('[ShadowDOMRenderer] Chapter element not found for spine index:', spineIndex);
+      // Restore opacity if we faded out
+      if (isPaginatedMode && viewportWrapper) {
+        viewportWrapper.style.transition = 'opacity 0.15s ease-in';
+        viewportWrapper.style.opacity = '1';
+        await new Promise(r => setTimeout(r, 150));
+        viewportWrapper.style.transition = '';
+        viewportWrapper.style.opacity = '';
+      }
       return;
     }
 
-    // Search for the text
-    const range = this.findTextRange(searchText, chapterEl as HTMLElement);
+    // Search for the text again if needed
+    if (!range) {
+      range = this.findTextRange(searchText, chapterEl as HTMLElement);
+    }
 
     if (!range) {
       console.warn('[ShadowDOMRenderer] Text not found in chapter:', searchText.slice(0, 30));
+      // Restore opacity if we faded out
+      if (isPaginatedMode && viewportWrapper) {
+        viewportWrapper.style.transition = 'opacity 0.15s ease-in';
+        viewportWrapper.style.opacity = '1';
+        await new Promise(r => setTimeout(r, 150));
+        viewportWrapper.style.transition = '';
+        viewportWrapper.style.opacity = '';
+      }
       return;
     }
 
-    // Navigate to the column containing the text
+    // Navigate to the column containing the text element
     const targetElement = range.commonAncestorContainer.parentElement;
     if (targetElement) {
-      // For paginated mode, need to navigate to the correct column
-      const elementColumn = this.getColumnForElement(targetElement, spineIndex);
-      if (elementColumn !== null) {
-        await this.navigator.goTo(
-          { type: 'progression', progression: elementColumn / this.getTotalColumns() },
-          { instant: true }
-        );
+      if (isPaginatedMode) {
+        // Paginated mode: navigate instantly (we're already faded out), then fade in
+        await this.navigator.navigateToElement(targetElement, spineIndex, { instant: true });
+
+        // Small delay to ensure transform is applied
+        await new Promise(r => setTimeout(r, 30));
+
+        // Fade in
+        viewportWrapper.style.transition = 'opacity 0.18s ease-in';
+        viewportWrapper.style.opacity = '1';
+        await new Promise(r => setTimeout(r, 180));
+
+        // Clean up
+        viewportWrapper.style.transition = '';
+        viewportWrapper.style.opacity = '';
+      } else {
+        // Scrolled mode: use animated navigation with directional indicator
+        await this.navigator.navigateToElement(targetElement, spineIndex, { instant: false });
+
+        // Wait for scroll animation to complete
+        await new Promise(r => setTimeout(r, 400));
       }
 
-      // Apply blink animation
-      await new Promise(r => setTimeout(r, 50));
-      this.highlightTextWithBlink(range);
+      // Re-anchor highlights after navigation to ensure they're visible
+      await this.reanchorHighlights();
+
+      // Re-query the chapter element as it may have been replaced during navigation
+      const freshChapterEl = shadowRoot.querySelector(`.epub-chapter[data-spine-index="${spineIndex}"]`);
+      if (!freshChapterEl) {
+        console.warn('[ShadowDOMRenderer] Chapter element not found after navigation');
+        return;
+      }
+
+      // Re-find the range in the fresh chapter element
+      const freshRange = this.findTextRange(searchText, freshChapterEl as HTMLElement);
+
+      if (freshRange) {
+        this.highlightTextWithBlink(freshRange, text, color);
+      } else {
+        console.warn('[ShadowDOMRenderer] Could not find text after navigation');
+      }
     }
+  }
+
+  /**
+   * Check if a range is currently visible in the viewport
+   */
+  private isRangeVisible(range: Range): boolean {
+    const rect = range.getBoundingClientRect();
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+
+    // Check if any part of the range is in the viewport
+    return (
+      rect.top < viewportHeight &&
+      rect.bottom > 0 &&
+      rect.left < viewportWidth &&
+      rect.right > 0 &&
+      rect.width > 0 &&
+      rect.height > 0
+    );
   }
 
   /**
@@ -1225,42 +1373,31 @@ export class ShadowDOMRenderer {
   }
 
   /**
-   * Get column number for an element
+   * Highlight color mapping for blink animation
    */
-  private getColumnForElement(element: HTMLElement, spineIndex: number): number | null {
-    if (!this.navigator) return null;
-
-    const container = this.navigator.getContentContainer();
-    if (!container) return null;
-
-    const columnWidth = this.navigator.getColumnWidth();
-    const gap = this.config.columnGap;
-    const pageWidth = columnWidth + gap;
-
-    if (pageWidth <= 0) return null;
-
-    const containerRect = container.getBoundingClientRect();
-    const elementRect = element.getBoundingClientRect();
-    const scrollLeft = container.scrollLeft;
-    const elementLeft = elementRect.left - containerRect.left + scrollLeft;
-
-    return Math.floor(elementLeft / pageWidth);
-  }
+  private readonly BLINK_COLORS: Record<HighlightColor, string> = {
+    yellow: 'rgba(254, 243, 199, 0.8)',
+    green: 'rgba(187, 247, 208, 0.8)',
+    blue: 'rgba(191, 219, 254, 0.8)',
+    pink: 'rgba(251, 207, 232, 0.8)',
+    purple: 'rgba(221, 214, 254, 0.8)',
+    orange: 'rgba(254, 215, 170, 0.8)',
+  };
 
   /**
-   * Get total columns
+   * Highlight text with blink animation using the highlight's color.
+   * For highlights: Uses the actual highlight color to span the full text.
+   * For other elements (links, headings): Uses the accent color.
    */
-  private getTotalColumns(): number {
-    const info = this.navigator?.getPaginationInfo();
-    return info?.totalPages ?? 1;
-  }
-
-  /**
-   * Highlight text with blink animation
-   */
-  private highlightTextWithBlink(range: Range): void {
+  private highlightTextWithBlink(range: Range, fullText?: string, color?: HighlightColor): void {
     try {
-      // Create a temporary span around the text
+      // For highlights with color, create a custom blink effect
+      if (color && this.BLINK_COLORS[color]) {
+        this.applyHighlightBlink(range, fullText, color);
+        return;
+      }
+
+      // Fallback: Create a temporary span around the text with default accent color
       const span = document.createElement('span');
       span.className = 'highlight-blink';
       range.surroundContents(span);
@@ -1274,7 +1411,7 @@ export class ShadowDOMRenderer {
           }
           parent.removeChild(span);
         }
-      }, 1500);
+      }, 800);
     } catch (e) {
       // Range might span multiple elements, use alternative approach
       const ancestor = range.commonAncestorContainer.parentElement;
@@ -1282,6 +1419,118 @@ export class ShadowDOMRenderer {
         this.applyLinkTargetAnimation(ancestor);
       }
     }
+  }
+
+  /**
+   * Apply blink animation for highlights with their specific color.
+   * Creates an overlay that pulses with the highlight color.
+   */
+  private applyHighlightBlink(range: Range, fullText?: string, color?: HighlightColor): void {
+    if (!this.view || !color) return;
+
+    const blinkColor = this.BLINK_COLORS[color] || this.BLINK_COLORS.yellow;
+
+    // Try to expand range to full highlight text if provided
+    let targetRange = range;
+    if (fullText && fullText.length > 100) {
+      // Find the full text range
+      const container = range.commonAncestorContainer.parentElement;
+      if (container) {
+        const fullRange = this.findTextRange(fullText, container);
+        if (fullRange) {
+          targetRange = fullRange;
+        }
+      }
+    }
+
+    // Get all client rects for the range (handles multi-line highlights)
+    const rects = Array.from(targetRange.getClientRects());
+    if (rects.length === 0) return;
+
+    // Create overlay container
+    const overlayContainer = document.createElement('div');
+    overlayContainer.className = 'highlight-blink-overlay';
+    overlayContainer.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 9999;
+    `;
+
+    // Create blink rectangles for each line of the highlight
+    for (const rect of rects) {
+      if (rect.width < 2 || rect.height < 2) continue;
+
+      const blinkRect = document.createElement('div');
+      blinkRect.className = 'highlight-blink-rect';
+      blinkRect.style.cssText = `
+        position: fixed;
+        top: ${rect.top}px;
+        left: ${rect.left}px;
+        width: ${rect.width}px;
+        height: ${rect.height}px;
+        background-color: ${blinkColor};
+        border-radius: 2px;
+        animation: highlight-glow-fade 2.5s ease-in-out forwards;
+        pointer-events: none;
+      `;
+      overlayContainer.appendChild(blinkRect);
+    }
+
+    // Add keyframes to document head (not shadow root) for proper animation
+    this.ensureBlinkKeyframesInDocument();
+
+    // Add to document body (not shadow root) so fixed positioning works correctly
+    document.body.appendChild(overlayContainer);
+
+    // Remove after animation completes (2.5s glow-fade animation)
+    setTimeout(() => {
+      overlayContainer.remove();
+    }, 2600);
+  }
+
+  /**
+   * Ensure the blink keyframes are added to the shadow root
+   */
+  private ensureBlinkKeyframes(shadowRoot: ShadowRoot): void {
+    const existingStyle = shadowRoot.querySelector('#highlight-blink-keyframes');
+    if (existingStyle) return;
+
+    const style = document.createElement('style');
+    style.id = 'highlight-blink-keyframes';
+    style.textContent = `
+      @keyframes highlight-glow-fade {
+        0% { opacity: 0; }
+        10% { opacity: 0.85; }
+        40% { opacity: 0.85; }
+        100% { opacity: 0; }
+      }
+    `;
+    shadowRoot.appendChild(style);
+  }
+
+  /**
+   * Ensure the blink keyframes are added to the document head
+   * (needed when overlay is appended to document.body instead of shadow root)
+   */
+  private ensureBlinkKeyframesInDocument(): void {
+    const existingStyle = document.getElementById('highlight-blink-keyframes-global');
+    if (existingStyle) return;
+
+    const style = document.createElement('style');
+    style.id = 'highlight-blink-keyframes-global';
+    style.textContent = `
+      @keyframes highlight-glow-fade {
+        0% { opacity: 0; }
+        10% { opacity: 0.85; }
+        40% { opacity: 0.85; }
+        100% { opacity: 0; }
+      }
+    `;
+    document.head.appendChild(style);
   }
 
   /**

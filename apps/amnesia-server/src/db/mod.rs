@@ -1,14 +1,19 @@
 //! Database module for SQLite persistence
 //!
-//! Handles reading progress, highlights, and library metadata storage.
+//! Handles reading progress, highlights, library metadata storage,
+//! and full-text search via FTS5.
 
 mod highlights;
 mod progress;
 mod schema;
+pub mod search;
 
 pub use highlights::*;
 pub use progress::*;
 pub use schema::*;
+pub use search::{
+    BookSearchResult, FTS5Search, FTS5Stats, HighlightSearchResult, UnifiedSearchResult,
+};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::str::FromStr;
@@ -29,6 +34,12 @@ pub async fn create_pool(database_url: &str) -> Result<SqlitePool> {
 
     // Run migrations
     initialize_schema(&pool).await?;
+
+    // Initialize FTS5 search tables
+    let fts = FTS5Search::new(&pool);
+    if let Err(e) = fts.initialize().await {
+        tracing::warn!("Failed to initialize FTS5: {}. Search may be unavailable.", e);
+    }
 
     Ok(pool)
 }

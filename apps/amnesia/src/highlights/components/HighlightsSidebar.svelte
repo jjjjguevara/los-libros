@@ -4,7 +4,7 @@
   import type { Store } from '../../helpers/store';
   import type { HighlightState, HighlightAction } from '../highlight-store';
   import type { Highlight, Book, HighlightColor } from '../../library/types';
-  import { Search, Trash2, ExternalLink, ChevronDown, ChevronRight } from 'lucide-svelte';
+  import { Search, Trash2, ExternalLink, ChevronDown, ChevronRight, Check, Circle, AlertTriangle } from 'lucide-svelte';
 
   export let plugin: AmnesiaPlugin;
   export let store: Store<HighlightState, HighlightAction>;
@@ -67,12 +67,80 @@
     return `border-left-color: ${colors[color]};`;
   }
 
+  // Get sync status for highlight (synced, pending, or conflict)
+  type SyncStatus = 'synced' | 'pending' | 'conflict';
+  function getSyncStatus(highlight: Highlight): SyncStatus {
+    // Check if highlight has conflict (lastSyncedAt exists but highlight was updated after)
+    if (highlight.syncedToDocDoctor && highlight.lastSyncedAt) {
+      const lastSyncTime = highlight.lastSyncedAt;
+      const updateTime = highlight.updatedAt.getTime();
+      if (updateTime > lastSyncTime) {
+        return 'conflict'; // Modified after last sync
+      }
+      return 'synced';
+    }
+    return 'pending';
+  }
+
+  // Get sync status tooltip
+  function getSyncTooltip(status: SyncStatus): string {
+    switch (status) {
+      case 'synced': return 'Synced to Doc Doctor';
+      case 'pending': return 'Not synced to Doc Doctor';
+      case 'conflict': return 'Modified since last sync';
+    }
+  }
+
   // Navigate to highlight in reader
   async function goToHighlight(highlight: Highlight) {
     const book = getBook(highlight.bookId);
-    if (book?.localPath) {
-      await plugin.openBook(book.localPath);
-      // The reader will navigate to the CFI
+    if (!book?.localPath) {
+      console.warn('[HighlightsSidebar] Cannot navigate: no local path for book', highlight.bookId);
+      return;
+    }
+
+    const bookPath = book.localPath;
+
+    // First, check if there's already an open reader for this book
+    const leaves = plugin.app.workspace.getLeavesOfType('amnesia-reader');
+    let existingLeaf = null;
+    for (const leaf of leaves) {
+      const view = leaf.view as any;
+      if (view.bookPath === bookPath || view.getState?.()?.bookPath === bookPath) {
+        existingLeaf = leaf;
+        break;
+      }
+    }
+
+    if (existingLeaf) {
+      // Reader already open - navigate directly
+      const view = existingLeaf.view as any;
+      plugin.app.workspace.revealLeaf(existingLeaf);
+      // Access navigateToHighlight via component (method may not be on view due to minification)
+      const navigateFn = view.navigateToHighlight?.bind(view) || view.component?.navigateToHighlight?.bind(view.component);
+      if (navigateFn) {
+        await navigateFn(highlight.cfi, highlight.text, highlight.color);
+      }
+    } else {
+      // Open the book first
+      await plugin.openBook(bookPath);
+
+      // Wait for the view to be ready then navigate
+      // Use a short delay to let the view initialize
+      setTimeout(async () => {
+        const newLeaves = plugin.app.workspace.getLeavesOfType('amnesia-reader');
+        for (const leaf of newLeaves) {
+          const view = leaf.view as any;
+          if (view.bookPath === bookPath || view.getState?.()?.bookPath === bookPath) {
+            // Access navigateToHighlight via component (method may not be on view due to minification)
+            const navigateFn = view.navigateToHighlight?.bind(view) || view.component?.navigateToHighlight?.bind(view.component);
+            if (navigateFn) {
+              await navigateFn(highlight.cfi, highlight.text, highlight.color);
+            }
+            break;
+          }
+        }
+      }, 500); // Wait for view to initialize and load content
     }
   }
 
@@ -141,6 +209,7 @@
             {#if expandedBooks.has(bookId)}
               <div class="book-highlights">
                 {#each highlights as highlight (highlight.id)}
+                  {@const syncStatus = getSyncStatus(highlight)}
                   <div
                     class="highlight-card"
                     style={getColorStyle(highlight.color)}
@@ -165,6 +234,18 @@
                     {/if}
 
                     <div class="highlight-actions">
+                      <span
+                        class="sync-indicator sync-{syncStatus}"
+                        title={getSyncTooltip(syncStatus)}
+                      >
+                        {#if syncStatus === 'synced'}
+                          <Check size={12} />
+                        {:else if syncStatus === 'conflict'}
+                          <AlertTriangle size={12} />
+                        {:else}
+                          <Circle size={12} />
+                        {/if}
+                      </span>
                       <button
                         class="action-btn"
                         title="Go to highlight"
@@ -357,5 +438,29 @@
 
   .action-btn.danger:hover {
     color: var(--text-error);
+  }
+
+  /* Sync status indicators */
+  .sync-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    cursor: help;
+  }
+
+  .sync-synced {
+    color: var(--color-green);
+  }
+
+  .sync-pending {
+    color: var(--text-muted);
+    opacity: 0.5;
+  }
+
+  .sync-conflict {
+    color: var(--color-orange);
   }
 </style>

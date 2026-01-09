@@ -29,6 +29,7 @@ import type {
   PdfTextLayerData,
   PdfRenderOptions,
   PdfSearchResult,
+  TocEntry,
 } from '../types';
 import { PdfPageCache } from './pdf-cache';
 import { WasmPdfRenderer, getSharedWasmRenderer, destroySharedWasmRenderer } from './wasm-renderer';
@@ -265,7 +266,7 @@ export class HybridPdfProvider {
       this.parsedPdf = await this.apiClient.uploadPdf(data, documentId);
       this.documentId = this.parsedPdf.id;
     } else {
-      // WASM-only mode: create minimal ParsedPdf from WASM data
+      // WASM-only mode: create ParsedPdf from WASM data including TOC
       const wasmResult = await wasmLoadPromise;
       this.parsedPdf = {
         id: wasmResult?.id ?? documentId ?? `wasm-${Date.now()}`,
@@ -273,7 +274,7 @@ export class HybridPdfProvider {
           title: documentId ?? 'Untitled PDF',
           keywords: [],
         },
-        toc: [],
+        toc: wasmResult?.toc ?? [],
         pageCount: wasmResult?.pageCount ?? 0,
         hasTextLayer: true, // WASM always extracts text
         orientation: 'portrait',
@@ -295,7 +296,7 @@ export class HybridPdfProvider {
   /**
    * Load document into WASM renderer
    */
-  private async loadDocumentToWasm(data: ArrayBuffer): Promise<{ id: string; pageCount: number } | null> {
+  private async loadDocumentToWasm(data: ArrayBuffer): Promise<{ id: string; pageCount: number; toc: TocEntry[] } | null> {
     if (!this.wasmRenderer || !this.wasmAvailable) {
       return null;
     }
@@ -304,7 +305,8 @@ export class HybridPdfProvider {
       const startTime = performance.now();
       const result = await this.wasmRenderer.loadDocument(data.slice(0)); // Clone to avoid transfer issues
       this.wasmDocumentId = result.id;
-      console.log(`[HybridPdfProvider] WASM loaded document (${result.pageCount} pages) in ${(performance.now() - startTime).toFixed(1)}ms`);
+      const tocCount = result.toc?.length ?? 0;
+      console.log(`[HybridPdfProvider] WASM loaded document (${result.pageCount} pages, ${tocCount} TOC entries) in ${(performance.now() - startTime).toFixed(1)}ms`);
 
       // Set up render coordinator now that WASM document is loaded
       if (this.renderCoordinator) {

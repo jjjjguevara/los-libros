@@ -56,17 +56,22 @@ export type HighlightClickCallback = (
  *
  * Manages highlights using the native CSS Custom Highlight API.
  * Each color gets its own Highlight object in the registry.
+ *
+ * IMPORTANT: For Shadow DOM content, pass the shadowRoot parameter
+ * to inject styles into the shadow root instead of document.head.
  */
 export class CSSHighlightManager {
   private doc: Document;
+  private shadowRoot: ShadowRoot | null = null;
   private highlightMap = new Map<string, HighlightData>();
   private colorHighlights = new Map<HighlightColor, Highlight>();
   private styleElement: HTMLStyleElement | null = null;
   private onHighlightClick?: HighlightClickCallback;
   private clickHandler?: (e: MouseEvent) => void;
 
-  constructor(doc: Document, onHighlightClick?: HighlightClickCallback) {
+  constructor(doc: Document, onHighlightClick?: HighlightClickCallback, shadowRoot?: ShadowRoot) {
     this.doc = doc;
+    this.shadowRoot = shadowRoot ?? null;
     this.onHighlightClick = onHighlightClick;
 
     if (!isCSSHighlightAPISupported()) {
@@ -80,6 +85,9 @@ export class CSSHighlightManager {
 
   /**
    * Inject CSS styles for highlight pseudo-elements
+   *
+   * For Shadow DOM: Styles are injected into the shadow root.
+   * For regular DOM: Styles are injected into document.head.
    */
   private injectStyles(): void {
     // Remove any existing style element
@@ -96,7 +104,15 @@ export class CSSHighlightManager {
     );
 
     this.styleElement.textContent = rules.join('\n');
-    this.doc.head.appendChild(this.styleElement);
+
+    // Inject into shadow root if provided, otherwise use document head
+    if (this.shadowRoot) {
+      this.shadowRoot.appendChild(this.styleElement);
+      console.debug('[CSSHighlights] Injected styles into Shadow DOM');
+    } else {
+      this.doc.head.appendChild(this.styleElement);
+      console.debug('[CSSHighlights] Injected styles into document head');
+    }
   }
 
   /**
@@ -122,7 +138,16 @@ export class CSSHighlightManager {
       }
     };
 
-    this.doc.addEventListener('click', this.clickHandler);
+    // Listen on shadow root if available, otherwise document
+    const eventTarget = this.shadowRoot || this.doc;
+    eventTarget.addEventListener('click', this.clickHandler as EventListener);
+  }
+
+  /**
+   * Get the event target (shadow root or document)
+   */
+  private getEventTarget(): Document | ShadowRoot {
+    return this.shadowRoot || this.doc;
   }
 
   /**
@@ -350,9 +375,10 @@ export class CSSHighlightManager {
     this.colorHighlights.clear();
     this.highlightMap.clear();
 
-    // Remove click handler
+    // Remove click handler from correct target
     if (this.clickHandler) {
-      this.doc.removeEventListener('click', this.clickHandler);
+      const eventTarget = this.getEventTarget();
+      eventTarget.removeEventListener('click', this.clickHandler as EventListener);
     }
 
     // Remove CSS from registry

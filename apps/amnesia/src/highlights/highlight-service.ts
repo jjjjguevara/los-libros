@@ -5,7 +5,11 @@ import { App } from 'obsidian';
 import { v4 as uuidv4 } from 'uuid';
 import { Store } from '../helpers/store';
 import { HighlightState, HighlightAction, PendingSelection } from './highlight-store';
-import { NoteGenerator } from '../templates/note-generator';
+import { HighlightGenerator } from '../generators';
+import { getAnnotationTypeFromColor } from '@shared/annotations';
+import type { AnnotationType } from '@shared/annotations';
+import type { HighlightData } from '../templates/unified-note-generator';
+import type { UnifiedBook } from '../types/unified-book';
 import type { Highlight, HighlightColor, HighlightSelector, Book } from '../library/types';
 
 interface HighlightIndex {
@@ -23,11 +27,68 @@ export class HighlightService {
     private store: Store<HighlightState, HighlightAction>,
     private loadData: () => Promise<unknown>,
     private saveData: (data: unknown) => Promise<void>,
-    private noteGenerator?: NoteGenerator
+    private highlightGenerator?: HighlightGenerator
   ) {
     this.index = {
       version: HIGHLIGHT_INDEX_VERSION,
       highlights: {},
+    };
+  }
+
+  /**
+   * Convert legacy Book to UnifiedBook format
+   */
+  private bookToUnifiedBook(book: Book): UnifiedBook {
+    const now = new Date();
+    return {
+      id: book.id,
+      title: book.title,
+      authors: book.author ? [{ name: book.author }] : [],
+      description: book.description,
+      publisher: book.publisher,
+      publishedDate: book.publishedDate ? new Date(book.publishedDate) : undefined,
+      language: book.language,
+      isbn: book.isbn,
+      coverUrl: book.coverUrl,
+      status: book.status === 'to-read' ? 'to-read' :
+              book.status === 'reading' ? 'reading' :
+              book.status === 'completed' ? 'completed' :
+              book.status === 'archived' ? 'archived' : 'to-read',
+      progress: book.progress,
+      currentCfi: book.currentCfi,
+      lastReadAt: book.lastRead,
+      completedAt: book.completedAt,
+      sources: book.localPath ? [{
+        type: 'vault-copy' as const,
+        vaultPath: book.localPath,
+        addedAt: book.addedAt,
+        copiedAt: book.addedAt,
+        lastVerified: now,
+        priority: 0,
+      }] : [],
+      formats: book.formats.map(f => ({
+        type: f as 'epub' | 'pdf' | 'mobi' | 'azw3' | 'cbz' | 'cbr' | 'fb2',
+        path: book.localPath || '',
+      })),
+      tags: [],
+      addedAt: book.addedAt,
+    };
+  }
+
+  /**
+   * Convert legacy Highlight to HighlightData format
+   */
+  private highlightToHighlightData(highlight: Highlight): HighlightData {
+    return {
+      id: highlight.id,
+      text: highlight.text,
+      annotation: highlight.annotation,
+      chapter: highlight.chapter,
+      cfi: highlight.cfi,
+      color: highlight.color,
+      createdAt: highlight.createdAt,
+      updatedAt: highlight.updatedAt,
+      notePath: highlight.atomicNotePath,
     };
   }
 
@@ -108,6 +169,8 @@ export class HighlightService {
       chapter?: string;
       pagePercent?: number;
       annotation?: string;
+      // Semantic categorization (overrides auto-detection from color)
+      category?: AnnotationType;
       // NEW: Robust anchoring fields
       spineIndex?: number;
       textQuote?: {
@@ -142,6 +205,9 @@ export class HighlightService {
       }),
     };
 
+    // Auto-categorize based on color, or use explicit category if provided
+    const category = options?.category ?? getAnnotationTypeFromColor(color);
+
     const highlight: Highlight = {
       id: uuidv4(),
       bookId,
@@ -151,6 +217,10 @@ export class HighlightService {
       chapter: options?.chapter,
       pagePercent: options?.pagePercent,
       annotation: options?.annotation,
+      // Semantic categorization (unified annotation vocabulary)
+      category,
+      // Doc Doctor sync state (initialized as not synced)
+      syncedToDocDoctor: false,
       // NEW: Robust anchoring
       spineIndex: options?.spineIndex ?? 0,
       selector,
@@ -224,7 +294,7 @@ export class HighlightService {
   async updateHighlight(
     bookId: string,
     highlightId: string,
-    updates: Partial<Pick<Highlight, 'color' | 'annotation'>>
+    updates: Partial<Pick<Highlight, 'color' | 'annotation' | 'category' | 'syncedToDocDoctor' | 'docDoctorStubId' | 'lastSyncedAt' | 'atomicNotePath' | 'tags'>>
   ): Promise<Highlight | undefined> {
     const highlights = this.getHighlights(bookId);
     const highlight = highlights.find(h => h.id === highlightId);
@@ -233,9 +303,15 @@ export class HighlightService {
       return undefined;
     }
 
+    // Auto-update category if color changes and no explicit category provided
+    const finalUpdates = { ...updates };
+    if (updates.color && updates.color !== highlight.color && !updates.category) {
+      finalUpdates.category = getAnnotationTypeFromColor(updates.color);
+    }
+
     const updatedHighlight: Highlight = {
       ...highlight,
-      ...updates,
+      ...finalUpdates,
       updatedAt: new Date(),
       synced: false,
     };
@@ -286,31 +362,34 @@ export class HighlightService {
    * Generate atomic note for a highlight
    */
   async generateHighlightNote(book: Book, highlight: Highlight): Promise<void> {
-    if (!this.noteGenerator) {
-      console.warn('Note generator not available');
+    if (!this.highlightGenerator) {
+      console.warn('Highlight generator not available');
       return;
     }
 
-    const file = await this.noteGenerator.generateHighlightNote(book, highlight);
+    // Convert to unified formats
+    const unifiedBook = this.bookToUnifiedBook(book);
+    const highlightData = this.highlightToHighlightData(highlight);
 
-    // Update highlight with note path
-    await this.updateHighlight(book.id, highlight.id, {
-      ...highlight,
-    });
+    // Generate the atomic highlight note
+    const result = await this.highlightGenerator.generateHighlights(
+      unifiedBook,
+      [highlightData],
+      { generateHub: false, generateAtomic: true }
+    );
 
-    // Store the atomic note path
-    const updatedHighlight = this.getHighlights(book.id).find(h => h.id === highlight.id);
-    if (updatedHighlight) {
-      updatedHighlight.atomicNotePath = file.path;
+    // Get the generated file path from the result
+    const atomicNotePath = result.atomicPathMap.get(highlight.id);
 
-      // Save to index
-      const indexHighlights = this.index.highlights[book.id] || [];
-      const indexIdx = indexHighlights.findIndex(h => h.id === highlight.id);
-      if (indexIdx >= 0) {
-        indexHighlights[indexIdx].atomicNotePath = file.path;
-        await this.saveIndex();
-      }
+    if (!atomicNotePath) {
+      console.warn('Failed to generate atomic highlight note');
+      return;
     }
+
+    // Update highlight with note path (single save operation)
+    await this.updateHighlight(book.id, highlight.id, {
+      atomicNotePath,
+    });
   }
 
   /**
@@ -357,10 +436,10 @@ export class HighlightService {
   }
 
   /**
-   * Update note generator reference
+   * Update highlight generator reference
    */
-  setNoteGenerator(noteGenerator: NoteGenerator): void {
-    this.noteGenerator = noteGenerator;
+  setHighlightGenerator(highlightGenerator: HighlightGenerator): void {
+    this.highlightGenerator = highlightGenerator;
   }
 
   // ==========================================================================
@@ -387,6 +466,17 @@ export class HighlightService {
     if (options.color) {
       const colors = Array.isArray(options.color) ? options.color : [options.color];
       results = results.filter(h => colors.includes(h.color));
+    }
+
+    // Filter by category
+    if (options.category) {
+      const categories = Array.isArray(options.category) ? options.category : [options.category];
+      results = results.filter(h => h.category && categories.includes(h.category));
+    }
+
+    // Filter by Doc Doctor sync status
+    if (options.syncedToDocDoctor !== undefined) {
+      results = results.filter(h => h.syncedToDocDoctor === options.syncedToDocDoctor);
     }
 
     // Filter by has annotation
@@ -435,6 +525,8 @@ export class HighlightService {
             return order * a.color.localeCompare(b.color);
           case 'chapter':
             return order * (a.chapter || '').localeCompare(b.chapter || '');
+          case 'category':
+            return order * (a.category || '').localeCompare(b.category || '');
           default:
             return 0;
         }
@@ -496,6 +588,27 @@ export class HighlightService {
   }
 
   /**
+   * Get highlights by semantic category
+   */
+  getHighlightsByCategory(category: AnnotationType, bookId?: string): Highlight[] {
+    return this.queryHighlights({ bookId, category });
+  }
+
+  /**
+   * Get highlights not yet synced to Doc Doctor
+   */
+  getUnsyncedHighlights(bookId?: string): Highlight[] {
+    return this.queryHighlights({ bookId, syncedToDocDoctor: false });
+  }
+
+  /**
+   * Get highlights synced to Doc Doctor
+   */
+  getSyncedHighlights(bookId?: string): Highlight[] {
+    return this.queryHighlights({ bookId, syncedToDocDoctor: true });
+  }
+
+  /**
    * Get highlight statistics
    */
   getHighlightStats(bookId?: string): HighlightStats {
@@ -512,13 +625,20 @@ export class HighlightService {
       orange: 0,
     };
 
+    const countByCategory: Record<string, number> = {};
     const countByChapter: Record<string, number> = {};
     const countByBook: Record<string, number> = {};
     let annotatedCount = 0;
+    let syncedToDocDoctorCount = 0;
 
     for (const h of highlights) {
       // Count by color
       countByColor[h.color] = (countByColor[h.color] || 0) + 1;
+
+      // Count by category
+      if (h.category) {
+        countByCategory[h.category] = (countByCategory[h.category] || 0) + 1;
+      }
 
       // Count by chapter
       const chapter = h.chapter || 'Unknown';
@@ -530,6 +650,11 @@ export class HighlightService {
       // Count annotated
       if (h.annotation) {
         annotatedCount++;
+      }
+
+      // Count synced to Doc Doctor
+      if (h.syncedToDocDoctor) {
+        syncedToDocDoctorCount++;
       }
     }
 
@@ -557,8 +682,10 @@ export class HighlightService {
       totalCount: highlights.length,
       annotatedCount,
       countByColor,
+      countByCategory,
       countByChapter,
       countByBook,
+      syncedToDocDoctorCount,
       recentActivity,
     };
   }
@@ -721,6 +848,8 @@ export interface HighlightQueryOptions {
   bookId?: string;
   /** Filter by color (single or multiple) */
   color?: HighlightColor | HighlightColor[];
+  /** Filter by semantic category (single or multiple) */
+  category?: AnnotationType | AnnotationType[];
   /** Filter by whether highlight has an annotation */
   hasAnnotation?: boolean;
   /** Filter by chapter (partial match) */
@@ -729,8 +858,10 @@ export interface HighlightQueryOptions {
   dateRange?: { start?: Date; end?: Date };
   /** Text search in highlight text and annotations */
   textSearch?: string;
+  /** Filter by Doc Doctor sync status */
+  syncedToDocDoctor?: boolean;
   /** Sort by field */
-  sortBy?: 'date' | 'position' | 'color' | 'chapter';
+  sortBy?: 'date' | 'position' | 'color' | 'chapter' | 'category';
   /** Sort order */
   sortOrder?: 'asc' | 'desc';
   /** Pagination: number of items to skip */
@@ -749,10 +880,14 @@ export interface HighlightStats {
   annotatedCount: number;
   /** Count by color */
   countByColor: Record<HighlightColor, number>;
+  /** Count by semantic category */
+  countByCategory: Record<string, number>;
   /** Count by chapter */
   countByChapter: Record<string, number>;
   /** Count by book */
   countByBook: Record<string, number>;
+  /** Count of highlights synced to Doc Doctor */
+  syncedToDocDoctorCount: number;
   /** Recent activity (last 30 days) */
   recentActivity: Array<{ date: string; count: number }>;
 }

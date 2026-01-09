@@ -1,3 +1,5 @@
+import type { AnnotationType } from '@shared/annotations';
+
 /**
  * Book model for Amnesia
  */
@@ -134,6 +136,14 @@ export interface Highlight {
   color: HighlightColor;
   type?: 'highlight' | 'underline';
   tags?: string[];
+
+  // Semantic categorization (unified annotation vocabulary)
+  category?: AnnotationType;
+
+  // Doc Doctor sync state
+  syncedToDocDoctor?: boolean;
+  docDoctorStubId?: string;
+  lastSyncedAt?: number;
 
   // Position (legacy - kept for backward compatibility)
   cfi: string;

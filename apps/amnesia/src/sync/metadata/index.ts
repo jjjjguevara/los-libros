@@ -6,7 +6,7 @@
  * - Metadata validation and auto-fix
  * - Recovery service for preserving metadata on book removal
  * - Calibre bidirectional sync
- * - Liquid template rendering
+ * - Nunjucks template rendering
  * - Core metadata sync service
  */
 
@@ -51,12 +51,12 @@ export {
   createCalibreBidirectionalSync,
 } from './calibre-bidirectional';
 
-// Liquid template service
+// Nunjucks template service (re-export from templates module)
 export {
-  LiquidTemplateService,
-  createLiquidTemplateService,
+  NunjucksTemplateService,
+  createNunjucksTemplateService,
   DEFAULT_BOOK_TEMPLATE,
-} from './liquid-template-service';
+} from '../../templates/nunjucks-engine';
 
 // Metadata sync service
 export {

@@ -22,7 +22,7 @@
  */
 
 import { MuPDFBridge, getSharedMuPDFBridge, destroySharedMuPDFBridge } from './mupdf-bridge';
-import type { TextLayerData, TextItem, CharPosition, SearchResult } from './mupdf-worker';
+import type { TextLayerData, TextItem, CharPosition, SearchResult, TocEntry } from './mupdf-worker';
 import type { PdfTextLayerData, PdfRenderOptions, PdfSearchResult } from '../types';
 
 /**
@@ -89,9 +89,9 @@ export class WasmPdfRenderer {
    * Load a PDF document from ArrayBuffer
    *
    * @param data PDF file as ArrayBuffer
-   * @returns Page count and document info
+   * @returns Page count, document info, and TOC
    */
-  async loadDocument(data: ArrayBuffer): Promise<{ pageCount: number; id: string }> {
+  async loadDocument(data: ArrayBuffer): Promise<{ pageCount: number; id: string; toc: TocEntry[] }> {
     if (!this.bridge) {
       throw new Error('Renderer not initialized. Call initialize() first.');
     }

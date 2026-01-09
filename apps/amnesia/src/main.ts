@@ -1,12 +1,11 @@
+// Build-time constants defined by esbuild
+declare const __DEV__: boolean;
+
 import { Plugin, WorkspaceLeaf, setIcon, Notice, TFile } from 'obsidian';
 import type { SyncProgress } from './calibre/calibre-types';
 import { AmnesiaSettingTab } from './settings/settings-tab/settings-tab';
 import { LibrosSettings, DEFAULT_SETTINGS } from './settings/settings';
-// DEPRECATED: Library sidebar view - use book notes with 'Open Book in Reader' command instead
-// import { LibraryView, LIBRARY_VIEW_TYPE } from './library/library-view';
 import { ReaderView, READER_VIEW_TYPE } from './reader/reader-view';
-// REMOVED: Old HighlightsView - using in-reader NotebookSidebar instead
-// import { HighlightsView, HIGHLIGHTS_VIEW_TYPE } from './highlights/highlights-view';
 import { OPDSView, OPDS_VIEW_TYPE } from './opds/opds-view';
 import { ImagesView, IMAGES_VIEW_TYPE } from './images/images-view';
 import { BookSidebarView, BOOK_SIDEBAR_VIEW_TYPE } from './sidebar/sidebar-view';
@@ -16,7 +15,6 @@ import { sidebarStore } from './sidebar/sidebar.store';
 import { Store } from './helpers/store';
 import { libraryReducer, LibraryState, LibraryAction } from './library/library-reducer';
 import { LibraryService } from './library/library-service';
-import { NoteGenerator } from './templates/note-generator';
 import { UnifiedNoteGenerator } from './templates/unified-note-generator';
 import { HighlightService } from './highlights/highlight-service';
 import { highlightReducer, HighlightState, HighlightAction, initialHighlightState } from './highlights/highlight-store';
@@ -62,6 +60,12 @@ import { initializeTestHarness } from './reader/renderer/pdf/mcp-test-harness';
 // HUD System
 import { AmnesiaHUD, AmnesiaHUDProvider, isDocDoctorAvailable, getDocDoctorRegistry, onDocDoctorHUDReady } from './hud';
 
+// Doc Doctor Integration
+import { DocDoctorBridge, createDocDoctorBridge } from './integrations';
+
+// Migrations
+import { runCategoryMigration } from './migrations';
+
 export default class AmnesiaPlugin extends Plugin {
 	settings: LibrosSettings;
 	libraryStore: Store<LibraryState, LibraryAction>;
@@ -69,7 +73,6 @@ export default class AmnesiaPlugin extends Plugin {
 	libraryService: LibraryService;
 	highlightService: HighlightService;
 	bookmarkService: BookmarkService;
-	noteGenerator: NoteGenerator;
 	unifiedNoteGenerator: UnifiedNoteGenerator;
 	calibreService: CalibreService;
 
@@ -123,6 +126,12 @@ export default class AmnesiaPlugin extends Plugin {
 	standaloneHUD: AmnesiaHUD | null = null;
 	private docDoctorReadyUnsubscribe: (() => void) | null = null;
 
+	// Doc Doctor Integration
+	docDoctorBridge: DocDoctorBridge | null = null;
+
+	// Active book context tracking
+	private activeLeafChangeRef: import('obsidian').EventRef | null = null;
+
 	async onload() {
 		console.log('Loading Amnesia plugin');
 
@@ -138,9 +147,11 @@ export default class AmnesiaPlugin extends Plugin {
 		const telemetry = getTelemetry();
 		telemetry.startPeriodicMemoryTracking(5000);
 
-		// Initialize PDF lifecycle test harness for MCP access
+		// Initialize PDF lifecycle test harness for MCP access (dev only)
 		// Exposes window.pdfLifecycleTests for interactive testing
-		initializeTestHarness();
+		if (__DEV__) {
+			initializeTestHarness();
+		}
 
 		// Load settings
 		await this.loadSettings();
@@ -164,14 +175,6 @@ export default class AmnesiaPlugin extends Plugin {
 			() => this.loadData(),
 			(data) => this.saveData(data)
 		);
-
-		// Initialize note generator (legacy)
-		this.noteGenerator = new NoteGenerator(this.app, {
-			bookNotesFolder: this.settings.bookNoteFolder,
-			highlightsFolder: this.settings.highlightFolder,
-			bookNoteTemplate: this.settings.bookNoteTemplate,
-			highlightNoteTemplate: this.settings.highlightTemplate,
-		});
 
 		// Initialize unified note generator (new template system)
 		this.unifiedNoteGenerator = new UnifiedNoteGenerator(
@@ -210,7 +213,7 @@ export default class AmnesiaPlugin extends Plugin {
 			this.highlightStore,
 			() => this.loadData(),
 			(data) => this.saveData(data),
-			this.noteGenerator
+			this.highlightGenerator
 		);
 
 		// Initialize bookmark service
@@ -417,13 +420,22 @@ export default class AmnesiaPlugin extends Plugin {
 		// Expose API globally for Templater/QuickAdd
 		(window as any).Amnesia = this.api;
 
-		// Register views
-		// DEPRECATED: Library sidebar view - use book notes with 'Open Book in Reader' command instead
-		// this.registerView(
-		// 	LIBRARY_VIEW_TYPE,
-		// 	(leaf) => new LibraryView(leaf, this)
-		// );
+		// Emit ready event for other plugins (e.g., Doc Doctor)
+		this.app.workspace.trigger('amnesia:ready', {
+			api: this.api,
+			version: this.manifest.version,
+		});
 
+		// Initialize Doc Doctor bridge for cross-plugin integration
+		if (this.settings.docDoctorSync?.enabled) {
+			this.docDoctorBridge = createDocDoctorBridge(this);
+			// Attempt connection (will wait for Doc Doctor if not yet loaded)
+			this.docDoctorBridge.connect().catch((error) => {
+				console.warn('[Amnesia] Doc Doctor bridge connection deferred:', error);
+			});
+		}
+
+		// Register views
 		this.registerView(
 			READER_VIEW_TYPE,
 			(leaf) => {
@@ -440,8 +452,6 @@ export default class AmnesiaPlugin extends Plugin {
 				return view;
 			}
 		);
-
-		// REMOVED: Old HighlightsView - now using in-reader NotebookSidebar instead
 
 		this.registerView(
 			OPDS_VIEW_TYPE,
@@ -1100,6 +1110,11 @@ export default class AmnesiaPlugin extends Plugin {
 			this.initializeHUD();
 		}
 
+		// Register active-leaf-change listener to update sidebar when switching books
+		this.activeLeafChangeRef = this.app.workspace.on('active-leaf-change', (leaf) => {
+			this.handleActiveLeafChange(leaf);
+		});
+
 		// Initialize services on layout ready (or immediately if already ready)
 		const initializeServices = async () => {
 			// Configure library scanner with server settings if enabled
@@ -1110,6 +1125,14 @@ export default class AmnesiaPlugin extends Plugin {
 			}
 
 			await this.libraryService.initialize(this.settings.localBooksFolder);
+
+			// Run highlight category migration before initializing highlight service
+			// This adds semantic categories to existing highlights based on their color
+			await runCategoryMigration(
+				() => this.loadData(),
+				(data) => this.saveData(data)
+			);
+
 			await this.highlightService.initialize();
 			await this.bookmarkService.initialize();
 
@@ -1161,6 +1184,14 @@ export default class AmnesiaPlugin extends Plugin {
 		console.log('Unloading Amnesia plugin');
 
 		// ==========================================================================
+		// Cleanup active-leaf-change listener
+		// ==========================================================================
+		if (this.activeLeafChangeRef) {
+			this.app.workspace.offref(this.activeLeafChangeRef);
+			this.activeLeafChangeRef = null;
+		}
+
+		// ==========================================================================
 		// Cleanup HUD
 		// ==========================================================================
 		if (this.docDoctorReadyUnsubscribe) {
@@ -1176,6 +1207,14 @@ export default class AmnesiaPlugin extends Plugin {
 		if (this.hudProvider) {
 			this.hudProvider.destroy();
 			this.hudProvider = null;
+		}
+
+		// ==========================================================================
+		// Cleanup Doc Doctor Bridge
+		// ==========================================================================
+		if (this.docDoctorBridge) {
+			this.docDoctorBridge.disconnect();
+			this.docDoctorBridge = null;
 		}
 
 		// ==========================================================================
@@ -1487,8 +1526,9 @@ export default class AmnesiaPlugin extends Plugin {
 		// Auto-create book note if enabled and note doesn't exist
 		if (vaultBook && this.settings.autoCreateBookNotes) {
 			try {
-				if (!this.noteGenerator.bookNoteExists(vaultBook)) {
-					await this.noteGenerator.generateBookNote(vaultBook);
+				const unifiedBook = this.convertToUnifiedBook(null, vaultBook);
+				if (!this.bookNoteGenerator.exists(unifiedBook)) {
+					await this.bookNoteGenerator.generate(unifiedBook, []);
 				}
 			} catch (e) {
 				console.warn('Failed to create book note:', e);
@@ -2478,5 +2518,68 @@ export default class AmnesiaPlugin extends Plugin {
 		}).catch((error) => {
 			console.error('[Amnesia] Failed to initialize standalone HUD:', error);
 		});
+	}
+
+	// ==========================================================================
+	// Active Book Context Detection
+	// ==========================================================================
+
+	/**
+	 * Handle active leaf change to update sidebar context.
+	 * Updates the sidebar store when switching between reader views.
+	 */
+	private handleActiveLeafChange(leaf: WorkspaceLeaf | null): void {
+		if (!leaf) return;
+
+		const view = leaf.view;
+		const viewType = view.getViewType();
+
+		// Only handle reader views
+		if (viewType !== READER_VIEW_TYPE) {
+			return;
+		}
+
+		// Extract book info from the reader view
+		const readerView = view as any;
+		const bookPath = readerView.bookPath || readerView.state?.bookPath;
+		const bookTitle = readerView.bookTitle || readerView.state?.bookTitle;
+
+		if (bookPath) {
+			// Generate book ID from path (consistent with other parts of the codebase)
+			const bookId = this.generateBookIdFromPath(bookPath);
+			const title = bookTitle || this.extractTitleFromPath(bookPath);
+
+			// Update sidebar store with the new active book
+			sidebarStore.setActiveBook(bookId, bookPath, title);
+		}
+	}
+
+	/**
+	 * Generate a book ID from the file path.
+	 * Uses the same hashing approach as the library service.
+	 */
+	private generateBookIdFromPath(bookPath: string): string {
+		// Simple hash for consistent ID generation
+		let hash = 0;
+		for (let i = 0; i < bookPath.length; i++) {
+			const char = bookPath.charCodeAt(i);
+			hash = ((hash << 5) - hash) + char;
+			hash = hash & hash; // Convert to 32bit integer
+		}
+		return `book-${Math.abs(hash).toString(16)}`;
+	}
+
+	/**
+	 * Extract a title from the file path.
+	 * Falls back to filename without extension.
+	 */
+	private extractTitleFromPath(bookPath: string): string {
+		const parts = bookPath.split('/');
+		const filename = parts[parts.length - 1] || 'Unknown';
+		// Remove extension and Calibre ID suffix
+		return filename
+			.replace(/\.(epub|pdf)$/i, '')
+			.replace(/\s*\(\d+\)\s*$/, '')
+			.trim() || 'Unknown Book';
 	}
 }

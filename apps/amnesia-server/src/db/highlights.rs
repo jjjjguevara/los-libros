@@ -443,21 +443,23 @@ impl<'a> HighlightRepository<'a> {
     ) -> Result<Vec<Highlight>> {
         let search_pattern = format!("%{}%", query);
 
-        let highlights = sqlx::query_as::<_, Highlight>(
+        let query = format!(
             r#"
-            SELECT id, book_id, user_id, cfi, text, chapter, page_percent,
-                   color, annotation, created_at, updated_at
+            SELECT {}
             FROM highlights
             WHERE (user_id = ? OR user_id IS NULL)
               AND (text LIKE ? OR annotation LIKE ?)
             ORDER BY created_at DESC
             "#,
-        )
-        .bind(user_id)
-        .bind(&search_pattern)
-        .bind(&search_pattern)
-        .fetch_all(self.pool)
-        .await?;
+            HIGHLIGHT_COLUMNS
+        );
+
+        let highlights = sqlx::query_as::<_, Highlight>(&query)
+            .bind(user_id)
+            .bind(&search_pattern)
+            .bind(&search_pattern)
+            .fetch_all(self.pool)
+            .await?;
 
         Ok(highlights)
     }

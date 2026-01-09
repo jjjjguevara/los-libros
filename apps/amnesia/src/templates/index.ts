@@ -26,11 +26,7 @@ export {
   DEFAULT_READING_SESSION_TEMPLATE,
 } from './default-templates';
 
-// Engines
-export { LiquidEngine } from './liquid-engine';
-
 // Generators
-export { NoteGenerator } from './note-generator';
 export {
   UnifiedNoteGenerator,
   type HighlightData,

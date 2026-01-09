@@ -1,7 +1,7 @@
 /**
  * Calibre Bidirectional Sync Unit Tests
  *
- * Unit tests for Liquid template transformations and schema mapping validation.
+ * Unit tests for Nunjucks template transformations and schema mapping validation.
  *
  * For E2E tests that verify actual sync operations with real files and Calibre:
  * @see src/test/integration/calibre-bidirectional-e2e.test.ts
@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { CalibreBidirectionalSync } from '../../sync/metadata/calibre-bidirectional';
-import { LiquidTemplateService } from '../../sync/metadata/liquid-template-service';
+import { NunjucksTemplateService } from '../../templates/nunjucks-engine';
 import { FieldMappingManager, DEFAULT_SCHEMA_MAPPING } from '../../sync/metadata/field-mapping';
 import type { BookMetadata } from '../../sync/metadata/types';
 import {
@@ -24,25 +24,25 @@ import {
 // ============================================================================
 
 describe('Calibre Bidirectional Sync', () => {
-  let templateService: LiquidTemplateService;
+  let templateService: NunjucksTemplateService;
   let fieldMapper: FieldMappingManager;
 
   beforeEach(() => {
-    templateService = new LiquidTemplateService();
+    templateService = new NunjucksTemplateService();
     fieldMapper = new FieldMappingManager(DEFAULT_SCHEMA_MAPPING);
   });
 
   // ==========================================================================
-  // Liquid Template Transformations
+  // Nunjucks Template Transformations
   // ==========================================================================
 
-  describe('Liquid Templates', () => {
+  describe('Nunjucks Templates', () => {
     it('should render author wikilinks correctly', () => {
       const metadata = createBookMetadata({
         authors: ['John Doe', 'Jane Smith'],
       });
 
-      const template = '{% for author in book.authors %}[[Autores/{{ author }}|{{ author }}]]{% unless forloop.last %}, {% endunless %}{% endfor %}';
+      const template = '{% for author in book.authors %}[[Autores/{{ author }}|{{ author }}]]{% if not loop.last %}, {% endif %}{% endfor %}';
       const rendered = templateService.renderWithTemplate(metadata as BookMetadata, template);
 
       expect(rendered).toContain('[[Autores/John Doe|John Doe]]');
@@ -117,7 +117,7 @@ describe('Calibre Bidirectional Sync', () => {
         lastReadAt: new Date('2024-01-15T12:00:00Z'),
       });
 
-      const template = 'Last read: {{ book.lastReadAt | date: "%Y-%m-%d" }}';
+      const template = 'Last read: {{ book.lastReadAt | date("%Y-%m-%d") }}';
       const rendered = templateService.renderWithTemplate(metadata as BookMetadata, template);
 
       // Check year-month pattern to be timezone-agnostic

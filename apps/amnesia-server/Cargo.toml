@@ -1,6 +1,6 @@
 [package]
 name = "amnesia-server"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 description = "Amnesia - Self-hosted ebook server with S3 native support"
 license = "MIT"
@@ -25,9 +25,6 @@ sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio"] }
 
 # XML parsing (OPDS, metadata.opf)
 quick-xml = { version = "0.31", features = ["serialize"] }
-
-# EPUB parsing
-rbook = "0.6"
 
 # Logging
 tracing = "0.1"
@@ -71,11 +68,18 @@ image = "0.25"
 lru = "0.12"
 parking_lot = "0.12"  # For thread-safe context pool
 
+# EPUB resource extraction (ZIP archive access)
+zip = "2.2"
+mime_guess = "2.0"
+
 # OCR
 async-trait = "0.1"
 reqwest = { version = "0.11", features = ["json"] }
 base64 = "0.21"
 tesseract = { version = "0.14", optional = true }
+
+# Bibliography generation
+hayagriva = "0.5"
 
 [features]
 default = []
@@ -85,3 +89,12 @@ ocr-tesseract = ["tesseract"]
 tower = { version = "0.4", features = ["util"] }
 axum-test = "14"
 tempfile = "3.24.0"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "document_parsing"
+harness = false
+
+[[bench]]
+name = "search_performance"
+harness = false

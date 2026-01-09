@@ -6,7 +6,7 @@
    */
   import { createEventDispatcher } from 'svelte';
   import type { Highlight, HighlightColor } from '../../library/types';
-  import { Trash2 } from 'lucide-svelte';
+  import { Trash2, Check, Circle, AlertTriangle } from 'lucide-svelte';
 
   export let highlights: Highlight[] = [];
 
@@ -79,6 +79,29 @@
       day: 'numeric',
     });
   }
+
+  // Get sync status for highlight (synced, pending, or conflict)
+  type SyncStatus = 'synced' | 'pending' | 'conflict';
+  function getSyncStatus(highlight: Highlight): SyncStatus {
+    if (highlight.syncedToDocDoctor && highlight.lastSyncedAt) {
+      const lastSyncTime = highlight.lastSyncedAt;
+      const updateTime = highlight.updatedAt.getTime();
+      if (updateTime > lastSyncTime) {
+        return 'conflict';
+      }
+      return 'synced';
+    }
+    return 'pending';
+  }
+
+  // Get sync status tooltip
+  function getSyncTooltip(status: SyncStatus): string {
+    switch (status) {
+      case 'synced': return 'Synced to Doc Doctor';
+      case 'pending': return 'Not synced';
+      case 'conflict': return 'Modified since last sync';
+    }
+  }
 </script>
 
 <div class="highlights-tab">
@@ -110,13 +133,14 @@
           {#if expandedChapters.has(chapter)}
             <div class="search-result-file-matches">
               {#each chapterHighlights as highlight (highlight.id)}
+                {@const syncStatus = getSyncStatus(highlight)}
                 <div
                   class="search-result-file-match tappable amnesia-highlight-match"
                   style="border-left: 3px solid {getHighlightColor(highlight.color)};"
                   role="button"
                   tabindex="0"
-                  on:click={() => dispatch('navigate', { cfi: highlight.cfi, text: highlight.text })}
-                  on:keydown={(e) => e.key === 'Enter' && dispatch('navigate', { cfi: highlight.cfi, text: highlight.text })}
+                  on:click={() => dispatch('navigate', { cfi: highlight.cfi, text: highlight.text, color: highlight.color })}
+                  on:keydown={(e) => e.key === 'Enter' && dispatch('navigate', { cfi: highlight.cfi, text: highlight.text, color: highlight.color })}
                 >
                   <div class="amnesia-highlight-text">
                     "{truncateText(highlight.text, 120)}"
@@ -126,13 +150,27 @@
                   {/if}
                   <div class="amnesia-highlight-footer">
                     <span class="amnesia-highlight-date">{formatDate(highlight.createdAt)}</span>
-                    <button
-                      class="amnesia-delete-btn clickable-icon"
-                      on:click|stopPropagation={() => dispatch('delete', { id: highlight.id })}
-                      title="Delete"
-                    >
-                      <Trash2 size={12} />
-                    </button>
+                    <div class="amnesia-highlight-footer-actions">
+                      <span
+                        class="amnesia-sync-indicator amnesia-sync-{syncStatus}"
+                        title={getSyncTooltip(syncStatus)}
+                      >
+                        {#if syncStatus === 'synced'}
+                          <Check size={10} />
+                        {:else if syncStatus === 'conflict'}
+                          <AlertTriangle size={10} />
+                        {:else}
+                          <Circle size={10} />
+                        {/if}
+                      </span>
+                      <button
+                        class="amnesia-delete-btn clickable-icon"
+                        on:click|stopPropagation={() => dispatch('delete', { id: highlight.id })}
+                        title="Delete"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               {/each}
@@ -243,5 +281,32 @@
 
   .amnesia-delete-btn:hover {
     color: var(--text-error);
+  }
+
+  /* Sync status indicators */
+  .amnesia-highlight-footer-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .amnesia-sync-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: help;
+  }
+
+  .amnesia-sync-synced {
+    color: var(--color-green);
+  }
+
+  .amnesia-sync-pending {
+    color: var(--text-muted);
+    opacity: 0.4;
+  }
+
+  .amnesia-sync-conflict {
+    color: var(--color-orange);
   }
 </style>

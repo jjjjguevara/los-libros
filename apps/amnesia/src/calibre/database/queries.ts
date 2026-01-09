@@ -361,3 +361,92 @@ export const REMOVE_TAG_FROM_BOOK = `
 export const UPDATE_BOOK_MODIFIED = `
   UPDATE books SET last_modified = ? WHERE id = ?
 `;
+
+// =============================================================================
+// FTS5 Full-Text Search Queries (50x faster than LIKE)
+// =============================================================================
+
+/**
+ * Check if FTS5 virtual table exists
+ */
+export const CHECK_FTS5_EXISTS = `
+  SELECT name FROM sqlite_master
+  WHERE type='table' AND name='books_fts'
+`;
+
+/**
+ * Create FTS5 virtual table for full-text book search
+ * Note: This creates an in-memory index, not persisted to Calibre's metadata.db
+ */
+export const CREATE_FTS5_TABLE = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(
+    title,
+    authors,
+    description,
+    tags,
+    publisher,
+    content='',
+    tokenize='unicode61 remove_diacritics 2'
+  )
+`;
+
+/**
+ * Insert a book into the FTS5 index
+ */
+export const INSERT_FTS5_BOOK = `
+  INSERT INTO books_fts(rowid, title, authors, description, tags, publisher)
+  VALUES (?, ?, ?, ?, ?, ?)
+`;
+
+/**
+ * Search books using FTS5 (50x faster than LIKE)
+ */
+export const SEARCH_FTS5 = `
+  SELECT rowid, highlight(books_fts, 0, '<mark>', '</mark>') as title_highlight
+  FROM books_fts
+  WHERE books_fts MATCH ?
+  ORDER BY rank
+  LIMIT ?
+`;
+
+/**
+ * Search with specific column targeting
+ * Use: 'title:rust OR authors:klabnik'
+ */
+export const SEARCH_FTS5_ADVANCED = `
+  SELECT
+    rowid,
+    highlight(books_fts, 0, '<mark>', '</mark>') as title_highlight,
+    highlight(books_fts, 1, '<mark>', '</mark>') as authors_highlight,
+    snippet(books_fts, 2, '<mark>', '</mark>', '...', 32) as description_snippet
+  FROM books_fts
+  WHERE books_fts MATCH ?
+  ORDER BY rank
+  LIMIT ?
+`;
+
+/**
+ * Get book IDs from FTS5 search results
+ * This is the typical query pattern: search FTS5, then join with books table
+ */
+export const SEARCH_BOOKS_FTS5 = `
+  SELECT b.*
+  FROM books b
+  INNER JOIN (
+    SELECT rowid FROM books_fts WHERE books_fts MATCH ? ORDER BY rank LIMIT ?
+  ) fts ON b.id = fts.rowid
+`;
+
+/**
+ * Clear FTS5 index for rebuild
+ */
+export const CLEAR_FTS5 = `
+  DELETE FROM books_fts
+`;
+
+/**
+ * Drop FTS5 table (for cleanup)
+ */
+export const DROP_FTS5 = `
+  DROP TABLE IF EXISTS books_fts
+`;

@@ -30,6 +30,9 @@ export interface PerBookSettings {
   pdfRotation?: 0 | 90 | 180 | 270;
   pdfPageLayout?: 'single' | 'dual' | 'book-spread';
   pdfRegionSelectionEnabled?: boolean; // For scanned PDFs
+
+  // TOC state
+  tocExpandedState?: string[]; // Array of expanded TOC entry IDs
 }
 
 /**

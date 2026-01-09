@@ -218,3 +218,11 @@ export type {
   HybridPdfProviderStatus,
   PdfProviderMode,
 } from './pdf';
+
+// Highlight Anchoring (unified EPUB/PDF)
+export { HighlightAnchor } from './highlight-anchor';
+export type {
+  UnifiedAnchorResult,
+  AnchorError,
+  AnchorErrorCode,
+} from './highlight-anchor';

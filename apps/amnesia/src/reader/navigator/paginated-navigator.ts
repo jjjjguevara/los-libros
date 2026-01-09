@@ -1369,6 +1369,125 @@ export class PaginatedNavigator implements Navigator {
     return this.goTo({ type: 'position', position: prevSpineIndex });
   }
 
+  /**
+   * Navigate to a specific DOM element within a chapter.
+   * This properly calculates the column position accounting for chapter offset and transform.
+   * Enhanced with:
+   * - Skip if element is already visible
+   * - Snappy fade-in/fade-out page transition for long-distance navigation
+   * @param element - Target element to navigate to
+   * @param spineIndex - Index of the chapter containing the element
+   * @param options - Navigation options
+   * @returns True if navigation was successful
+   */
+  async navigateToElement(
+    element: HTMLElement,
+    spineIndex: number,
+    options?: NavigationOptions
+  ): Promise<boolean> {
+    if (!this.container || this.isAnimating) {
+      return false;
+    }
+
+    const instant = options?.instant ?? false;
+
+    // Check if element is already visible - skip navigation if so
+    if (this.isElementVisible(element)) {
+      // Still update state and emit events
+      this.currentSpineIndex = spineIndex;
+      this.updateCurrentLocator();
+      if (this.currentLocator) {
+        this.emit('relocated', this.currentLocator);
+      }
+      // Skip the blink animation here - it will be applied by the caller with the correct color
+      return true;
+    }
+
+    // Calculate the column for this element using the correct method
+    const targetColumn = this.getColumnForElement(element, spineIndex);
+    if (targetColumn === null) {
+      console.warn('[Navigator] Could not calculate column for element');
+      return false;
+    }
+
+    // Check if we need to jump more than a few pages (major navigation)
+    const columnDiff = Math.abs(targetColumn - this.currentColumn);
+    const shouldFadeTransition = !instant && columnDiff > 3;
+
+    if (shouldFadeTransition) {
+      // Apply snappy fade-out/fade-in page transition
+      await this.navigateWithPageFade(targetColumn);
+    } else {
+      // Regular smooth navigation
+      await this.navigateToColumn(targetColumn, instant);
+    }
+
+    // Update state
+    this.currentSpineIndex = spineIndex;
+    this.currentColumn = targetColumn;
+    this.updateCurrentLocator();
+
+    // Emit events
+    this.emit('chapterVisible', { spineIndex, visible: true });
+    if (this.currentLocator) {
+      this.emit('relocated', this.currentLocator);
+    }
+
+    // Don't trigger blink animation here - the caller handles it with highlight color
+
+    return true;
+  }
+
+  /**
+   * Check if an element is currently visible in the viewport
+   */
+  private isElementVisible(element: HTMLElement): boolean {
+    const rect = element.getBoundingClientRect();
+    const containerRect = this.container?.parentElement?.getBoundingClientRect();
+    if (!containerRect) return false;
+
+    return (
+      rect.top >= containerRect.top &&
+      rect.bottom <= containerRect.bottom &&
+      rect.left >= containerRect.left &&
+      rect.right <= containerRect.right &&
+      rect.width > 0 &&
+      rect.height > 0
+    );
+  }
+
+  /**
+   * Navigate with a snappy fade-out/fade-in page transition effect.
+   * Used for long-distance navigation (e.g., jumping to a highlight in a different chapter).
+   */
+  private async navigateWithPageFade(targetColumn: number): Promise<void> {
+    if (!this.container) return;
+
+    const containerParent = this.container.parentElement;
+    if (!containerParent) return;
+
+    // Fade out (quick)
+    containerParent.style.transition = 'opacity 0.1s ease-out';
+    containerParent.style.opacity = '0';
+
+    await new Promise(r => setTimeout(r, 100));
+
+    // Jump to target position (instant, while faded out)
+    await this.navigateToColumn(targetColumn, true);
+
+    await new Promise(r => setTimeout(r, 30));
+
+    // Fade in (slightly slower for polish)
+    containerParent.style.transition = 'opacity 0.15s ease-in';
+    containerParent.style.opacity = '1';
+
+    await new Promise(r => setTimeout(r, 150));
+
+    // Clean up
+    containerParent.style.transition = '';
+    containerParent.style.opacity = '';
+  }
+
   // ============================================================================
   // Column Navigation
   // ============================================================================
@@ -1707,22 +1826,24 @@ export class PaginatedNavigator implements Navigator {
   /**
    * Get the column number containing a specific element
    */
-  private getColumnForElement(element: HTMLElement, spineIndex: number): number | null {
+  private getColumnForElement(element: HTMLElement, _spineIndex: number): number | null {
     if (!this.container || this.columnWidth <= 0) return null;
 
-    const chapterOffset = this.chapterColumnOffsets.get(spineIndex) ?? 0;
     const pageWidth = this.columnWidth + this.gap;
 
     // Get element's position relative to the container
+    // Note: Both rects already include the current transform, so they cancel out
+    // when we subtract - no need to account for transform separately
     const containerRect = this.container.getBoundingClientRect();
     const elementRect = element.getBoundingClientRect();
 
-    // Get current transform offset (negative value)
-    const currentTransformX = this.getCurrentTransformX();
-    const elementLeft = elementRect.left - containerRect.left - currentTransformX;
-    const elementColumn = Math.floor(elementLeft / pageWidth);
+    // Calculate element's position relative to container origin
+    // This gives us the global column directly (no need to add chapter offset
+    // since elementLeft is already from container origin, not chapter origin)
+    const elementLeft = elementRect.left - containerRect.left;
+    const globalColumn = Math.floor(elementLeft / pageWidth);
 
-    return chapterOffset + elementColumn;
+    return globalColumn;
   }
 
   /**

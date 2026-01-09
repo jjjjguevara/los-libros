@@ -146,6 +146,10 @@
     color: var(--text-muted);
   }
 
+  .hud-status-blue {
+    color: var(--color-blue);
+  }
+
   /* Server status colors */
   .hud-server-green {
     color: var(--color-green);
@@ -161,5 +165,9 @@
 
   .hud-server-gray {
     color: var(--text-muted);
+  }
+
+  .hud-server-blue {
+    color: var(--color-blue);
   }
 </style>

@@ -171,11 +171,12 @@ export class SelectionHandler {
 
   /**
    * Get position for selection popup - uses actual pointer position for accuracy
-   * Returns position relative to the iframe document - the renderer will translate to viewport coords
+   * Returns viewport coordinates (clientX/clientY from mouse event)
    */
   private getSelectionPosition(range: Range): { x: number; y: number } {
     // Use the actual pointer position captured on mouseup/touchend
     // This gives us the exact position where the user released, like a context menu
+    // clientX/clientY are already in viewport coordinates
     return { ...this.lastPointerPosition };
   }
 

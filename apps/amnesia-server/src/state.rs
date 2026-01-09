@@ -5,7 +5,7 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 
 use crate::config::Config;
-use crate::epub::BookCache;
+use crate::document::{CacheConfig, DocumentCache};
 use crate::pdf::PdfCache;
 use crate::storage::S3Client;
 
@@ -19,7 +19,9 @@ struct AppStateInner {
     pub config: Config,
     pub s3_client: S3Client,
     pub db: SqlitePool,
-    pub book_cache: BookCache,
+    /// Unified document cache for EPUB and PDF (new architecture)
+    pub document_cache: DocumentCache,
+    /// Legacy PDF cache (for backward compatibility with routes/pdf.rs)
     pub pdf_cache: PdfCache,
 }
 
@@ -31,7 +33,7 @@ impl AppState {
                 config,
                 s3_client,
                 db,
-                book_cache: BookCache::new(),
+                document_cache: DocumentCache::new(CacheConfig::default()),
                 pdf_cache: PdfCache::new(),
             }),
         }
@@ -52,12 +54,12 @@ impl AppState {
         &self.inner.db
     }
 
-    /// Get the book cache
-    pub fn book_cache(&self) -> &BookCache {
-        &self.inner.book_cache
+    /// Get the unified document cache (for new /api/v1/documents API)
+    pub fn document_cache(&self) -> &DocumentCache {
+        &self.inner.document_cache
     }
 
-    /// Get the PDF cache
+    /// Get the PDF cache (legacy, for backward compatibility)
     pub fn pdf_cache(&self) -> &PdfCache {
         &self.inner.pdf_cache
     }

@@ -114,6 +114,19 @@
   import { ShadowDOMRenderer } from '../shadow-dom-renderer';
   import { USE_SHADOW_DOM_RENDERER } from '../renderer-adapter';
 
+  // Import reader mode for Source/Live toggle
+  import {
+    type ReaderMode,
+    type ReaderModeConfig,
+    DEFAULT_MODE_CONFIG,
+    toggleMode as toggleReaderMode,
+    getEffectiveSettings,
+    MODE_METADATA,
+  } from '../modes';
+
+  // Import Doc Doctor types for knowledge gap creation
+  import type { StubType } from '../../integrations/doc-doctor-bridge';
+
   /**
    * Resolve chapter name from spine item using multiple matching strategies.
    * Falls back to cleaned-up filename or page percentage if no ToC match found.
@@ -225,11 +238,11 @@
    * Uses ShadowDOMRenderer's navigateToHighlight for Shadow DOM architecture,
    * falls back to iframe-based navigation for legacy renderer.
    */
-  export async function navigateToHighlight(cfi: string, text: string): Promise<void> {
+  export async function navigateToHighlight(cfi: string, text: string, color?: HighlightColor): Promise<void> {
     // Check if renderer is ShadowDOMRenderer (has navigateToHighlight method)
     const shadowRenderer = renderer as unknown as ShadowDOMRenderer;
     if (typeof shadowRenderer.navigateToHighlight === 'function') {
-      await shadowRenderer.navigateToHighlight(cfi, text);
+      await shadowRenderer.navigateToHighlight(cfi, text, color);
       return;
     }
 
@@ -1003,6 +1016,14 @@
   // Flag to ignore clicks immediately after showing popup (prevents click-through from selection)
   let ignoreNextContainerClick = false;
 
+  // Doc Doctor integration state
+  $: docDoctorConnected = plugin.docDoctorBridge?.isConnected() ?? false;
+
+  // Source/Live reader mode (M4 foundation)
+  let readerModeConfig: ReaderModeConfig = { ...DEFAULT_MODE_CONFIG };
+  $: effectiveSettings = getEffectiveSettings(readerModeConfig);
+  $: currentModeLabel = MODE_METADATA[readerModeConfig.mode].label;
+
   // Debug: track popup state changes
   $: console.log('[Svelte Reactive] Popup state: showHighlightPopup=' + showHighlightPopup + ', hasPending=' + !!pendingSelection + ', hasExisting=' + !!selectedExistingHighlight + ', loading=' + loading);
 
@@ -1045,17 +1066,24 @@
   }
 
   /**
-   * Update the sidebar with the book's ToC
+   * Update the sidebar with the book's ToC and spine items
    */
   function updateSidebarToc(): void {
-    if (!toc || !plugin) return;
+    if (!toc || !plugin || !book) return;
+
+    // Get initial expanded state from book settings
+    let initialExpandedState: string[] = [];
+    if (plugin.bookSettingsStore && highlightBookId) {
+      const bookSettings = plugin.bookSettingsStore.getBookSettings(highlightBookId);
+      initialExpandedState = bookSettings?.tocExpandedState ?? [];
+    }
 
     // Find the sidebar view and update its ToC
     const leaves = plugin.app.workspace.getLeavesOfType('amnesia-book-sidebar');
     for (const leaf of leaves) {
       const view = leaf.view as any;
       if (view.setToc) {
-        view.setToc(toc);
+        view.setToc(toc, book.spine, initialExpandedState);
       }
     }
   }
@@ -1686,6 +1714,9 @@
       currentChapter = resolveChapterName(spineItem, toc, progress);
     }
 
+    // Update sidebar with current location for TOC progress tracking
+    updateSidebarLocation(location);
+
     // Close highlight popup on scroll/navigation to prevent stale positioning
     if (showHighlightPopup) {
       closePopup();
@@ -1693,6 +1724,34 @@
 
     // Trigger debounced progress save on each page turn
     debouncedSaveProgress();
+  }
+
+  /**
+   * Update sidebar with current location for TOC progress tracking
+   */
+  function updateSidebarLocation(location: ReadingLocation): void {
+    if (!plugin || !book) return;
+
+    // Create a Locator from ReadingLocation for the sidebar
+    const locator = {
+      href: location.href,
+      locations: {
+        progression: location.progressionInChapter ?? location.percentage / 100,
+        totalProgression: location.percentage / 100,
+        position: location.spineIndex,
+        cfi: location.cfi,
+      },
+      title: currentChapter,
+    };
+
+    // Find the sidebar view and update its location
+    const leaves = plugin.app.workspace.getLeavesOfType('amnesia-book-sidebar');
+    for (const leaf of leaves) {
+      const view = leaf.view as any;
+      if (view.updateLocation) {
+        view.updateLocation(locator);
+      }
+    }
   }
 
   function handleRendered(data: { spineIndex: number; href: string }) {
@@ -2035,7 +2094,7 @@
   }
 
   // Highlights
-  async function handleCreateHighlight(event: CustomEvent<{ color: HighlightColor; annotation?: string; tags?: string[]; type?: 'highlight' | 'underline' }>) {
+  async function handleCreateHighlight(event: CustomEvent<{ color: HighlightColor; annotation?: string; tags?: string[]; type?: 'highlight' | 'underline'; category?: StubType }>) {
     if (!pendingSelection) return;
 
     // Clear text selection IMMEDIATELY when user clicks to create highlight
@@ -2116,6 +2175,40 @@
     closePopup();
 
     if (readerSettings.hapticFeedback) HapticFeedback.light();
+  }
+
+  async function handleCreateKnowledgeGap(event: CustomEvent<{ stubType: StubType; text: string; color: HighlightColor }>) {
+    const { stubType, text } = event.detail;
+    const bridge = plugin.docDoctorBridge;
+
+    if (!bridge?.isConnected() || !loadedBook) {
+      console.warn('[ServerReader] Cannot create knowledge gap: Doc Doctor not connected');
+      return;
+    }
+
+    try {
+      // Get the book note path for linking
+      const notePath = getCalibreBookNotePath(loadedBook.metadata, plugin);
+
+      if (notePath) {
+        // Create stub in Doc Doctor
+        await bridge.createStub({
+          type: stubType,
+          description: text.slice(0, 200),
+          filePath: notePath,
+          source: {
+            plugin: 'amnesia',
+          },
+        });
+
+        console.log('[ServerReader] Created knowledge gap stub:', stubType);
+      }
+    } catch (error) {
+      console.error('[ServerReader] Failed to create knowledge gap:', error);
+    }
+
+    // Note: The highlight is created by the 'highlight' event that HighlightPopup
+    // also dispatches when creating a knowledge gap. No need to create it here.
   }
 
   async function handleUpdateHighlight(event: CustomEvent<{ id: string; color?: HighlightColor; annotation?: string; tags?: string[]; locked?: boolean }>) {
@@ -2342,8 +2435,15 @@
   }
 
   // Handle notebook sidebar navigation
-  function handleNotebookNavigate(event: CustomEvent<{ cfi: string }>) {
-    renderer?.display({ type: 'cfi', cfi: event.detail.cfi });
+  function handleNotebookNavigate(event: CustomEvent<{ cfi: string; text?: string }>) {
+    const { cfi, text } = event.detail;
+    // Use text-based navigation for highlights (works with Shadow DOM)
+    if (text) {
+      navigateToHighlight(cfi, text);
+    } else {
+      // Fallback to CFI for bookmarks/notes
+      renderer?.display({ type: 'cfi', cfi });
+    }
     if (readerSettings.hapticFeedback) HapticFeedback.light();
   }
 
@@ -2441,6 +2541,21 @@
     if (readerSettings.hapticFeedback) HapticFeedback.medium();
   }
 
+  /**
+   * Toggle Source/Live mode (Cmd/Ctrl+E)
+   * Foundation for analytical vs immersive reading modes
+   */
+  function toggleSourceLiveMode() {
+    const previousMode = readerModeConfig.mode;
+    readerModeConfig = toggleReaderMode(readerModeConfig);
+    console.log('[ServerReader] Source/Live mode toggle:', previousMode, '→', readerModeConfig.mode);
+
+    // TODO: Apply effective settings to renderer when feature is fully implemented
+    // For now, just update the state which triggers reactivity
+
+    if (readerSettings.hapticFeedback) HapticFeedback.light();
+  }
+
   // ==========================================================================
   // PDF-specific handlers
   // ==========================================================================
@@ -2496,6 +2611,40 @@
     if (!isPdf || !renderer) return;
     const newScale = Math.max(plugin.settings.pdf.scale - 0.25, 0.25);
     handlePdfSettingsChange({ detail: { settings: { scale: newScale } } } as CustomEvent);
+  }
+
+  // Page input state
+  let pageInputValue = '';
+  let isPageInputEditing = false;
+  let pageInputEl: HTMLInputElement;
+
+  function handlePageCountClick() {
+    isPageInputEditing = true;
+    pageInputValue = String(pdfCurrentPage);
+    // Focus the input after it renders
+    tick().then(() => pageInputEl?.focus());
+  }
+
+  function handlePdfPageInputBlur() {
+    isPageInputEditing = false;
+    pageInputValue = '';
+  }
+
+  function handlePdfPageInputKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      const targetPage = parseInt(pageInputValue, 10);
+      if (!isNaN(targetPage) && targetPage >= 1 && targetPage <= pdfTotalPages) {
+        // Navigate to the page (position is 1-indexed in our display)
+        renderer?.display({ type: 'position', position: targetPage });
+        // Update page count immediately
+        pdfCurrentPage = targetPage;
+        if (readerSettings.hapticFeedback) HapticFeedback.medium();
+      }
+      // Blur the input after navigation
+      (event.target as HTMLInputElement)?.blur();
+    } else if (event.key === 'Escape') {
+      (event.target as HTMLInputElement)?.blur();
+    }
   }
 
   function handlePdfFitWidth() {
@@ -2647,6 +2796,14 @@
       case 'M':
         if (!event.metaKey && !event.ctrlKey && !loading) {
           toggleReadingMode();
+        }
+        break;
+      case 'e':
+      case 'E':
+        // Cmd/Ctrl+E: Toggle Source/Live mode (matches Obsidian's pattern)
+        if ((event.metaKey || event.ctrlKey) && !loading) {
+          event.preventDefault();
+          toggleSourceLiveMode();
         }
         break;
     }
@@ -2815,7 +2972,29 @@
         <button class="icon-button" on:click|stopPropagation={() => openBookSidebar('toc')} title="Table of Contents (T)">
           <List size={20} />
         </button>
-        <span class="chapter-title">{currentChapter || bookTitle}</span>
+        {#if isPdf}
+          {#if isPageInputEditing}
+            <input
+              bind:this={pageInputEl}
+              type="text"
+              class="page-input"
+              value={pageInputValue}
+              on:blur={handlePdfPageInputBlur}
+              on:input={(e) => pageInputValue = e.currentTarget.value}
+              on:keydown={handlePdfPageInputKeydown}
+              on:click|stopPropagation
+              inputmode="numeric"
+              pattern="[0-9]*"
+            />
+            <span class="page-label">/ {pdfTotalPages}</span>
+          {:else}
+            <button class="page-count-btn" on:click|stopPropagation={handlePageCountClick} title="Click to go to page">
+              Page {pdfCurrentPage} of {pdfTotalPages}
+            </button>
+          {/if}
+        {:else}
+          <span class="chapter-title">{currentChapter || bookTitle}</span>
+        {/if}
       </div>
       <div class="topbar-center">
         {#if isPdf}
@@ -3148,12 +3327,14 @@
       existingHighlight={selectedExistingHighlight}
       position={highlightPopupPosition}
       existingTags={getAllTags()}
+      {docDoctorConnected}
       on:highlight={handleCreateHighlight}
       on:updateHighlight={handleUpdateHighlight}
       on:deleteHighlight={handleDeleteHighlight}
       on:bookmark={handleBookmarkFromPopup}
       on:copyText={handleCopyText}
       on:copyLink={handleCopyLink}
+      on:createKnowledgeGap={handleCreateKnowledgeGap}
       on:close={closePopup}
     />
   </Portal>
@@ -3170,11 +3351,32 @@
 {/if}
 
 <style>
+  /* Hide Obsidian's view header - our topbar replaces it */
+  :global(.workspace-leaf-content:has(.amnesia-reader-view) > .view-header) {
+    display: none !important;
+  }
+
+  /* Make view-content fill the entire leaf without gaps */
+  :global(.workspace-leaf-content:has(.amnesia-reader-view)) {
+    padding: 0 !important;
+  }
+
+  :global(.workspace-leaf-content:has(.amnesia-reader-view) > .view-content) {
+    height: 100% !important;
+    padding: 0 !important;
+    position: relative !important;
+  }
+
   .amnesia-reader.server-reader {
     display: flex;
     flex-direction: column;
     height: 100%;
-    position: relative;
+    width: 100%;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     background: var(--background-primary);
     overflow: hidden;
   }
@@ -3233,20 +3435,27 @@
     to { transform: rotate(360deg); }
   }
 
-  /* Top Bar */
+  /* Top Bar - Obsidian-style with glass transparency */
   .reader-topbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.5rem 1rem;
-    background: var(--background-secondary);
-    border-bottom: 1px solid var(--background-modifier-border);
+    padding: 4px 12px;
+    background: linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0.7) 0%,
+      rgba(0, 0, 0, 0.5) 100%
+    );
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
     transition: opacity 0.2s, transform 0.2s;
     z-index: 10;
     position: absolute;
     top: 0;
     left: 0;
     right: 0;
+    height: 36px;
   }
 
   .reader-topbar.hidden {
@@ -3257,7 +3466,7 @@
   .topbar-left {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 4px;
     flex: 1;
     min-width: 0;
   }
@@ -3265,64 +3474,109 @@
   .topbar-center {
     display: flex;
     align-items: center;
-    gap: 0.25rem;
-    padding: 0 1rem;
+    gap: 2px;
+    padding: 0 8px;
   }
 
   .font-btn {
     font-weight: 600;
-    font-size: 0.75rem;
-    min-width: 32px;
+    font-size: 0.7rem;
+    min-width: 26px;
   }
 
   .mode-toggle {
-    margin-left: 0.5rem;
-    padding: 0.35rem;
+    margin-left: 4px;
+    padding: 4px 6px;
     border-radius: 4px;
-    transition: background-color 0.2s, opacity 0.2s;
+    transition: background-color 0.15s, opacity 0.15s;
   }
 
   .mode-toggle:disabled {
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: not-allowed;
   }
 
   .mode-toggle:hover:not(:disabled) {
-    background: var(--background-modifier-hover);
+    background: rgba(255, 255, 255, 0.08);
   }
 
   .font-size-display,
   .zoom-display {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.5);
+    min-width: 32px;
+    text-align: center;
+  }
+
+  /* Page count text (default state - clickable but looks like text) */
+  .page-count-btn {
+    background: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    color: rgba(255, 255, 255, 0.7);
     font-size: 0.75rem;
-    color: var(--text-muted);
-    min-width: 36px;
+    padding: 0;
+    margin: 0;
+    cursor: text;
+    white-space: nowrap;
+  }
+
+  .page-count-btn:hover {
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  /* Page input for PDF navigation (edit mode) */
+  .page-label {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+
+  .page-input {
+    width: 28px;
+    padding: 0;
+    margin: 0;
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    background: transparent !important;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.75rem;
     text-align: center;
   }
 
   .topbar-right {
     display: flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: 2px;
   }
 
   .chapter-title {
-    font-size: 0.875rem;
+    font-size: 0.8rem;
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 200px;
+    max-width: 180px;
+    opacity: 0.85;
   }
 
-  /* Full-width Progress Bar */
+  /* Full-width Progress Bar - Obsidian-style with glass transparency */
   .reader-progress-bar {
     position: absolute;
     bottom: 0;
     left: 0;
     right: 0;
-    padding: 0.75rem 1rem;
-    background: var(--background-secondary);
-    border-top: 1px solid var(--background-modifier-border);
+    padding: 8px 16px;
+    background: linear-gradient(
+      to top,
+      rgba(0, 0, 0, 0.7) 0%,
+      rgba(0, 0, 0, 0.5) 100%
+    );
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
     transition: opacity 0.2s, transform 0.2s;
     z-index: 10;
   }
@@ -3335,68 +3589,81 @@
   .progress-nav {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 12px;
   }
 
   .nav-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
-    background: var(--background-primary);
-    border: 1px solid var(--background-modifier-border);
-    border-radius: 50%;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    padding: 6px;
+    border-radius: 4px;
     cursor: pointer;
-    color: var(--text-normal);
-    transition: all 0.2s ease;
+    color: rgba(255, 255, 255, 0.85);
+    transition: color 0.15s, background-color 0.15s;
     flex-shrink: 0;
   }
 
   .nav-btn:hover {
-    background: var(--background-modifier-hover);
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: #fff;
+  }
+
+  .nav-btn:focus {
+    outline: none !important;
+    box-shadow: none !important;
   }
 
   .progress-track-wrapper {
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 2px;
     cursor: pointer;
   }
 
   .progress-track {
-    height: 6px;
-    background: var(--background-modifier-border);
-    border-radius: 3px;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
     overflow: hidden;
   }
 
   .progress-fill {
     height: 100%;
     background: var(--interactive-accent);
-    border-radius: 3px;
+    border-radius: 2px;
     transition: width 0.2s ease;
   }
 
   .progress-info {
-    font-size: 0.75rem;
-    color: var(--text-muted);
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.5);
     text-align: center;
   }
 
-  /* More menu dropdown */
+  /* More menu dropdown - glass transparency */
   .more-menu {
     position: absolute;
-    top: 48px;
-    right: 1rem;
-    background: var(--background-primary);
-    border: 1px solid var(--background-modifier-border);
+    top: 40px;
+    right: 12px;
+    background: linear-gradient(
+      135deg,
+      rgba(20, 20, 20, 0.95) 0%,
+      rgba(12, 12, 12, 0.92) 100%
+    );
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 8px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     z-index: 200;
-    min-width: 180px;
-    padding: 0.5rem 0;
+    min-width: 170px;
+    padding: 4px 0;
     animation: fadeIn 0.15s ease-out;
   }
 
@@ -3408,64 +3675,73 @@
   .menu-item {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 10px;
     width: 100%;
-    padding: 0.625rem 1rem;
+    padding: 8px 12px;
     background: none;
     border: none;
     cursor: pointer;
-    color: var(--text-normal);
-    font-size: 0.875rem;
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.8rem;
     text-align: left;
-    transition: background 0.1s;
+    transition: background 0.1s, color 0.1s;
   }
 
   .menu-item:hover {
-    background: var(--background-modifier-hover);
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.95);
   }
 
   .menu-divider {
     height: 1px;
-    background: var(--background-modifier-border);
-    margin: 0.5rem 0;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 4px 0;
   }
 
   .menu-badge {
     margin-left: auto;
-    font-size: 0.7rem;
-    background: var(--background-modifier-border);
-    color: var(--text-muted);
+    font-size: 0.65rem;
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.6);
     padding: 2px 6px;
     border-radius: 10px;
   }
 
   .icon-button {
-    background: none;
-    border: none;
-    padding: 0.5rem;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    padding: 6px;
     cursor: pointer;
-    color: var(--text-muted);
+    color: rgba(255, 255, 255, 0.85);
     border-radius: 4px;
     display: flex;
     align-items: center;
     justify-content: center;
+    transition: color 0.15s, background-color 0.15s;
   }
 
   .icon-button:hover {
-    background: var(--background-modifier-hover);
-    color: var(--text-normal);
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: #fff;
+  }
+
+  .icon-button:focus {
+    outline: none !important;
+    box-shadow: none !important;
   }
 
   .icon-button.active {
-    background: var(--interactive-accent);
+    background: var(--interactive-accent) !important;
     color: var(--text-on-accent);
   }
 
   .toolbar-separator {
     width: 1px;
-    height: 20px;
-    background: var(--background-modifier-border);
-    margin: 0 8px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.12);
+    margin: 0 6px;
   }
 
   /* Display mode dropdown */
@@ -3490,12 +3766,18 @@
     left: 50%;
     transform: translateX(-50%);
     margin-top: 4px;
-    min-width: 160px;
-    background: var(--background-primary);
-    border: 1px solid var(--background-modifier-border);
+    min-width: 150px;
+    background: linear-gradient(
+      135deg,
+      rgba(20, 20, 20, 0.95) 0%,
+      rgba(12, 12, 12, 0.92) 100%
+    );
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 6px;
     padding: 4px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     z-index: 200;
     animation: fadeIn 0.15s ease-out;
   }
@@ -3505,18 +3787,20 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 8px 12px;
+    padding: 6px 10px;
     background: transparent;
     border: none;
     border-radius: 4px;
-    color: var(--text-normal);
-    font-size: 13px;
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 12px;
     cursor: pointer;
     text-align: left;
+    transition: background 0.1s, color 0.1s;
   }
 
   .dropdown-item:hover {
-    background: var(--background-modifier-hover);
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.95);
   }
 
   .dropdown-item.active {

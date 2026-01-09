@@ -25,14 +25,15 @@ export { SyncEngine, type SyncResult } from './sync/sync-engine';
 export { ChangeTracker } from './sync/change-tracker';
 export { ConflictResolver, type Conflict, type ResolvedConflict } from './sync/conflict-resolver';
 
-// Generators
+// Incremental Sync
 export {
-  BookNoteGenerator,
-  AuthorIndexGenerator,
-  SeriesIndexGenerator,
-  ShelfIndexGenerator,
-  BaseFileGenerator,
-} from './generators';
+  IncrementalSyncManager,
+  createIncrementalSyncManager,
+  type BookHash,
+  type IncrementalSyncState,
+  type ChangeSet,
+  type IncrementalSyncResult,
+} from './incremental-sync';
 
 // Service
 export { CalibreService, type ConnectionMode } from './calibre-service';

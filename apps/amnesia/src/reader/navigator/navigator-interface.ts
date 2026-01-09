@@ -391,6 +391,24 @@ export interface Navigator {
    * Get viewport dimensions
    */
   getViewportDimensions(): { width: number; height: number };
+
+  // --------------------------------
+  // Element Navigation Methods
+  // --------------------------------
+
+  /**
+   * Navigate to a specific DOM element within a chapter
+   * This properly calculates the column position accounting for chapter offset
+   * @param element - Target element to navigate to
+   * @param spineIndex - Index of the chapter containing the element
+   * @param options - Navigation options
+   * @returns True if navigation was successful
+   */
+  navigateToElement(
+    element: HTMLElement,
+    spineIndex: number,
+    options?: NavigationOptions
+  ): Promise<boolean>;
 }
 
 // ============================================================================

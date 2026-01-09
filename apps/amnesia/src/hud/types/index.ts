@@ -81,7 +81,7 @@ export type AmnesiaHUDAction =
 
 import type { Readable } from 'svelte/store';
 
-export type StatusBarColor = 'green' | 'yellow' | 'red' | 'gray';
+export type StatusBarColor = 'green' | 'yellow' | 'red' | 'gray' | 'blue';
 
 /**
  * Simple status bar content (used internally by Amnesia standalone HUD)

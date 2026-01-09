@@ -96,15 +96,81 @@ export class PdfTextLayer {
     for (const item of textLayer.items) {
       if (!item.text.trim()) continue;
 
-      const span = document.createElement('span');
-      span.textContent = item.text;
+      // Use character-level positioning when available for precise text selection
+      if (item.charPositions && item.charPositions.length > 0) {
+        this.renderCharacterLevel(
+          item,
+          rotation,
+          scaleX,
+          scaleY,
+          displayWidth,
+          displayHeight
+        );
+      } else {
+        // Fallback: word-level rendering
+        this.renderWordLevel(
+          item,
+          rotation,
+          scaleX,
+          scaleY,
+          displayWidth,
+          displayHeight
+        );
+      }
+    }
+  }
 
-      // Calculate transformed position
+  /**
+   * Render text item with character-level positioning for precise selection
+   */
+  private renderCharacterLevel(
+    item: PdfTextItem,
+    rotation: number,
+    scaleX: number,
+    scaleY: number,
+    displayWidth: number,
+    displayHeight: number
+  ): void {
+    for (const char of item.charPositions!) {
+      if (char.char === ' ') {
+        // Skip spaces but maintain selection flow with a small invisible span
+        const spacer = document.createElement('span');
+        spacer.textContent = ' ';
+        const pos = this.transformPosition(
+          char.x,
+          char.y,
+          char.width,
+          char.height,
+          rotation,
+          scaleX,
+          scaleY,
+          displayWidth,
+          displayHeight
+        );
+        spacer.style.cssText = `
+          position: absolute;
+          left: ${pos.x}px;
+          top: ${pos.y}px;
+          width: ${pos.width}px;
+          height: ${pos.height}px;
+          font-size: ${char.fontSize * Math.min(scaleX, scaleY)}px;
+          font-family: ${char.fontName || 'sans-serif'};
+          white-space: pre;
+          transform-origin: 0 0;
+          ${pos.transform ? `transform: ${pos.transform};` : ''}
+        `;
+        this.textContainer.appendChild(spacer);
+        continue;
+      }
+
+      const span = document.createElement('span');
+      span.textContent = char.char;
+
       const pos = this.transformPosition(
-        item.x,
-        item.y,
-        item.width,
-        item.height,
+        char.x,
+        char.y,
+        char.width,
+        char.height,
         rotation,
         scaleX,
         scaleY,
@@ -118,8 +184,8 @@ export class PdfTextLayer {
         top: ${pos.y}px;
         width: ${pos.width}px;
         height: ${pos.height}px;
-        font-size: ${item.fontSize * Math.min(scaleX, scaleY)}px;
-        font-family: sans-serif;
+        font-size: ${char.fontSize * Math.min(scaleX, scaleY)}px;
+        font-family: ${char.fontName || 'sans-serif'};
         white-space: pre;
         transform-origin: 0 0;
         ${pos.transform ? `transform: ${pos.transform};` : ''}
@@ -127,6 +193,49 @@ export class PdfTextLayer {
 
       this.textContainer.appendChild(span);
     }
+  }
+
+  /**
+   * Render text item at word level (fallback when character positions unavailable)
+   */
+  private renderWordLevel(
+    item: PdfTextItem,
+    rotation: number,
+    scaleX: number,
+    scaleY: number,
+    displayWidth: number,
+    displayHeight: number
+  ): void {
+    const span = document.createElement('span');
+    span.textContent = item.text;
+
+    // Calculate transformed position
+    const pos = this.transformPosition(
+      item.x,
+      item.y,
+      item.width,
+      item.height,
+      rotation,
+      scaleX,
+      scaleY,
+      displayWidth,
+      displayHeight
+    );
+
+    span.style.cssText = `
+      position: absolute;
+      left: ${pos.x}px;
+      top: ${pos.y}px;
+      width: ${pos.width}px;
+      height: ${pos.height}px;
+      font-size: ${item.fontSize * Math.min(scaleX, scaleY)}px;
+      font-family: sans-serif;
+      white-space: pre;
+      transform-origin: 0 0;
+      ${pos.transform ? `transform: ${pos.transform};` : ''}
+    `;
+
+    this.textContainer.appendChild(span);
   }
 
   /**

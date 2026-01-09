@@ -1,6 +1,18 @@
 //! PDF API endpoints
 //!
-//! Provides REST API for PDF document management:
+//! **DEPRECATED**: This API is deprecated in favor of `/api/v1/documents`.
+//! See `routes/documents.rs` for the unified document API that handles both PDF and EPUB.
+//!
+//! Migration guide:
+//! - `GET /api/v1/pdf/:id` → `GET /api/v1/documents/:id`
+//! - `GET /api/v1/pdf/:id/pages/:page` → `GET /api/v1/documents/:id/items/:index/render`
+//! - `GET /api/v1/pdf/:id/pages/:page/text` → `GET /api/v1/documents/:id/items/:index/text`
+//! - `GET /api/v1/pdf/:id/pages/:page/thumbnail` → `GET /api/v1/documents/:id/items/:index/thumbnail`
+//! - `GET /api/v1/pdf/:id/search` → `GET /api/v1/documents/:id/search`
+//!
+//! PDF-specific endpoints (OCR, forms) have no equivalent in the documents API yet.
+//!
+//! Legacy endpoints - provides REST API for PDF document management:
 //! - Upload PDFs
 //! - List PDFs
 //! - Get PDF metadata and TOC
@@ -11,7 +23,8 @@
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Json, Router,
@@ -19,7 +32,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::db::{CreateHighlight, Highlight, HighlightRepository, UpdateHighlight};
-use crate::epub::TocEntry;
+use crate::document::TocEntry;
 use crate::ocr::{OcrRect, OcrRequest, OcrResult, OcrService, OcrServiceConfig};
 use crate::pdf::{
     FormField, FormInfo, ImageFormat, PageRenderRequest, ParsedPdf, PdfMetadata, PdfSearchResult,
@@ -164,7 +177,46 @@ async fn validate_page_range(
     Ok(pdf)
 }
 
+/// Middleware to add deprecation headers to all responses
+///
+/// Adds RFC-compliant deprecation headers:
+/// - `Deprecation`: RFC 9745 format (Unix timestamp with @ prefix)
+/// - `Sunset`: RFC 8594 format (HTTP-date)
+/// - `Link`: RFC 8288 alternate relation to successor API
+async fn add_deprecation_header(
+    request: axum::http::Request<Body>,
+    next: Next,
+) -> Response {
+    let mut response = next.run(request).await;
+
+    // Deprecation header (RFC 9745) - Unix timestamp for June 1, 2026 00:00:00 UTC
+    // Indicates when the API was deprecated
+    response.headers_mut().insert(
+        "Deprecation",
+        HeaderValue::from_static("@1767225600"),
+    );
+
+    // Sunset header (RFC 8594) - HTTP-date format (RFC 7231)
+    // Indicates when the API will be removed
+    response.headers_mut().insert(
+        "Sunset",
+        HeaderValue::from_static("Mon, 01 Jun 2026 00:00:00 GMT"),
+    );
+
+    // Link header (RFC 8288) - Points to replacement API
+    // Using rel="alternate" as this is a different resource representation
+    response.headers_mut().insert(
+        "Link",
+        HeaderValue::from_static("</api/v1/documents>; rel=\"alternate\""),
+    );
+
+    response
+}
+
 /// Create the PDF router
+///
+/// **DEPRECATED**: Use `/api/v1/documents` instead.
+/// This router adds deprecation headers to all responses.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_pdfs).post(upload_pdf))
@@ -192,6 +244,8 @@ pub fn router() -> Router<AppState> {
         .route("/:id/forms/signatures", get(list_signatures))
         // Allow up to 200MB uploads for large PDFs
         .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+        // Add deprecation headers to all responses
+        .layer(middleware::from_fn(add_deprecation_header))
 }
 
 /// List all cached PDFs

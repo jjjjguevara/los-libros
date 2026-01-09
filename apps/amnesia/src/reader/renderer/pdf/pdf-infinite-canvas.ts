@@ -227,6 +227,10 @@ export class PdfInfiniteCanvas {
   private onSelectionCallback?: (page: number, text: string, rects: DOMRect[]) => void;
   private onHighlightClickCallback?: (annotationId: string, position: { x: number; y: number }) => void;
 
+  // Page update debounce during scroll
+  private pageUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
+  private lastReportedPage = 0;
+
   // Spatial prefetcher for grid-based modes (auto-grid, canvas)
   private spatialPrefetcher = new SpatialPrefetcher();
 
@@ -2084,7 +2088,30 @@ export class PdfInfiniteCanvas {
     this.applyTransform();
     this.updateVisiblePages();
 
+    // Update page counter during scroll (debounced)
+    this.debouncedPageUpdate();
+
     this.lastPointerPosition = { x: e.clientX, y: e.clientY };
+  }
+
+  /**
+   * Debounced page update during scrolling - updates every 100ms max
+   */
+  private debouncedPageUpdate(): void {
+    const currentPage = this.getCurrentPage();
+
+    // Only update if page actually changed
+    if (currentPage !== this.lastReportedPage) {
+      this.lastReportedPage = currentPage;
+
+      // Clear any pending timeout
+      if (this.pageUpdateTimeout) {
+        clearTimeout(this.pageUpdateTimeout);
+      }
+
+      // Immediately notify of page change
+      this.onPageChangeCallback?.(currentPage);
+    }
   }
 
   private handlePointerUp(e: PointerEvent): void {
@@ -2215,6 +2242,9 @@ export class PdfInfiniteCanvas {
       // Defer visible pages update to next frame to keep scroll smooth
       this.scheduleVisiblePagesUpdate();
 
+      // Update page counter during wheel scroll
+      this.debouncedPageUpdate();
+
       // CRITICAL: Schedule re-render at correct scale when scrolling at high zoom
       // Uses shorter debounce (32ms) than zoom (150ms) for responsive scroll rendering
       if (this.camera.z > this.tileZoomThreshold) {
@@ -2299,6 +2329,9 @@ export class PdfInfiniteCanvas {
       this.constrainCameraPosition();
       this.applyTransform();
       this.updateVisiblePages();
+
+      // Update page counter during inertia
+      this.debouncedPageUpdate();
 
       // Decay velocity
       this.velocity = {
